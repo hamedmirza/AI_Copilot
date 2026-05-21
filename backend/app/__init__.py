@@ -1,0 +1,1 @@
+"""AI Copilot backend application."""
