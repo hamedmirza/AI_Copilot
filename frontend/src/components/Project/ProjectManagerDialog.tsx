@@ -28,9 +28,12 @@ interface Props {
   onProjectsChanged?: (opts?: { selectId?: string; clearWorkspace?: boolean }) => void
 }
 
+type SourceType = 'workspace' | 'git'
+
 interface FormState {
   name: string
   description: string
+  source_type: SourceType
   source_repo_spec: string
   validation_profile: string
 }
@@ -38,13 +41,25 @@ interface FormState {
 const emptyForm = (): FormState => ({
   name: '',
   description: '',
+  source_type: 'workspace',
   source_repo_spec: '',
   validation_profile: 'python',
 })
 
+function inferSourceType(spec: string): SourceType {
+  return spec.trim().startsWith('https://') ? 'git' : 'workspace'
+}
+
 function validateForm(form: FormState): string | null {
   if (!form.name.trim()) return 'Project name is required'
-  if (!form.source_repo_spec.trim()) return 'Repo path is required'
+  if (form.source_type === 'git') {
+    if (!form.source_repo_spec.trim()) return 'Git URL is required'
+    if (!form.source_repo_spec.trim().startsWith('https://')) {
+      return 'Git URL must start with https://'
+    }
+  } else if (!form.source_repo_spec.trim()) {
+    return 'Workspace folder is required'
+  }
   return null
 }
 
@@ -64,6 +79,7 @@ function ProjectForm({
   submitLabel: string
 }) {
   const [error, setError] = useState('')
+  const [browsing, setBrowsing] = useState(false)
 
   const handleSubmit = () => {
     const err = validateForm(form)
@@ -73,6 +89,30 @@ function ProjectForm({
     }
     setError('')
     onSubmit()
+  }
+
+  const handleBrowse = async () => {
+    setBrowsing(true)
+    try {
+      const result = await api.dialog.pickDirectory('Select or create a project folder')
+      if (!result.cancelled && result.path) {
+        setForm({ ...form, source_repo_spec: result.path })
+        setError('')
+      }
+    } catch (e) {
+      showError(e)
+    } finally {
+      setBrowsing(false)
+    }
+  }
+
+  const setSourceType = (sourceType: SourceType) => {
+    setForm({
+      ...form,
+      source_type: sourceType,
+      source_repo_spec: sourceType === form.source_type ? form.source_repo_spec : '',
+    })
+    setError('')
   }
 
   return (
@@ -97,16 +137,68 @@ function ProjectForm({
           />
         </div>
         <div>
-          <label className="block text-xs text-[var(--text-secondary)] mb-1">Repo path *</label>
-          <input
-            className="w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-3 py-2 text-sm"
-            value={form.source_repo_spec}
-            onChange={(e) => { setForm({ ...form, source_repo_spec: e.target.value }); setError('') }}
-            placeholder="/path/to/repo or https://github.com/..."
-          />
-          <p className="text-xs text-[var(--text-secondary)] mt-1">
-            Local folder path or https://github.com/...
-          </p>
+          <label className="block text-xs text-[var(--text-secondary)] mb-1">Source *</label>
+          <div className="flex gap-2 mb-2">
+            <button
+              type="button"
+              className={`flex-1 px-3 py-2 text-sm rounded border transition-colors ${
+                form.source_type === 'workspace'
+                  ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--text-primary)]'
+                  : 'border-[var(--border)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              }`}
+              onClick={() => setSourceType('workspace')}
+            >
+              Local workspace
+            </button>
+            <button
+              type="button"
+              className={`flex-1 px-3 py-2 text-sm rounded border transition-colors ${
+                form.source_type === 'git'
+                  ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--text-primary)]'
+                  : 'border-[var(--border)] bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              }`}
+              onClick={() => setSourceType('git')}
+            >
+              Git repository
+            </button>
+          </div>
+          {form.source_type === 'workspace' ? (
+            <>
+              <div className="flex gap-2">
+                <input
+                  className="flex-1 min-w-0 bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-3 py-2 text-sm"
+                  value={form.source_repo_spec}
+                  onChange={(e) => { setForm({ ...form, source_repo_spec: e.target.value }); setError('') }}
+                  placeholder="/path/to/project"
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  loading={browsing}
+                  onClick={handleBrowse}
+                  className="shrink-0"
+                >
+                  <FolderOpen size={14} />
+                  Browse
+                </Button>
+              </div>
+              <p className="text-xs text-[var(--text-secondary)] mt-1">
+                Choose an existing folder or create one in Finder. The folder will be used as the project workspace.
+              </p>
+            </>
+          ) : (
+            <>
+              <input
+                className="w-full bg-[var(--bg-secondary)] border border-[var(--border)] rounded px-3 py-2 text-sm"
+                value={form.source_repo_spec}
+                onChange={(e) => { setForm({ ...form, source_repo_spec: e.target.value }); setError('') }}
+                placeholder="https://github.com/org/repo"
+              />
+              <p className="text-xs text-[var(--text-secondary)] mt-1">
+                Supported hosts: GitHub and GitLab. The repo will be cloned into backend/repos/.
+              </p>
+            </>
+          )}
         </div>
         <div>
           <label className="block text-xs text-[var(--text-secondary)] mb-1">Validation profile</label>
@@ -280,6 +372,7 @@ export function ProjectManagerDialog({ open, onClose, initialMode = 'list', onPr
     setEditForm({
       name: row.name,
       description: row.description,
+      source_type: inferSourceType(row.source_repo_spec),
       source_repo_spec: row.source_repo_spec,
       validation_profile: row.validation_profile,
     })
