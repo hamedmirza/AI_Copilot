@@ -43,6 +43,26 @@ def test_settings(client):
     assert "lmstudio_base_url" in r.json()
 
 
+def test_pick_directory(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.tools.dialog_service.pick_directory",
+        lambda **_: "/tmp/selected-project",
+    )
+    r = client.post("/api/dialog/pick-directory", json={}, headers=HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cancelled"] is False
+    assert body["path"] == "/tmp/selected-project"
+
+    monkeypatch.setattr(
+        "app.tools.dialog_service.pick_directory",
+        lambda **_: None,
+    )
+    r = client.post("/api/dialog/pick-directory", json={"prompt": "Pick one"}, headers=HEADERS)
+    assert r.status_code == 200
+    assert r.json() == {"cancelled": True, "path": None}
+
+
 def test_path_traversal(client, tmp_path):
     # Create project
     proj_dir = tmp_path / "proj"

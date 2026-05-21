@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { FolderOpen } from 'lucide-react'
 import { api } from '@/api/client'
 import { useAppStore, useProjectStore } from '@/store'
 import { showError, showSuccess } from '@/lib/toast'
@@ -14,9 +15,11 @@ export function OnboardingWizard() {
   const [testing, setTesting] = useState(false)
   const [testOk, setTestOk] = useState<boolean | null>(null)
   const [name, setName] = useState('')
+  const [sourceType, setSourceType] = useState<'workspace' | 'git'>('workspace')
   const [repoPath, setRepoPath] = useState('')
   const [profile, setProfile] = useState('python')
   const [creating, setCreating] = useState(false)
+  const [browsing, setBrowsing] = useState(false)
 
   if (!show) return null
 
@@ -38,6 +41,7 @@ export function OnboardingWizard() {
 
   const finish = async () => {
     if (!name.trim() || !repoPath.trim()) return
+    if (sourceType === 'git' && !repoPath.trim().startsWith('https://')) return
     setCreating(true)
     try {
       const project = await api.projects.create({
@@ -54,6 +58,18 @@ export function OnboardingWizard() {
       showError(e)
     } finally {
       setCreating(false)
+    }
+  }
+
+  const handleBrowse = async () => {
+    setBrowsing(true)
+    try {
+      const result = await api.dialog.pickDirectory('Select or create a project folder')
+      if (!result.cancelled && result.path) setRepoPath(result.path)
+    } catch (e) {
+      showError(e)
+    } finally {
+      setBrowsing(false)
     }
   }
 
@@ -94,12 +110,51 @@ export function OnboardingWizard() {
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
-            <input
-              className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-3 py-2 text-sm mb-2"
-              placeholder="Local repo path (absolute)"
-              value={repoPath}
-              onChange={(e) => setRepoPath(e.target.value)}
-            />
+            <div className="flex gap-2 mb-2">
+              <button
+                type="button"
+                className={`flex-1 px-3 py-2 text-sm rounded border ${
+                  sourceType === 'workspace'
+                    ? 'border-[var(--accent)] bg-[var(--accent)]/10'
+                    : 'border-[var(--border)] bg-[var(--bg-tertiary)] text-[var(--text-secondary)]'
+                }`}
+                onClick={() => { setSourceType('workspace'); setRepoPath('') }}
+              >
+                Local workspace
+              </button>
+              <button
+                type="button"
+                className={`flex-1 px-3 py-2 text-sm rounded border ${
+                  sourceType === 'git'
+                    ? 'border-[var(--accent)] bg-[var(--accent)]/10'
+                    : 'border-[var(--border)] bg-[var(--bg-tertiary)] text-[var(--text-secondary)]'
+                }`}
+                onClick={() => { setSourceType('git'); setRepoPath('') }}
+              >
+                Git repository
+              </button>
+            </div>
+            {sourceType === 'workspace' ? (
+              <div className="flex gap-2 mb-2">
+                <input
+                  className="flex-1 min-w-0 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-3 py-2 text-sm"
+                  placeholder="/path/to/project"
+                  value={repoPath}
+                  onChange={(e) => setRepoPath(e.target.value)}
+                />
+                <Button type="button" variant="secondary" loading={browsing} onClick={handleBrowse}>
+                  <FolderOpen size={14} />
+                  Browse
+                </Button>
+              </div>
+            ) : (
+              <input
+                className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-3 py-2 text-sm mb-2"
+                placeholder="https://github.com/org/repo"
+                value={repoPath}
+                onChange={(e) => setRepoPath(e.target.value)}
+              />
+            )}
             <select
               className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-3 py-2 text-sm mb-4"
               value={profile}
@@ -121,7 +176,8 @@ export function OnboardingWizard() {
             <h2 className="mb-4">Ready to launch!</h2>
             <p className="text-sm text-[var(--text-secondary)] mb-4">
               Project: {name}<br />
-              Repo: {repoPath}<br />
+              Source: {sourceType === 'workspace' ? 'Local workspace' : 'Git repository'}<br />
+              {sourceType === 'workspace' ? 'Folder' : 'URL'}: {repoPath}<br />
               Profile: {profile}
             </p>
             <div className="flex gap-2">
