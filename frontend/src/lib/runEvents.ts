@@ -55,6 +55,7 @@ const SIGNIFICANT_EVENT_TYPES = new Set([
   'validation_rejected',
   'validation_passed',
   'ui_designer_skipped',
+  'provider_resolved',
 ])
 
 export function isSignificantRunEvent(event: RunEvent): boolean {

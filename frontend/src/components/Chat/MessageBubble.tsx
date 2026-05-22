@@ -43,6 +43,9 @@ export function MessageBubble({
     ? `${formatAnswerDuration(answerDurationMs)}${message.pending ? '…' : ''}`
     : null
   const runId = message.metadata?.run_id ? String(message.metadata.run_id) : null
+  const runDisplayName = message.metadata?.display_name
+    ? String(message.metadata.display_name)
+    : null
   const metaType = String(message.metadata?.type || '')
   const isRunCard = metaType === 'run_spawned' && !!runId
   const isRunSummary = metaType === 'run_summary' && !!runId
@@ -61,6 +64,12 @@ export function MessageBubble({
           {message.created_at && <span>{formatChatTimestamp(message.created_at)}</span>}
           {answerDurationLabel && (
             <span className="normal-case tracking-normal">{answerDurationLabel}</span>
+          )}
+          {!isUser && (message.metadata?.provider || message.metadata?.model) && (
+            <span className="ml-auto normal-case tracking-normal text-[var(--text-secondary)]">
+              {String(message.metadata?.model || '')}
+              {message.metadata?.provider ? ` · ${String(message.metadata.provider)}` : ''}
+            </span>
           )}
         </div>
 
@@ -93,6 +102,7 @@ export function MessageBubble({
           <div className={message.content ? 'mt-3' : ''}>
             <RunCard
               runId={runId}
+              displayName={runDisplayName}
               events={runEvents}
               busy={runActionBusy}
               onApprove={onApproveRun}

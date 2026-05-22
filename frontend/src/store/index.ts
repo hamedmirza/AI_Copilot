@@ -274,12 +274,20 @@ export const useUIStore = create<UIState>()(
   )
 )
 
-export const useProjectStore = create<ProjectState>((set) => ({
-  projects: [],
-  currentProjectId: null,
-  setProjects: (projects) => set({ projects }),
-  setCurrentProject: (id) => set({ currentProjectId: id }),
-}))
+export const useProjectStore = create<ProjectState>()(
+  persist(
+    (set) => ({
+      projects: [],
+      currentProjectId: null,
+      setProjects: (projects) => set({ projects }),
+      setCurrentProject: (id) => set({ currentProjectId: id }),
+    }),
+    {
+      name: 'ai-copilot-project',
+      partialize: (state) => ({ currentProjectId: state.currentProjectId }),
+    },
+  ),
+)
 
 export const useEditorStore = create<EditorState>((set) => ({
   tabs: [],
@@ -349,7 +357,7 @@ export const useEditorStore = create<EditorState>((set) => ({
     set((s) => ({
       expandedFolders: {
         ...s.expandedFolders,
-        [path]: s.expandedFolders[path] === false,
+        [path]: !s.expandedFolders[path],
       },
     })),
   bumpTreeRefresh: () => set((s) => ({ treeRefreshTick: s.treeRefreshTick + 1 })),

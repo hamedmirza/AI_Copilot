@@ -1,6 +1,7 @@
 import { Button } from '@/components/ui/primitives'
 import {
   formatRunRelativeTime,
+  runDisplayLabel,
   runStatusBadgeClass,
   runStatusLabel,
   type RunSummary,
@@ -52,10 +53,12 @@ export function RunHistoryList({
                 <span className={`px-1.5 py-0.5 rounded uppercase text-[10px] ${runStatusBadgeClass(run.status)}`}>
                   {runStatusLabel(run.status)}
                 </span>
-                <span className="font-mono text-[var(--text-secondary)]">{run.id.slice(0, 8)}</span>
-                <span className="text-[var(--text-secondary)]">{formatRunRelativeTime(run.created_at)}</span>
+                <span className="truncate flex-1 min-w-0" title={runDisplayLabel(run)}>
+                  {runDisplayLabel(run)}
+                </span>
+                <span className="text-[var(--text-secondary)] shrink-0">{formatRunRelativeTime(run.created_at)}</span>
                 {run.current_stage && (
-                  <span className="text-[var(--text-secondary)] truncate">{run.current_stage}</span>
+                  <span className="text-[var(--text-secondary)] truncate shrink-0">{run.current_stage}</span>
                 )}
               </div>
             </button>

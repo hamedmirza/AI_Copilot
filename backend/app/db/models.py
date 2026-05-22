@@ -3,8 +3,6 @@ from datetime import UTC, datetime
 from typing import Any, Optional
 from uuid import uuid4
 
-from typing import Optional
-
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -64,6 +62,7 @@ class TaskModel(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
     description: Mapped[str] = mapped_column(Text)
     validation_profile: Mapped[str] = mapped_column(String(64), default="python")
+    task_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
     use_scout: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
 
@@ -80,10 +79,16 @@ class RunModel(Base):
     status: Mapped[str] = mapped_column(String(64), index=True, default="pending")
     current_stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
     workspace_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
     review_attempts: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     operator_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
     promote_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    failure_subclass: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    failure_signature: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    recovery_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    superseded_by_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UtcDateTime(), default=utc_now, onupdate=utc_now
@@ -137,6 +142,46 @@ class LessonModel(Base):
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
 
     project: Mapped[ProjectModel] = relationship(back_populates="lessons")
+
+
+class GlobalSkillModel(Base):
+    __tablename__ = "global_skills"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    content: Mapped[str] = mapped_column(Text, default="{}")
+    source_lesson_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    origin_project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    kind: Mapped[str] = mapped_column(String(64), default="repo_convention")
+    stages_json: Mapped[str] = mapped_column(Text, default="[]")
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    confidence: Mapped[float] = mapped_column(default=0.5)
+    promotion_state: Mapped[str] = mapped_column(String(32), default="candidate")
+    times_applied: Mapped[int] = mapped_column(Integer, default=0)
+    times_helpful: Mapped[int] = mapped_column(Integer, default=0)
+    times_harmful: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime(), default=utc_now, onupdate=utc_now
+    )
+
+    @property
+    def stages(self) -> list[str]:
+        try:
+            parsed = json.loads(self.stages_json)
+        except json.JSONDecodeError:
+            return []
+        return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+    @property
+    def tags(self) -> list[str]:
+        try:
+            parsed = json.loads(self.tags_json)
+        except json.JSONDecodeError:
+            return []
+        return [str(item) for item in parsed] if isinstance(parsed, list) else []
 
 
 class PlaybookModel(Base):
@@ -239,4 +284,3 @@ class MCPServerModel(Base):
         if not isinstance(parsed, dict):
             return {}
         return {str(key): str(value) for key, value in parsed.items()}
-

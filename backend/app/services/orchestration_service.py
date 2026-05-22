@@ -24,6 +24,7 @@ from app.db.session import SessionLocal
 from app.providers.registry import ProviderRegistry
 from app.services.config_service import ConfigService
 from app.services.file_service import FileService
+from app.services.learning_service import LearningService, infer_task_kind
 from app.services.project_service import ProjectService
 from app.services.run_engine.event_bus import event_bus
 from app.services.workspace_service import clone_for_run
@@ -110,6 +111,22 @@ class OrchestrationService:
             },
         )
 
+    def _log_provider(self, db: Session, run_id: str, stage: str, provider) -> None:
+        registry = ProviderRegistry.get()
+        provider_name = "Ollama" if registry.active_provider() == "ollama" else "LM Studio"
+        resolved_model = str(getattr(provider, "model", "") or "auto")
+        message = f"Using {provider_name} · {resolved_model}"
+        payload = {"provider": provider_name, "model": resolved_model}
+        self._record_event(db, run_id, "provider_resolved", stage, "info", message, payload)
+        self._emit(run_id, "provider_resolved", stage, message, payload)
+        logger.info(
+            "run %s stage=%s provider=%s model=%s",
+            run_id,
+            stage,
+            provider_name,
+            resolved_model,
+        )
+
     def _execute_run(self, run_id: str) -> None:
         worker_id_var.set("worker-1")
         run_id_var.set(run_id)
@@ -192,18 +209,20 @@ class OrchestrationService:
             db.commit()
 
         task = run.task
+        learner = LearningService(db)
+        learner.ensure_run_task_kind(run)
         context_base = self._build_context_base(run, task.description)
         fs = FileService(workspace, project.protected_files)
 
         ConfigService(db).reload_registry()
 
         stages: list[tuple[PipelineStage, callable]] = [
-            (PipelineStage.PLANNER, lambda: self._stage_planner(db, run_id, context_base)),
-            (PipelineStage.ARCHITECT, lambda: self._stage_architect(db, run_id, context_base)),
-            (PipelineStage.UI_DESIGNER, lambda: self._stage_ui(db, run_id, context_base)),
-            (PipelineStage.CODER, lambda: self._stage_coder(db, run_id, context_base, fs)),
-            (PipelineStage.REVIEWER, lambda: self._stage_reviewer_loop(db, run_id, context_base, fs, workspace)),
-            (PipelineStage.TESTER, lambda: self._stage_tester(db, run_id, context_base, workspace)),
+            (PipelineStage.PLANNER, lambda ctx: self._stage_planner(db, run_id, ctx)),
+            (PipelineStage.ARCHITECT, lambda ctx: self._stage_architect(db, run_id, ctx)),
+            (PipelineStage.UI_DESIGNER, lambda ctx: self._stage_ui(db, run_id, ctx)),
+            (PipelineStage.CODER, lambda ctx: self._stage_coder(db, run_id, ctx, fs)),
+            (PipelineStage.REVIEWER, lambda ctx: self._stage_reviewer_loop(db, run_id, ctx, fs, workspace)),
+            (PipelineStage.TESTER, lambda ctx: self._stage_tester(db, run_id, ctx, workspace)),
         ]
 
         for stage, fn in stages:
@@ -213,8 +232,10 @@ class OrchestrationService:
             self._record_event(db, run_id, f"{stage.value}_started", stage.value, "info", f"{stage.value} started")
             self._emit(run_id, f"{stage.value}_started", stage.value, f"{stage.value} started")
             try:
-                result = fn()
+                stage_context = self._stage_context(db, run, stage.value, context_base)
+                result = fn(stage_context)
                 if result is False:
+                    self._finalize_terminal_state(db, run_id)
                     return
             except Exception as exc:
                 run = db.get(RunModel, run_id)
@@ -224,6 +245,7 @@ class OrchestrationService:
                 self._record_event(db, run_id, f"{stage.value}_failed", stage.value, "error", str(exc))
                 self._emit(run_id, f"{stage.value}_failed", stage.value, str(exc))
                 if ConfigService(db).get_all().get("stop_on_first_failure", True):
+                    self._finalize_terminal_state(db, run_id)
                     return
                 continue
             self._record_event(db, run_id, f"{stage.value}_complete", stage.value, "info", f"{stage.value} complete")
@@ -235,17 +257,59 @@ class OrchestrationService:
             run.operator_feedback = None
             db.commit()
             self._emit(run_id, "awaiting_approval", "", "Run awaiting approval")
+            self._finalize_terminal_state(db, run_id)
 
     def _build_context_base(self, run: RunModel, task_description: str) -> str:
-        context_base = task_description
+        task_kind = run.task_kind or infer_task_kind(task_description)
+        guidance = [f"Task mode: {task_kind}."]
+        if task_kind == "analysis":
+            guidance.append(
+                "Prefer grounded analysis and report artifacts over speculative code changes unless the task explicitly asks for implementation."
+            )
+        context_base = task_description + "\n\nExecution guidance:\n- " + "\n- ".join(guidance)
         if run.operator_feedback:
             context_base += "\n\nOperator feedback:\n" + run.operator_feedback
         elif run.error_message and run.status == RunStatus.CHANGES_REQUESTED.value:
             context_base += "\n\nOperator feedback:\n" + run.error_message
         return context_base
 
+    def _stage_context(self, db: Session, run: RunModel, stage: str, context_base: str) -> str:
+        learning = LearningService(db).build_learning_context(run, stage, context_base)
+        if learning["project_lessons"] or learning["global_skills"]:
+            payload = {
+                "project_lessons": learning["project_lessons"],
+                "global_skills": learning["global_skills"],
+                "stage": stage,
+                "task_kind": run.task_kind,
+            }
+            self._record_event(
+                db,
+                run.id,
+                "lessons_applied",
+                stage,
+                "info",
+                f"Applied {len(learning['project_lessons'])} project lesson(s) and {len(learning['global_skills'])} global skill(s)",
+                payload,
+            )
+            self._emit(run.id, "lessons_applied", stage, "Lessons applied", payload)
+        return str(learning["context"])
+
+    def _finalize_terminal_state(self, db: Session, run_id: str) -> None:
+        run = db.get(RunModel, run_id)
+        if not run:
+            return
+        if run.status in {
+            RunStatus.FAILED.value,
+            RunStatus.BLOCKED.value,
+            RunStatus.CHANGES_REQUESTED.value,
+            RunStatus.COMPLETED.value,
+            RunStatus.AWAITING_APPROVAL.value,
+        }:
+            LearningService(db).finalize_terminal_run(run_id)
+
     def _stage_planner(self, db: Session, run_id: str, context: str):
         provider = ProviderRegistry.get().resolve_stage(PipelineStage.PLANNER)
+        self._log_provider(db, run_id, "planner", provider)
         agent = PlannerAgent(provider)
         output = agent.plan(context)
         self._save_artifact(db, run_id, "plan", output.model_dump())
@@ -253,6 +317,7 @@ class OrchestrationService:
 
     def _stage_architect(self, db: Session, run_id: str, context: str):
         provider = ProviderRegistry.get().resolve_stage(PipelineStage.ARCHITECT)
+        self._log_provider(db, run_id, "architect", provider)
         agent = ArchitectAgent(provider)
         output = agent.design(context)
         self._save_artifact(db, run_id, "architect", output.model_dump())
@@ -260,6 +325,7 @@ class OrchestrationService:
 
     def _stage_ui(self, db: Session, run_id: str, context: str):
         provider = ProviderRegistry.get().resolve_stage(PipelineStage.UI_DESIGNER)
+        self._log_provider(db, run_id, "ui_designer", provider)
         agent = UIDesignerAgent(provider)
         output = agent.design(context)
         if output is None:
@@ -270,6 +336,7 @@ class OrchestrationService:
 
     def _stage_coder(self, db: Session, run_id: str, context: str, fs: FileService):
         provider = ProviderRegistry.get().resolve_stage(PipelineStage.CODER)
+        self._log_provider(db, run_id, "coder", provider)
         agent = CoderAgent(provider)
         output = agent.code(context)
         changes = [
@@ -435,6 +502,7 @@ class OrchestrationService:
     def _stage_reviewer_loop(self, db: Session, run_id: str, context: str, fs: FileService, workspace: Path):
         max_retries = int(ConfigService(db).get_all().get("max_review_retries", 3))
         provider = ProviderRegistry.get().resolve_stage(PipelineStage.REVIEWER)
+        self._log_provider(db, run_id, "reviewer", provider)
         agent = ReviewerAgent(provider)
         for attempt in range(1, max_retries + 1):
             run = db.get(RunModel, run_id)
@@ -538,6 +606,7 @@ class OrchestrationService:
 
     def _stage_tester(self, db: Session, run_id: str, context: str, workspace):
         provider = ProviderRegistry.get().resolve_stage(PipelineStage.TESTER)
+        self._log_provider(db, run_id, "tester", provider)
         agent = TesterAgent(provider)
         output = agent.test_plan(context)
         self._save_artifact(db, run_id, "test_plan", output.model_dump())
@@ -639,10 +708,12 @@ def create_task_and_run(db: Session, data: dict):
     svc = ProjectService(db)
     project = svc.get(data["project_id"])
     profile = data.get("validation_profile") or project.validation_profile
+    task_kind = infer_task_kind(data["description"])
     task = TaskModel(
         project_id=project.id,
         description=data["description"],
         validation_profile=profile,
+        task_kind=task_kind,
         use_scout=bool(data.get("use_scout", False)),
     )
     db.add(task)
@@ -652,6 +723,8 @@ def create_task_and_run(db: Session, data: dict):
         task_id=task.id,
         status=RunStatus.PENDING.value,
         current_stage=PipelineStage.PLANNER.value,
+        task_kind=task_kind,
+        recovery_status="none",
     )
     db.add(run)
     db.commit()

@@ -44,8 +44,12 @@ from app.schemas.api import (
 from app.services.config_service import ConfigService
 from app.services.file_service import FileService
 from app.services.git_service import GitService
+from app.services.learning_service import LearningService
 from app.services.orchestration_service import create_task_and_run, run_engine
+from app.services.run_approval_service import approve_run_sync
+from app.services.run_display import derive_run_display_name, run_numbers_for_task
 from app.services.run_engine.event_bus import event_bus
+from app.services.tree_cache import get_cached_tree, invalidate_tree_cache, store_tree_cache
 from app.services.project_service import ProjectService
 
 router = APIRouter()
@@ -66,6 +70,45 @@ def _project_to_response(p, db: Session) -> dict:
         "run_count": run_count,
         "created_at": p.created_at.isoformat(),
         "updated_at": p.updated_at.isoformat(),
+    }
+
+
+def _artifact_to_response(artifact) -> dict:
+    return {
+        "id": artifact.id,
+        "artifact_type": artifact.artifact_type,
+        "content": json.loads(artifact.content_json),
+        "created_at": artifact.created_at.isoformat(),
+    }
+
+
+def _run_to_response(run, task_description: str, run_number: int | None = None) -> dict:
+    promote_snapshot = None
+    if run.promote_snapshot_json:
+        try:
+            promote_snapshot = json.loads(run.promote_snapshot_json)
+        except json.JSONDecodeError:
+            promote_snapshot = None
+    return {
+        "id": run.id,
+        "display_name": derive_run_display_name(task_description, run.created_at, run_number=run_number),
+        "project_id": run.project_id,
+        "task_id": run.task_id,
+        "status": run.status,
+        "current_stage": run.current_stage,
+        "workspace_path": run.workspace_path,
+        "review_attempts": run.review_attempts,
+        "error_message": run.error_message,
+        "operator_feedback": run.operator_feedback,
+        "promote_snapshot": promote_snapshot,
+        "task_kind": getattr(run, "task_kind", None),
+        "failure_class": getattr(run, "failure_class", None),
+        "failure_subclass": getattr(run, "failure_subclass", None),
+        "failure_signature": getattr(run, "failure_signature", None),
+        "recovery_status": getattr(run, "recovery_status", None),
+        "superseded_by_run_id": getattr(run, "superseded_by_run_id", None),
+        "created_at": run.created_at.isoformat(),
+        "updated_at": run.updated_at.isoformat(),
     }
 
 
@@ -205,11 +248,39 @@ def release_readiness(project_id: str, db: Session = Depends(get_db)):
     return ProjectService(db).release_readiness(project_id)
 
 
+@router.get("/projects/{project_id}/lessons")
+def project_lessons(project_id: str, db: Session = Depends(get_db)):
+    ProjectService(db).get(project_id)
+    return LearningService(db).list_project_lessons(project_id)
+
+
+@router.post("/projects/{project_id}/lessons/from-run/{run_id}")
+def create_project_lesson_from_run(project_id: str, run_id: str, db: Session = Depends(get_db)):
+    from app.db.models import RunModel
+
+    run = db.query(RunModel).filter(RunModel.id == run_id, RunModel.project_id == project_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    learner = LearningService(db)
+    learner.finalize_terminal_run(run_id)
+    lessons = learner.list_project_lessons(project_id)
+    for lesson in lessons:
+        if lesson.get("run_id") == run_id:
+            return lesson
+    raise HTTPException(500, "Lesson generation failed")
+
+
 @router.get("/projects/{project_id}/tree")
 def file_tree(project_id: str, db: Session = Depends(get_db)):
     project = ProjectService(db).get(project_id)
-    fs = FileService(__import__("pathlib").Path(project.source_repo_spec), project.protected_files)
-    return {"items": fs.list_tree()}
+    workspace = __import__("pathlib").Path(project.source_repo_spec)
+    cached = get_cached_tree(workspace)
+    if cached is not None:
+        return {"items": cached}
+    fs = FileService(workspace, project.protected_files)
+    items = fs.list_tree()
+    store_tree_cache(workspace, items)
+    return {"items": items}
 
 
 def _guard_traversal(path: str) -> None:
@@ -237,7 +308,9 @@ def write_file(project_id: str, path: str, body: FileWriteRequest, db: Session =
     project = ProjectService(db).get(project_id)
     fs = FileService(__import__("pathlib").Path(project.source_repo_spec), project.protected_files)
     try:
-        return fs.write_file(path, body.content)
+        result = fs.write_file(path, body.content)
+        invalidate_tree_cache(fs.workspace)
+        return result
     except (PathTraversalError, PatchGuardError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -247,7 +320,9 @@ def create_file(project_id: str, body: FileCreateRequest, db: Session = Depends(
     project = ProjectService(db).get(project_id)
     fs = FileService(__import__("pathlib").Path(project.source_repo_spec), project.protected_files)
     try:
-        return fs.create(body.path, body.content, body.is_directory)
+        result = fs.create(body.path, body.content, body.is_directory)
+        invalidate_tree_cache(fs.workspace)
+        return result
     except PathTraversalError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -258,6 +333,7 @@ def delete_file(project_id: str, path: str, db: Session = Depends(get_db)):
     fs = FileService(__import__("pathlib").Path(project.source_repo_spec), project.protected_files)
     try:
         fs.delete(path)
+        invalidate_tree_cache(fs.workspace)
         return {"ok": True}
     except (PathTraversalError, PatchGuardError, NotFoundError) as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -273,7 +349,9 @@ def rename_file(project_id: str, path: str, body: dict, db: Session = Depends(ge
     project = ProjectService(db).get(project_id)
     fs = FileService(__import__("pathlib").Path(project.source_repo_spec), project.protected_files)
     try:
-        return fs.rename(path, new_path)
+        result = fs.rename(path, new_path)
+        invalidate_tree_cache(fs.workspace)
+        return result
     except (PathTraversalError, PatchGuardError, NotFoundError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -301,37 +379,32 @@ def create_task(data: TaskCreate, db: Session = Depends(get_db)):
         "run": {
             "id": run.id,
             "status": run.status,
+            "display_name": derive_run_display_name(task.description, run.created_at),
         },
     }
 
 
+@router.get("/runs/failure-summary")
+def get_failure_summary(project_id: str | None = None, db: Session = Depends(get_db)):
+    return LearningService(db).failure_summary(project_id)
+
+
 @router.get("/runs/{run_id}")
 def get_run(run_id: str, db: Session = Depends(get_db)):
-    from app.db.models import RunModel
+    from app.db.models import RunModel, TaskModel
 
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
     if not run:
         raise HTTPException(404, "Run not found")
-    promote_snapshot = None
-    if run.promote_snapshot_json:
-        try:
-            promote_snapshot = json.loads(run.promote_snapshot_json)
-        except json.JSONDecodeError:
-            promote_snapshot = None
-    return {
-        "id": run.id,
-        "project_id": run.project_id,
-        "task_id": run.task_id,
-        "status": run.status,
-        "current_stage": run.current_stage,
-        "workspace_path": run.workspace_path,
-        "review_attempts": run.review_attempts,
-        "error_message": run.error_message,
-        "operator_feedback": run.operator_feedback,
-        "promote_snapshot": promote_snapshot,
-        "created_at": run.created_at.isoformat(),
-        "updated_at": run.updated_at.isoformat(),
-    }
+    task = db.get(TaskModel, run.task_id)
+    task_description = task.description if task else ""
+    sibling_runs = (
+        db.query(RunModel)
+        .filter(RunModel.task_id == run.task_id)
+        .order_by(RunModel.created_at.asc())
+        .all()
+    )
+    return _run_to_response(run, task_description, run_numbers_for_task(sibling_runs).get(run.id))
 
 
 @router.get("/runs/{run_id}/events")
@@ -363,20 +436,38 @@ def run_artifacts(run_id: str, db: Session = Depends(get_db)):
     from app.db.models import ArtifactModel
 
     arts = db.query(ArtifactModel).filter(ArtifactModel.run_id == run_id).all()
-    return [
-        {
-            "id": a.id,
-            "artifact_type": a.artifact_type,
-            "content": json.loads(a.content_json),
-            "created_at": a.created_at.isoformat(),
-        }
-        for a in arts
-    ]
+    return [_artifact_to_response(a) for a in arts]
+
+
+@router.get("/runs/{run_id}/postmortem")
+def get_run_postmortem(run_id: str, db: Session = Depends(get_db)):
+    from app.db.models import ArtifactModel, RunModel
+
+    run = db.query(RunModel).filter(RunModel.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    artifact = (
+        db.query(ArtifactModel)
+        .filter(ArtifactModel.run_id == run_id, ArtifactModel.artifact_type == "postmortem")
+        .order_by(ArtifactModel.id.desc())
+        .first()
+    )
+    if not artifact and run.status in {"failed", "blocked", "changes_requested"}:
+        LearningService(db).finalize_terminal_run(run_id)
+        artifact = (
+            db.query(ArtifactModel)
+            .filter(ArtifactModel.run_id == run_id, ArtifactModel.artifact_type == "postmortem")
+            .order_by(ArtifactModel.id.desc())
+            .first()
+        )
+    if not artifact:
+        raise HTTPException(404, "Postmortem not available")
+    return _artifact_to_response(artifact)
 
 
 @router.get("/projects/{project_id}/runs")
 def project_runs(project_id: str, db: Session = Depends(get_db)):
-    from app.db.models import RunModel
+    from app.db.models import RunModel, TaskModel
 
     runs = (
         db.query(RunModel)
@@ -385,12 +476,25 @@ def project_runs(project_id: str, db: Session = Depends(get_db)):
         .limit(20)
         .all()
     )
+    if not runs:
+        return []
+    task_ids = {r.task_id for r in runs}
+    tasks = {t.id: t for t in db.query(TaskModel).filter(TaskModel.id.in_(task_ids)).all()}
+    numbers = run_numbers_for_task(runs)
     return [
         {
             "id": r.id,
+            "display_name": derive_run_display_name(
+                tasks[r.task_id].description if r.task_id in tasks else "",
+                r.created_at,
+                run_number=numbers.get(r.id),
+            ),
             "status": r.status,
             "current_stage": r.current_stage,
             "task_id": r.task_id,
+            "task_kind": getattr(r, "task_kind", None),
+            "failure_class": getattr(r, "failure_class", None),
+            "recovery_status": getattr(r, "recovery_status", None),
             "error_message": (r.error_message or "")[:120] or None,
             "created_at": r.created_at.isoformat(),
         }
@@ -400,62 +504,12 @@ def project_runs(project_id: str, db: Session = Depends(get_db)):
 
 @router.post("/runs/{run_id}/approve")
 def approve_run(run_id: str, body: ApproveRequest, db: Session = Depends(get_db)):
-    from pathlib import Path
-
-    from app.core.enums import RunStatus
-    from app.db.models import ArtifactModel, RunModel
-    from app.services.snapshot_service import snapshot_promoted_files
-    from app.services.workspace_service import cleanup_run_workspace, promote_to_source
-
-    run = db.query(RunModel).filter(RunModel.id == run_id).first()
-    if not run:
-        raise HTTPException(404, "Run not found")
-    if run.status != RunStatus.AWAITING_APPROVAL:
-        raise HTTPException(400, "Run not awaiting approval")
-    project = ProjectService(db).get(run.project_id)
-    source = Path(project.source_repo_spec)
-    paths: list[str] = []
-    coder = (
-        db.query(ArtifactModel)
-        .filter(ArtifactModel.run_id == run_id, ArtifactModel.artifact_type == "coder")
-        .order_by(ArtifactModel.id.desc())
-        .first()
-    )
-    if coder:
-        try:
-            content = json.loads(coder.content_json)
-            for change in content.get("file_changes") or []:
-                path = change.get("path") or change.get("file_path")
-                if path:
-                    paths.append(str(path))
-        except json.JSONDecodeError:
-            paths = []
-    if not paths and run.workspace_path:
-        workspace = Path(run.workspace_path)
-        for path in workspace.rglob("*"):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(workspace)
-            if any(part.startswith(".") for part in rel.parts):
-                continue
-            src_file = source / rel
-            if src_file.is_file():
-                try:
-                    if path.read_bytes() != src_file.read_bytes():
-                        paths.append(str(rel))
-                except OSError:
-                    continue
-    if paths:
-        snapshot_meta = snapshot_promoted_files(run_id, source, paths)
-        run.promote_snapshot_json = json.dumps(snapshot_meta)
-    if run.workspace_path:
-        promote_to_source(Path(run.workspace_path), source)
-    run.status = RunStatus.COMPLETED
-    run.operator_feedback = None
-    db.commit()
-    cleanup_run_workspace(run_id)
-    event_bus.emit(run_id, {"type": "run_completed", "run_id": run_id})
-    return {"ok": True}
+    try:
+        return approve_run_sync(run_id, body.comment or "")
+    except NotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/runs/{run_id}/reject")
@@ -469,6 +523,7 @@ def reject_run(run_id: str, body: RejectRequest, db: Session = Depends(get_db)):
     run.status = RunStatus.CHANGES_REQUESTED
     run.error_message = body.reason
     db.commit()
+    LearningService(db).finalize_terminal_run(run_id)
     return {"ok": True}
 
 
@@ -486,7 +541,14 @@ def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depen
     if body and body.feedback:
         run.operator_feedback = body.feedback.strip()
     run.status = RunStatus.PENDING
+    run.error_message = None
     run.review_attempts = 0
+    if hasattr(run, "failure_class"):
+        run.failure_class = None
+        run.failure_subclass = None
+        run.failure_signature = None
+        run.recovery_status = "none"
+        run.superseded_by_run_id = None
     db.commit()
     if claim_run(db, run.id):
         run_engine.enqueue(run.id)
@@ -520,6 +582,7 @@ def rollback_run_workspace(run_id: str, db: Session = Depends(get_db)):
         run.status = RunStatus.CHANGES_REQUESTED.value
         run.error_message = "Workspace reset; re-run pipeline to regenerate changes."
     db.commit()
+    LearningService(db).finalize_terminal_run(run_id)
     event_bus.emit(
         run_id,
         {
@@ -556,6 +619,7 @@ def rollback_run_promote(run_id: str, db: Session = Depends(get_db)):
     run.status = RunStatus.CHANGES_REQUESTED.value
     run.error_message = f"Promoted changes rolled back ({restored} file(s) restored)"
     db.commit()
+    LearningService(db).finalize_terminal_run(run_id)
     event_bus.emit(
         run_id,
         {
@@ -565,6 +629,27 @@ def rollback_run_promote(run_id: str, db: Session = Depends(get_db)):
         },
     )
     return {"ok": True, "restored_files": restored}
+
+
+@router.post("/lessons/{lesson_id}/promote-global")
+def promote_lesson_global(lesson_id: int, db: Session = Depends(get_db)):
+    try:
+        return LearningService(db).promote_lesson_to_global(lesson_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/skills/global")
+def list_global_skills(db: Session = Depends(get_db)):
+    return LearningService(db).list_global_skills()
+
+
+@router.post("/skills/global/{skill_id}/deprecate")
+def deprecate_global_skill(skill_id: str, db: Session = Depends(get_db)):
+    try:
+        return LearningService(db).deprecate_global_skill(skill_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.get("/projects/{project_id}/git/status")

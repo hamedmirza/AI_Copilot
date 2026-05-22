@@ -607,6 +607,7 @@ export function ChatPanel() {
       try {
         let runId = ''
         let taskId = ''
+        let runDisplayName = ''
         try {
           const result = await api.chat.spawnTask(sessionId, {
             description: command.description,
@@ -614,14 +615,17 @@ export function ChatPanel() {
           }) as Record<string, unknown>
           runId = String(result.run_id || (result.run as Record<string, unknown> | undefined)?.id || '')
           taskId = String(result.task_id || (result.task as Record<string, unknown> | undefined)?.id || '')
+          runDisplayName = String(result.display_name || (result.run as Record<string, unknown> | undefined)?.display_name || '')
         } catch {
           const fallback = await api.tasks.create({
             project_id: projectId,
             description: command.description,
             validation_profile: 'react',
           }) as Record<string, unknown>
-          runId = String((fallback.run as Record<string, unknown> | undefined)?.id || '')
+          const runObj = fallback.run as Record<string, unknown> | undefined
+          runId = String(runObj?.id || '')
           taskId = String((fallback.task as Record<string, unknown> | undefined)?.id || '')
+          runDisplayName = String(runObj?.display_name || '')
         }
 
         if (!runId) {
@@ -635,7 +639,12 @@ export function ChatPanel() {
           role: 'assistant',
           content: `Spawned pipeline task${command.description ? `: ${command.description}` : ''}`,
           created_at: new Date().toISOString(),
-          metadata: { type: 'run_spawned', run_id: runId, task_id: taskId },
+          metadata: {
+            type: 'run_spawned',
+            run_id: runId,
+            task_id: taskId,
+            display_name: runDisplayName || undefined,
+          },
         })
         void refreshCurrentSessionSummary(sessionId)
         showSuccess('Pipeline task started')
@@ -667,6 +676,23 @@ export function ChatPanel() {
       if (status) {
         setAssistantStatus(status)
       }
+      return
+    }
+
+    if (type === 'meta') {
+      const provider = String(event.provider || '').trim()
+      const model = String(event.model || '').trim()
+      const mode = String(event.mode || '').trim()
+      const assistantId = ensureStreamingAssistant()
+      updateMessage(assistantId, (message) => ({
+        ...message,
+        metadata: {
+          ...(message.metadata || {}),
+          provider: provider || message.metadata?.provider,
+          model: model || message.metadata?.model,
+          mode: mode || message.metadata?.mode,
+        },
+      }))
       return
     }
 
@@ -740,7 +766,12 @@ export function ChatPanel() {
         id: `assistant-run-${runId}`,
         role: 'assistant',
         content: String(event.message_text || event.message || 'Spawned pipeline task'),
-        metadata: { type: 'run_spawned', run_id: runId, task_id: event.task_id },
+        metadata: {
+          type: 'run_spawned',
+          run_id: runId,
+          task_id: event.task_id,
+          display_name: event.display_name ? String(event.display_name) : undefined,
+        },
         created_at: new Date().toISOString(),
       })
       return

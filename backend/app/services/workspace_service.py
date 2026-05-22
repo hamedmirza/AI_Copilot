@@ -19,6 +19,7 @@ _SKIP_NAMES = frozenset({
     ".next",
     ".turbo",
 })
+_PROMOTABLE_HIDDEN_ROOTS = {".ai-copilot"}
 
 
 def runs_root() -> Path:
@@ -60,6 +61,19 @@ def prepare_run_workspace(source_repo: Path, run_id: str) -> Path:
     return workspace
 
 
+def is_promotable_path(rel: Path) -> bool:
+    parts = rel.parts
+    if not parts:
+        return False
+    for part in parts:
+        if part in _SKIP_NAMES:
+            return False
+    root = parts[0]
+    if root.startswith(".") and root not in _PROMOTABLE_HIDDEN_ROOTS:
+        return False
+    return True
+
+
 def promote_workspace_to_source(workspace: Path, source_repo: Path) -> None:
     workspace = workspace.resolve()
     source = source_repo.resolve()
@@ -72,9 +86,7 @@ def promote_workspace_to_source(workspace: Path, source_repo: Path) -> None:
         if not path.is_file():
             continue
         rel = path.relative_to(workspace)
-        if any(part in _SKIP_NAMES for part in rel.parts):
-            continue
-        if rel.parts and rel.parts[0].startswith("."):
+        if not is_promotable_path(rel):
             continue
         dest = source / rel
         dest.parent.mkdir(parents=True, exist_ok=True)

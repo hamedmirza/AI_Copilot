@@ -11,6 +11,7 @@ import {
   canRollbackWorkspace,
   isRetryableStatus,
   latestReviewArtifact,
+  runDisplayLabel,
   runStatusBadgeClass,
   runStatusLabel,
   type RunSummary,
@@ -137,8 +138,10 @@ export function RunDetailDrawer({
                   <span className={`px-1.5 py-0.5 rounded text-xs ${runStatusBadgeClass(run.status)}`}>
                     {runStatusLabel(run.status)}
                   </span>
-                  <span className="font-mono text-xs">{run.id}</span>
-                  {run.current_stage && <span className="text-[var(--text-secondary)]">{run.current_stage}</span>}
+                  <span className="truncate flex-1 min-w-0" title={runDisplayLabel(run)}>
+                    {runDisplayLabel(run)}
+                  </span>
+                  {run.current_stage && <span className="text-[var(--text-secondary)] shrink-0">{run.current_stage}</span>}
                 </div>
               </button>
             ))}
@@ -157,7 +160,9 @@ export function RunDetailDrawer({
         <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg w-[min(960px,95vw)] h-[min(820px,92vh)] flex flex-col">
           <div className="flex items-start justify-between gap-3 p-4 border-b border-[var(--border)] shrink-0">
             <div className="min-w-0">
-              <h2 className="text-lg font-medium">Run details</h2>
+              <h2 className="text-lg font-medium truncate" title={detail ? runDisplayLabel({ id: runId || '', display_name: detail.display_name }) : undefined}>
+                {detail ? runDisplayLabel({ id: runId || '', display_name: detail.display_name }) : 'Run details'}
+              </h2>
               {runId && (
                 <div className="flex items-center gap-2 mt-1 flex-wrap">
                   <code className="text-xs font-mono truncate max-w-full">{runId}</code>

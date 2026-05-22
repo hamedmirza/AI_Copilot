@@ -2,12 +2,13 @@ import { useMemo } from 'react'
 import { Button } from '@/components/ui/primitives'
 import { RunLogPanel } from '@/components/shared/RunLogPanel'
 import { filterSignificantRunEvents, normalizeRunEvent, runStatusFromEvents, stageStatusFromEvents } from '@/lib/runEvents'
-import type { RunEvent as TypedRunEvent } from '@/types/runs'
+import { runDisplayLabel } from '@/types/runs'
 import type { RunEvent } from '@/store'
 import { STAGES } from './types'
 
 interface RunCardProps {
   runId: string
+  displayName?: string | null
   events: RunEvent[]
   busy?: boolean
   onApprove: (runId: string) => void | Promise<void>
@@ -15,7 +16,8 @@ interface RunCardProps {
   onRetry: (runId: string) => void | Promise<void>
 }
 
-export function RunCard({ runId, events, busy, onApprove, onReject, onRetry }: RunCardProps) {
+export function RunCard({ runId, displayName, events, busy, onApprove, onReject, onRetry }: RunCardProps) {
+  const title = runDisplayLabel({ id: runId, display_name: displayName ?? '' })
   const displayEvents = useMemo(
     () => events.map((event) => normalizeRunEvent(event as Record<string, unknown>)),
     [events],
@@ -27,10 +29,12 @@ export function RunCard({ runId, events, busy, onApprove, onReject, onRetry }: R
     <div className="border border-[var(--border)] rounded-md bg-[var(--bg-tertiary)] p-3 space-y-3">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-sm font-medium">Pipeline run</p>
-          <p className="text-xs text-[var(--text-secondary)] truncate">{runId}</p>
+          <p className="text-sm font-medium truncate" title={title}>{title}</p>
+          <p className="text-xs text-[var(--text-secondary)] font-mono truncate" title={runId}>
+            {runId.slice(0, 8)}…
+          </p>
         </div>
-        <span className={`text-xs uppercase ${
+        <span className={`text-xs uppercase shrink-0 ${
           runStatus === 'completed' ? 'text-[var(--success)]' :
           runStatus === 'failed' || runStatus === 'blocked' ? 'text-[var(--error)]' :
           runStatus === 'awaiting_approval' ? 'text-[var(--warning)]' :

@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 
 from app.core.exceptions import NotFoundError, PathTraversalError, PatchGuardError
+from app.services.tree_cache import get_cached_tree, invalidate_tree_cache, store_tree_cache
 from app.tools.patch_guard import apply_line_changes, check_patch_allowed
 
 # Directories omitted from explorer/search tree (still on disk).
@@ -62,6 +63,7 @@ class FileService:
         path = _resolve_path(self.workspace, rel_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        invalidate_tree_cache(self.workspace)
         return self.read_file(rel_path)
 
     def create(self, rel_path: str, content: str = "", is_directory: bool = False) -> dict:
@@ -82,6 +84,7 @@ class FileService:
             shutil.rmtree(path)
         else:
             path.unlink()
+        invalidate_tree_cache(self.workspace)
 
     def rename(self, rel_path: str, new_path: str) -> dict:
         check_patch_allowed(rel_path, self.protected_files)
@@ -92,6 +95,7 @@ class FileService:
             raise NotFoundError(f"Path not found: {rel_path}")
         dst.parent.mkdir(parents=True, exist_ok=True)
         src.rename(dst)
+        invalidate_tree_cache(self.workspace)
         if dst.is_file():
             return self.read_file(new_path)
         return {"path": new_path, "type": "directory"}
@@ -151,6 +155,10 @@ class FileService:
         return {"path": rel_path, "children": walk(root, rel_path if rel_path != "." else ".")}
 
     def list_tree(self) -> list[dict]:
+        cached = get_cached_tree(self.workspace)
+        if cached is not None:
+            return cached
+
         def flatten(nodes: list[dict]) -> list[dict]:
             items: list[dict] = []
             for node in nodes:
@@ -161,4 +169,6 @@ class FileService:
                     items.extend(flatten(children))
             return items
 
-        return flatten(self.tree().get("children", []))
+        items = flatten(self.tree().get("children", []))
+        store_tree_cache(self.workspace, items)
+        return items

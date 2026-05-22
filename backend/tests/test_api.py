@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import json
+import sqlite3
 from starlette.websockets import WebSocketDisconnect
 
 HEADERS = {"X-Api-Token": "dev-token"}
@@ -53,6 +54,77 @@ def test_onboarding_status_empty(client):
     # Module-scoped client may already have projects from other tests.
     assert "complete" in r.json()
     assert "project_count" in r.json()
+
+
+def test_projects_endpoint_migrates_old_schema_db(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from app.api.main import app
+    from app.db.session import reconfigure_engine
+
+    legacy_db = tmp_path / "legacy_projects.db"
+    conn = sqlite3.connect(legacy_db)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE projects (
+                id VARCHAR(36) PRIMARY KEY NOT NULL,
+                name VARCHAR(255),
+                description TEXT DEFAULT '',
+                source_repo_spec TEXT,
+                validation_profile VARCHAR(64) DEFAULT 'python',
+                protected_files_json TEXT DEFAULT '[]',
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL
+            );
+            CREATE TABLE tasks (
+                id VARCHAR(36) PRIMARY KEY NOT NULL,
+                project_id VARCHAR(36) NOT NULL,
+                description TEXT NOT NULL,
+                validation_profile VARCHAR(64) NOT NULL,
+                use_scout BOOLEAN NOT NULL,
+                created_at DATETIME NOT NULL
+            );
+            CREATE TABLE runs (
+                id VARCHAR(36) PRIMARY KEY NOT NULL,
+                project_id VARCHAR(36) NOT NULL,
+                task_id VARCHAR(36) NOT NULL,
+                status VARCHAR(64) NOT NULL,
+                current_stage VARCHAR(64),
+                workspace_path TEXT,
+                review_attempts INTEGER NOT NULL,
+                error_message TEXT,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                operator_feedback TEXT,
+                promote_snapshot_json TEXT
+            );
+            INSERT INTO projects (id, name, description, source_repo_spec, validation_profile, protected_files_json, created_at, updated_at)
+            VALUES ('legacy-project', 'Legacy Project', '', '/tmp/legacy-project', 'python', '[]', '2026-05-22T00:00:00+00:00', '2026-05-22T00:00:00+00:00');
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconfigure_engine(f"sqlite:///{legacy_db}")
+    with TestClient(app) as local_client:
+        response = local_client.get("/api/projects", headers=HEADERS)
+        assert response.status_code == 200
+        body = response.json()
+        assert body[0]["id"] == "legacy-project"
+
+    check = sqlite3.connect(legacy_db)
+    try:
+        run_columns = {row[1] for row in check.execute("PRAGMA table_info(runs)").fetchall()}
+        task_columns = {row[1] for row in check.execute("PRAGMA table_info(tasks)").fetchall()}
+        tables = {row[0] for row in check.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    finally:
+        check.close()
+
+    assert {"task_kind", "failure_class", "failure_subclass", "failure_signature", "recovery_status", "superseded_by_run_id"} <= run_columns
+    assert "task_kind" in task_columns
+    assert "global_skills" in tables
 
 
 def test_run_workspace_isolation(client, tmp_path):
@@ -282,6 +354,93 @@ def test_reviewer_missing_context_fails_fast(client, tmp_path):
     assert "reviewer_failed_fast" in event_types
     assert "run_changes_requested" in event_types
     assert "reviewer_retrying_coder" not in event_types
+
+
+def test_stage_tester_runs_profile_and_skips_forbidden_llm_commands(client, tmp_path):
+    import json as _json
+
+    from app.db.models import AppConfigModel, ProjectModel, RunEventModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.providers.fake import FakeProvider
+    from app.providers.registry import ProviderRegistry
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "tester_workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('ok')\n")
+
+    registry = ProviderRegistry.get()
+    registry.fake_provider = FakeProvider(
+        responses={
+            "tester": _json.dumps(
+                {
+                    "passed": True,
+                    "summary": "Mixed validation plan",
+                    "commands": [
+                        {
+                            "command": "curl -X POST http://localhost:8000/api/health",
+                            "description": "Should be skipped",
+                        },
+                        {"command": "python3 -c \"print(1)\"", "description": "Allowed extra check"},
+                    ],
+                    "notes": [],
+                }
+            )
+        }
+    )
+    registry.reload({})
+
+    db = SessionLocal()
+    try:
+        profiles_row = (
+            db.query(AppConfigModel).filter(AppConfigModel.key == "validation_profiles_json").first()
+        )
+        if profiles_row:
+            profiles_row.value = _json.dumps({"python": ["python3 -m compileall ."]})
+        else:
+            db.add(
+                AppConfigModel(
+                    key="validation_profiles_json",
+                    value=_json.dumps({"python": ["python3 -m compileall ."]}),
+                )
+            )
+        db.commit()
+
+        project = ProjectModel(
+            name="TesterProfile",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(project_id=project.id, description="Validate", validation_profile="python")
+        db.add(task)
+        db.flush()
+        run = RunModel(project_id=project.id, task_id=task.id, status="running", workspace_path=str(workspace))
+        db.add(run)
+        db.commit()
+
+        service = OrchestrationService()
+        result = service._stage_tester(db, run.id, "Validate", workspace)
+        db.refresh(run)
+        events = (
+            db.query(RunEventModel)
+            .filter(RunEventModel.run_id == run.id)
+            .order_by(RunEventModel.id.asc())
+            .all()
+        )
+    finally:
+        db.close()
+
+    assert result is True
+    event_types = [event.event_type for event in events]
+    assert "validation_started" in event_types
+    assert "validation_result" in event_types
+    assert "validation_rejected" in event_types
+    rejected = [event for event in events if event.event_type == "validation_rejected"]
+    assert any("forbidden pattern" in event.message for event in rejected)
+    assert run.status == "running"
 
 
 def test_websocket_requires_token(client, tmp_path):

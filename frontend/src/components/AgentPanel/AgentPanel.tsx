@@ -43,6 +43,7 @@ export function AgentPanel() {
 
   const runSummaries: RunSummary[] = runs.map((r) => ({
     id: String(r.id),
+    display_name: r.display_name != null ? String(r.display_name) : undefined,
     status: String(r.status),
     current_stage: r.current_stage != null ? String(r.current_stage) : null,
     task_id: r.task_id != null ? String(r.task_id) : undefined,

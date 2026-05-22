@@ -120,10 +120,27 @@ def run_migrations() -> None:
 
     if _table_exists("runs"):
         with engine.begin() as conn:
+            if not _column_exists("runs", "task_kind"):
+                conn.execute(text("ALTER TABLE runs ADD COLUMN task_kind VARCHAR(32)"))
             if not _column_exists("runs", "operator_feedback"):
                 conn.execute(text("ALTER TABLE runs ADD COLUMN operator_feedback TEXT"))
             if not _column_exists("runs", "promote_snapshot_json"):
                 conn.execute(text("ALTER TABLE runs ADD COLUMN promote_snapshot_json TEXT"))
+            if not _column_exists("runs", "failure_class"):
+                conn.execute(text("ALTER TABLE runs ADD COLUMN failure_class VARCHAR(64)"))
+            if not _column_exists("runs", "failure_subclass"):
+                conn.execute(text("ALTER TABLE runs ADD COLUMN failure_subclass VARCHAR(128)"))
+            if not _column_exists("runs", "failure_signature"):
+                conn.execute(text("ALTER TABLE runs ADD COLUMN failure_signature VARCHAR(255)"))
+            if not _column_exists("runs", "recovery_status"):
+                conn.execute(text("ALTER TABLE runs ADD COLUMN recovery_status VARCHAR(32)"))
+            if not _column_exists("runs", "superseded_by_run_id"):
+                conn.execute(text("ALTER TABLE runs ADD COLUMN superseded_by_run_id VARCHAR(36)"))
+
+    if _table_exists("tasks"):
+        with engine.begin() as conn:
+            if not _column_exists("tasks", "task_kind"):
+                conn.execute(text("ALTER TABLE tasks ADD COLUMN task_kind VARCHAR(32)"))
 
     if _table_exists("mcp_servers"):
         with engine.begin() as conn:

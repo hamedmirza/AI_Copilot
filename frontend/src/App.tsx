@@ -74,19 +74,57 @@ export default function App() {
   const BrowserComponent = browserContrib?.Component
 
   useEffect(() => {
-    api.health()
-      .then(() => setBackendOnline(true))
-      .catch(() => setBackendOnline(false))
-    api.settings.get().then(setSettings).catch(() => {})
-    Promise.all([
-      api.onboarding.status().catch(() => ({ complete: false, project_count: 0 })),
-      api.projects.list().catch(() => []),
-    ]).then(([onboarding, p]) => {
+    let cancelled = false
+
+    const bootstrap = async () => {
+      if (!useProjectStore.persist.hasHydrated()) {
+        await new Promise<void>((resolve) => {
+          const unsub = useProjectStore.persist.onFinishHydration(() => {
+            unsub()
+            resolve()
+          })
+        })
+      }
+      if (cancelled) return
+
+      api.health()
+        .then(() => setBackendOnline(true))
+        .catch(() => setBackendOnline(false))
+      api.settings.get().then(setSettings).catch(() => {})
+
+      const [onboarding, p] = await Promise.all([
+        api.onboarding.status().catch(() => ({ complete: false, project_count: 0 })),
+        api.projects.list().catch(() => []),
+      ])
+      if (cancelled) return
+
       setProjects(p)
-      if (!onboarding.complete || p.length === 0) setShowOnboarding(true)
-      if (p.length > 0 && !currentProjectId) setCurrentProject(String(p[0].id))
-    }).catch(showError).finally(() => setOnboardingReady(true))
-  }, [])
+      if (!onboarding.complete) {
+        setShowOnboarding(true)
+      } else if (p.length === 0 && onboarding.project_count > 0) {
+        showError('Projects exist but could not be loaded. Check the API and refresh the page.')
+      }
+
+      if (p.length === 0) {
+        setCurrentProject(null)
+        return
+      }
+
+      const savedId = useProjectStore.getState().currentProjectId
+      const validSaved = savedId && p.some((proj) => String(proj.id) === String(savedId))
+      if (!validSaved) {
+        setCurrentProject(String(p[0].id))
+      }
+    }
+
+    bootstrap()
+      .catch(showError)
+      .finally(() => {
+        if (!cancelled) setOnboardingReady(true)
+      })
+
+    return () => { cancelled = true }
+  }, [setBackendOnline, setCurrentProject, setOnboardingReady, setProjects, setSettings, setShowOnboarding])
 
   const bumpTreeRefresh = useEditorStore((s) => s.bumpTreeRefresh)
   const setRunStatus = useRunStore((s) => s.setRunStatus)

@@ -13,6 +13,7 @@ export type RunStatus =
 
 export interface RunSummary {
   id: string
+  display_name?: string
   status: string
   current_stage?: string | null
   task_id?: string
@@ -27,6 +28,7 @@ export interface PromoteSnapshot {
 
 export interface RunDetail {
   id: string
+  display_name?: string
   project_id: string
   task_id: string
   status: string
@@ -85,6 +87,12 @@ const STATUS_COLORS: Record<string, string> = {
 
 export function runStatusLabel(status: string): string {
   return status.replaceAll('_', ' ')
+}
+
+export function runDisplayLabel(run: Pick<RunSummary, 'id' | 'display_name'>): string {
+  const name = String(run.display_name || '').trim()
+  if (name) return name
+  return `${run.id.slice(0, 8)}…`
 }
 
 export function runStatusBadgeClass(status: string): string {

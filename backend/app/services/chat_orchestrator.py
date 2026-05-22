@@ -87,7 +87,26 @@ class ChatOrchestrator:
         except Exception:
             git_branch = None
         mode = self._mode_registry_for(db).get_mode(session.mode)
-        provider = ProviderRegistry.get().resolve_chat_provider(mode.key, session.model_override)
+        registry = ProviderRegistry.get()
+        provider = registry.resolve_chat_provider(mode.key, session.model_override)
+        provider_name = "Ollama" if registry.active_provider() == "ollama" else "LM Studio"
+        resolved_model = str(getattr(provider, "model", "") or "auto")
+        event_bus.emit_chat(
+            session_id,
+            {
+                "type": "meta",
+                "provider": provider_name,
+                "model": resolved_model,
+                "mode": mode.key,
+            },
+        )
+        logger.info(
+            "chat resolved provider=%s model=%s mode=%s session=%s",
+            provider_name,
+            resolved_model,
+            mode.key,
+            session_id,
+        )
         tool_registry = ToolRegistry(db)
         available_tools = tool_registry.resolve_tools(mode)
         tool_schemas = [tool.openai_schema for tool in available_tools.values()]

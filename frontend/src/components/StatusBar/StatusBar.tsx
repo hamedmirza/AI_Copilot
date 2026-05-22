@@ -37,7 +37,7 @@ export function StatusBar() {
   const [uptimeSeconds, setUptimeSeconds] = useState<number | null>(null)
   const [workerCount, setWorkerCount] = useState<number | null>(null)
 
-  const project = projects.find((p) => p.id === currentProjectId)
+  const project = projects.find((p) => String(p.id) === String(currentProjectId))
   const workers = workerCount ?? (typeof settings.worker_count === 'number' ? settings.worker_count : 1)
 
   const refreshHealth = useCallback(async () => {

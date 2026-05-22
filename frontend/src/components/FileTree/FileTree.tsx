@@ -196,7 +196,7 @@ export function FileTree() {
 
   const renderDir = (d: { path: string }, depth = 0) => {
     const indent = depth * 12 + 8
-    const expanded = expandedFolders[d.path] !== false
+    const expanded = expandedFolders[d.path] === true
     return (
       <div key={d.path}>
         <div
