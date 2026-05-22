@@ -7,6 +7,7 @@ FRONTEND_PID_FILE="/tmp/ai-copilot-frontend.pid"
 PORT=8500
 FRONTEND_PORT=5177
 HOST="${HOST:-0.0.0.0}"
+BACKEND_RELOAD="${BACKEND_RELOAD:-0}"
 LOG_DIR="$ROOT/logs"
 LOG_FILE="$LOG_DIR/server.log"
 FRONTEND_LOG_FILE="$LOG_DIR/frontend.log"
@@ -20,6 +21,14 @@ ensure_venv() {
   fi
 }
 
+port_pid() {
+  local port="$1"
+  if ! command -v lsof >/dev/null 2>&1; then
+    return 1
+  fi
+  lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null | head -n 1
+}
+
 is_running() {
   if [[ -f "$PID_FILE" ]]; then
     local pid
@@ -28,6 +37,12 @@ is_running() {
       return 0
     fi
     rm -f "$PID_FILE"
+  fi
+  local pid
+  pid=$(port_pid "$PORT" || true)
+  if [[ -n "$pid" ]]; then
+    echo "$pid" >"$PID_FILE"
+    return 0
   fi
   return 1
 }
@@ -40,6 +55,12 @@ is_frontend_running() {
       return 0
     fi
     rm -f "$FRONTEND_PID_FILE"
+  fi
+  local pid
+  pid=$(port_pid "$FRONTEND_PORT" || true)
+  if [[ -n "$pid" ]]; then
+    echo "$pid" >"$FRONTEND_PID_FILE"
+    return 0
   fi
   return 1
 }
@@ -58,7 +79,7 @@ kill_port_strays() {
 wait_for_health() {
   local attempts=30
   for ((i=1; i<=attempts; i++)); do
-    if curl -sf --max-time 2 "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
+    if [[ -n "$(port_pid "$PORT" || true)" ]] && curl -sf --max-time 2 "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.5
@@ -69,12 +90,36 @@ wait_for_health() {
 wait_for_frontend() {
   local attempts=30
   for ((i=1; i<=attempts; i++)); do
-    if curl -sf --max-time 2 "http://127.0.0.1:${FRONTEND_PORT}/" >/dev/null 2>&1; then
+    if curl -sf --max-time 2 "http://localhost:${FRONTEND_PORT}/" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.5
   done
   return 1
+}
+
+launch_detached() {
+  local log_file="$1"
+  shift
+  python3 - "$log_file" "$@" <<'PY'
+import os
+import subprocess
+import sys
+
+log_path = sys.argv[1]
+cmd = sys.argv[2:]
+with open(log_path, "ab", buffering=0) as log:
+    proc = subprocess.Popen(
+        cmd,
+        cwd=os.getcwd(),
+        env=os.environ.copy(),
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=log,
+        start_new_session=True,
+    )
+print(proc.pid)
+PY
 }
 
 cmd_start() {
@@ -88,14 +133,18 @@ cmd_start() {
   kill_port_strays "$PORT"
 
   export PYTHONPATH="$ROOT/backend"
-  nohup "$ROOT/backend/.venv/bin/uvicorn" app.api.main:app \
-    --host "$HOST" \
-    --port "$PORT" \
-    --app-dir "$ROOT/backend" \
-    >>"$LOG_FILE" 2>&1 &
-
-  echo $! >"$PID_FILE"
+  local uvicorn_args=(
+    app.api.main:app
+    --host "$HOST"
+    --port "$PORT"
+    --app-dir "$ROOT/backend"
+  )
+  if [[ "$BACKEND_RELOAD" == "1" ]]; then
+    uvicorn_args+=(--reload)
+  fi
+  launch_detached "$LOG_FILE" "$ROOT/backend/.venv/bin/uvicorn" "${uvicorn_args[@]}" >"$PID_FILE"
   if wait_for_health; then
+    echo "$(port_pid "$PORT")" >"$PID_FILE"
     echo "Backend started (pid $(cat "$PID_FILE")) on port $PORT"
   else
     echo "Backend failed health check — see $LOG_FILE"
@@ -116,10 +165,10 @@ cmd_start_frontend() {
   mkdir -p "$LOG_DIR"
   kill_port_strays "$FRONTEND_PORT"
 
-  nohup npm --prefix "$ROOT/frontend" run dev >>"$FRONTEND_LOG_FILE" 2>&1 &
-  echo $! >"$FRONTEND_PID_FILE"
+  launch_detached "$FRONTEND_LOG_FILE" npm --prefix "$ROOT/frontend" run dev >"$FRONTEND_PID_FILE"
 
   if wait_for_frontend; then
+    echo "$(port_pid "$FRONTEND_PORT")" >"$FRONTEND_PID_FILE"
     echo "Frontend started (pid $(cat "$FRONTEND_PID_FILE")) on port $FRONTEND_PORT"
   else
     echo "Frontend failed to start on port $FRONTEND_PORT — see $FRONTEND_LOG_FILE"
@@ -172,6 +221,10 @@ cmd_restart() {
   cmd_start
 }
 
+cmd_start_dev() {
+  BACKEND_RELOAD=1 cmd_start
+}
+
 cmd_status() {
   if is_running; then
     echo "Backend: running (pid $(cat "$PID_FILE"), port $PORT)"
@@ -187,13 +240,14 @@ cmd_status() {
 
 case "${1:-}" in
   start) cmd_start ;;
+  start-dev) cmd_start_dev ;;
   start-frontend) cmd_start_frontend ;;
   start-all) cmd_start_all ;;
   stop) cmd_stop ;;
   restart) cmd_restart ;;
   status) cmd_status ;;
   *)
-    echo "Usage: $0 {start|start-frontend|start-all|stop|restart|status}"
+    echo "Usage: $0 {start|start-dev|start-frontend|start-all|stop|restart|status}"
     exit 1
     ;;
 esac

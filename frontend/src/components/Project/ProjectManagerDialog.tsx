@@ -4,14 +4,12 @@ import { api } from '@/api/client'
 import { useEditorStore, useProjectStore, useRunStore } from '@/store'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button } from '@/components/ui/primitives'
-
-const VALIDATION_PROFILES = [
-  { value: 'python', label: 'Python' },
-  { value: 'react', label: 'React' },
-  { value: 'fullstack', label: 'Fullstack' },
-  { value: 'node', label: 'Node' },
-  { value: 'custom', label: 'Custom' },
-] as const
+import {
+  ProjectAddWizard,
+  VALIDATION_PROFILES,
+  emptyWizardForm,
+  type ProjectWizardForm,
+} from './ProjectAddWizard'
 
 interface ProjectRow {
   id: string
@@ -30,21 +28,9 @@ interface Props {
 
 type SourceType = 'workspace' | 'git'
 
-interface FormState {
-  name: string
-  description: string
-  source_type: SourceType
-  source_repo_spec: string
-  validation_profile: string
-}
+type FormState = ProjectWizardForm
 
-const emptyForm = (): FormState => ({
-  name: '',
-  description: '',
-  source_type: 'workspace',
-  source_repo_spec: '',
-  validation_profile: 'python',
-})
+const emptyForm = emptyWizardForm
 
 function inferSourceType(spec: string): SourceType {
   return spec.trim().startsWith('https://') ? 'git' : 'workspace'
@@ -95,6 +81,14 @@ function ProjectForm({
     setBrowsing(true)
     try {
       const result = await api.dialog.pickDirectory('Select or create a project folder')
+      if (result.error === 'timeout') {
+        showError('Folder picker timed out. Try again or enter the path manually.')
+        return
+      }
+      if (result.error) {
+        showError(`Folder picker failed: ${result.error}`)
+        return
+      }
       if (!result.cancelled && result.path) {
         setForm({ ...form, source_repo_spec: result.path })
         setError('')
@@ -395,13 +389,12 @@ export function ProjectManagerDialog({ open, onClose, initialMode = 'list', onPr
 
         <div className="overflow-y-auto flex-1">
           {mode === 'add' && (
-            <ProjectForm
+            <ProjectAddWizard
               form={addForm}
               setForm={setAddForm}
               onSubmit={handleCreate}
               onCancel={() => { setMode('list'); setAddForm(emptyForm()) }}
               submitting={submitting}
-              submitLabel="Create Project"
             />
           )}
 

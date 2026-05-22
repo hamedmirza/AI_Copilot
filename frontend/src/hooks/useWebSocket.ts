@@ -1,12 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
-import { getToken } from '@/api/client'
+import { wsUrl } from '@/api/client'
 import { useAppStore } from '@/store'
-
-function wsConnectUrl(path: string): string {
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const sep = path.includes('?') ? '&' : '?'
-  return `${proto}//${window.location.host}${path}${sep}token=${encodeURIComponent(getToken())}`
-}
 
 export function useWebSocket(
   path: string,
@@ -18,16 +12,21 @@ export function useWebSocket(
   const backoffRef = useRef(1000)
   const timerRef = useRef<number | null>(null)
   const onMessageRef = useRef(onMessage)
+  const intentionalCloseRef = useRef(false)
   const setReconnecting = useAppStore((s) => s.setWsReconnecting)
 
   onMessageRef.current = onMessage
 
   const connect = useCallback(() => {
-    if (!enabled || !path) return
-    const ws = new WebSocket(wsConnectUrl(path))
+    if (!enabled || !path || intentionalCloseRef.current) return
+    const ws = new WebSocket(wsUrl(path))
     wsRef.current = ws
 
     ws.onopen = () => {
+      if (intentionalCloseRef.current) {
+        ws.close()
+        return
+      }
       backoffRef.current = 1000
       if (trackStatus) setReconnecting(false)
     }
@@ -41,20 +40,40 @@ export function useWebSocket(
     }
 
     ws.onclose = () => {
+      if (wsRef.current === ws) wsRef.current = null
+      if (intentionalCloseRef.current) return
       if (trackStatus) setReconnecting(true)
       const delay = Math.min(backoffRef.current, 30000)
       backoffRef.current = Math.min(backoffRef.current * 2, 30000)
       timerRef.current = window.setTimeout(connect, delay)
     }
 
-    ws.onerror = () => ws.close()
+    ws.onerror = () => {
+      if (!intentionalCloseRef.current) ws.close()
+    }
   }, [path, enabled, trackStatus, setReconnecting])
 
   useEffect(() => {
+    intentionalCloseRef.current = false
     connect()
     return () => {
-      if (timerRef.current) clearTimeout(timerRef.current)
-      wsRef.current?.close()
+      intentionalCloseRef.current = true
+      if (timerRef.current) {
+        clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+      const ws = wsRef.current
+      wsRef.current = null
+      if (!ws) return
+      ws.onopen = null
+      ws.onmessage = null
+      ws.onerror = null
+      ws.onclose = null
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close()
+      } else if (ws.readyState === WebSocket.CONNECTING) {
+        ws.onopen = () => ws.close()
+      }
     }
   }, [connect])
 

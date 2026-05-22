@@ -53,13 +53,22 @@ All runtime settings are stored in SQLite (`backend/app.db`) — no server resta
 
 ## Testing
 
+See [docs/TESTING.md](docs/TESTING.md) for details.
+
 ```bash
+# Backend — use project venv (system Python 3.9 lacks ptyprocess)
 cd backend && .venv/bin/pytest
+
+# Frontend production build
 npm --prefix frontend run build
 ```
 
+Targeted examples: `tests/test_api.py`, `tests/test_chat.py`.
+
 ## Documentation
 
+- Agent guide: [AGENTS.md](AGENTS.md)
+- Testing: [docs/TESTING.md](docs/TESTING.md)
 - Master checklist: [docs/TASK_CHECKLIST.md](docs/TASK_CHECKLIST.md)
 - Change requests: [docs/CHANGE_REQUESTS/](docs/CHANGE_REQUESTS/)
 

@@ -1,0 +1,28 @@
+# Large dependency directories — exclude from Cursor indexing and file watching
+backend/.venv/
+frontend/node_modules/
+frontend/dist/
+
+# Per-run pipeline workspaces (dynamically created at runtime)
+backend/workspaces/
+
+# SQLite database files (binary, actively written)
+backend/*.db
+backend/*.db-wal
+backend/*.db-shm
+backend/test_*.db
+backend/test_*.db-wal
+backend/test_*.db-shm
+
+# Build artifacts
+backend/build/
+backend/dist/
+backend/*.egg-info/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+__pycache__/
+
+# Logs (actively written)
+logs/
+*.log

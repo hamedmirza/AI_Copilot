@@ -5,9 +5,9 @@ class AppConfigSchema(BaseModel):
     lmstudio_base_url: str
     lmstudio_api_key: str = "lm-studio"
     lmstudio_model: str = ""
-    ollama_base_url: str = "http://127.0.0.1:11434/v1"
+    ollama_base_url: str = "http://172.10.1.2:11434/v1"
     ollama_enabled: bool = False
-    provider_timeout_seconds: int = 120
+    provider_timeout_seconds: int = 300
     auto_resume_enabled: bool = True
     worker_count: int = 1
     max_review_retries: int = 3

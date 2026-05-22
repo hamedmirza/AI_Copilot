@@ -37,6 +37,50 @@ def test_planner_agent(provider: FakeProvider):
     assert len(result.steps) >= 1
 
 
+def test_planner_normalizes_llm_field_aliases(provider: FakeProvider):
+    provider.set_response_for_keyword(
+        "planner",
+        {
+            "task": "Review the whole codebase",
+            "steps": [
+                {
+                    "id": 1,
+                    "name": "Repository scan",
+                    "description": "Map structure",
+                    "acceptance_criteria": ["Structure documented"],
+                }
+            ],
+        },
+    )
+    result = PlannerAgent(provider).plan("Review the whole codebase")
+    assert result.summary == "Review the whole codebase"
+    assert result.steps[0].step_id == "1"
+    assert result.steps[0].title == "Repository scan"
+
+
+def test_architect_normalizes_llm_field_aliases(provider: FakeProvider):
+    provider.set_response_for_keyword(
+        "architect",
+        {
+            "status": "Repository constraints still allow a draft blueprint.",
+            "components": ["backend", "frontend"],
+            "files": [
+                {
+                    "file": "backend/app/api/routes/api.py",
+                    "type": "modify",
+                    "reason": "Expose account history reconciliation",
+                }
+            ],
+        },
+    )
+    result = ArchitectAgent(provider).design("Architect the change")
+    assert result.overview == "Repository constraints still allow a draft blueprint."
+    assert result.modules == ["backend", "frontend"]
+    assert result.file_changes[0].path == "backend/app/api/routes/api.py"
+    assert result.file_changes[0].action == "modify"
+    assert result.file_changes[0].rationale == "Expose account history reconciliation"
+
+
 def test_architect_agent(provider: FakeProvider):
     agent = ArchitectAgent(provider)
     result = agent.design("Build API")
@@ -63,6 +107,43 @@ def test_coder_agent(provider: FakeProvider):
     result = agent.code("Implement feature")
     assert isinstance(result, CoderOutput)
     assert len(result.file_changes) >= 1
+
+
+def test_coder_normalizes_llm_field_aliases(provider: FakeProvider):
+    provider.set_response_for_keyword(
+        "coder",
+        {
+            "status": "Applied the requested update.",
+            "patches": [
+                {
+                    "file": "backend/app/services/workspace_service.py",
+                    "line_changes": [
+                        {"start_line": 1, "end_line": 1, "new_content": "# changed\n"}
+                    ],
+                }
+            ],
+        },
+    )
+    result = CoderAgent(provider).code("Implement the update")
+    assert result.summary == "Applied the requested update."
+    assert result.file_changes[0].path == "backend/app/services/workspace_service.py"
+
+
+def test_agent_injects_schema_contract(provider: FakeProvider):
+    PlannerAgent(provider).plan("Build a REST API for todos")
+    _system_prompt, user_prompt = provider.call_log[-1]
+    assert "Return JSON matching this schema exactly" in user_prompt
+    assert "\"schema_name\": \"PlannerOutput\"" in user_prompt
+
+
+def test_agent_adds_lmstudio_specific_requirements():
+    class FakeLMStudioProvider(FakeProvider):
+        pass
+
+    provider = FakeLMStudioProvider()
+    PlannerAgent(provider).plan("Build a REST API for todos")
+    system_prompt, _user_prompt = provider.call_log[-1]
+    assert "LM Studio requirement" in system_prompt
 
 
 def test_reviewer_agent(provider: FakeProvider):
@@ -92,6 +173,26 @@ def test_command_whitelist_rejects_rm():
 
     with pytest.raises(CommandRejectedError):
         validate_command("rm -rf ./")
+
+
+def test_command_whitelist_allows_git_diff():
+    from app.tools.command_runner import validate_command
+
+    validate_command("git diff --stat")
+
+
+def test_command_whitelist_rejects_curl():
+    from app.core.exceptions import CommandRejectedError
+    from app.tools.command_runner import validate_command
+
+    with pytest.raises(CommandRejectedError, match="forbidden pattern"):
+        validate_command("curl -X POST http://localhost:8000/api/health")
+
+
+def test_command_whitelist_allows_rg():
+    from app.tools.command_runner import validate_command
+
+    validate_command("rg idempotency_key app/")
 
 
 def test_path_traversal_guard():

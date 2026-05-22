@@ -5,7 +5,7 @@ import { useProjectStore } from '@/store'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button, EmptyState, Skeleton } from '@/components/ui/primitives'
 
-export function GitPanel() {
+export function GitPanel({ pollWhenVisible = true }: { pollWhenVisible?: boolean }) {
   const projectId = useProjectStore((s) => s.currentProjectId)
   const [status, setStatus] = useState<{ staged: Array<{ path: string; status: string }>; unstaged: Array<{ path: string; status: string }>; untracked: Array<{ path: string; status: string }>; branch?: string; has_remote?: boolean } | null>(null)
   const [commitMsg, setCommitMsg] = useState('')
@@ -34,9 +34,10 @@ export function GitPanel() {
 
   useEffect(() => {
     refresh()
+    if (!pollWhenVisible) return
     const interval = setInterval(refresh, 5000)
     return () => clearInterval(interval)
-  }, [refresh])
+  }, [refresh, pollWhenVisible])
 
   const viewDiff = async (path: string) => {
     if (!projectId) return

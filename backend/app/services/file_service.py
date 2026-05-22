@@ -7,6 +7,22 @@ from pathlib import Path
 from app.core.exceptions import NotFoundError, PathTraversalError, PatchGuardError
 from app.tools.patch_guard import apply_line_changes, check_patch_allowed
 
+# Directories omitted from explorer/search tree (still on disk).
+_TREE_SKIP_DIRS = frozenset({
+    "__pycache__",
+    "node_modules",
+    ".git",
+    ".venv",
+    "venv",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "dist",
+    "build",
+    ".next",
+    ".turbo",
+})
+
 
 def _resolve_path(workspace: Path, rel_path: str) -> Path:
     if ".." in rel_path.replace("\\", "/").split("/"):
@@ -107,6 +123,10 @@ class FileService:
             for entry in entries:
                 if entry.name.startswith(".") and entry.name not in (".env.example",):
                     continue
+                if entry.is_dir() and entry.name in _TREE_SKIP_DIRS:
+                    continue
+                if entry.is_dir() and entry.name.endswith(".egg-info"):
+                    continue
                 rel = f"{prefix}/{entry.name}" if prefix != "." else entry.name
                 if entry.is_dir():
                     nodes.append(
@@ -131,5 +151,14 @@ class FileService:
         return {"path": rel_path, "children": walk(root, rel_path if rel_path != "." else ".")}
 
     def list_tree(self) -> list[dict]:
-        data = self.tree()
-        return data.get("children", [])
+        def flatten(nodes: list[dict]) -> list[dict]:
+            items: list[dict] = []
+            for node in nodes:
+                item = {k: v for k, v in node.items() if k != "children"}
+                items.append(item)
+                children = node.get("children")
+                if children:
+                    items.extend(flatten(children))
+            return items
+
+        return flatten(self.tree().get("children", []))

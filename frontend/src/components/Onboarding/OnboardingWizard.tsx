@@ -8,7 +8,9 @@ import { Button } from '@/components/ui/primitives'
 export function OnboardingWizard() {
   const show = useAppStore((s) => s.showOnboarding)
   const setShowOnboarding = useAppStore((s) => s.setShowOnboarding)
+  const projects = useProjectStore((s) => s.projects)
   const setProjects = useProjectStore((s) => s.setProjects)
+  const allowSkip = projects.length > 0
   const setCurrentProject = useProjectStore((s) => s.setCurrentProject)
   const [step, setStep] = useState(1)
   const [lmUrl, setLmUrl] = useState('http://192.168.128.70:1234/v1')
@@ -78,12 +80,14 @@ export function OnboardingWizard() {
       <div className="relative bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg p-8 w-[500px]">
         <h1 className="text-xl font-medium mb-2">Welcome to AI Copilot</h1>
         <p className="text-[var(--text-secondary)] text-sm mb-6">Step {step} of 3</p>
-        <button
-          className="absolute top-4 right-4 text-xs text-[var(--text-secondary)] hover:text-white"
-          onClick={() => setShowOnboarding(false)}
-        >
-          Skip
-        </button>
+        {allowSkip && (
+          <button
+            className="absolute top-4 right-4 text-xs text-[var(--text-secondary)] hover:text-white"
+            onClick={() => setShowOnboarding(false)}
+          >
+            Skip
+          </button>
+        )}
 
         {step === 1 && (
           <>

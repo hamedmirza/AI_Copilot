@@ -2,42 +2,68 @@
 
 | CR  | Title                          | Status | Files Changed | Verified | Date       |
 |-----|--------------------------------|--------|---------------|----------|------------|
-| 001 | Bootstrap & Server             | [x]    | scripts/, backend/app/api/main.py, backend/pyproject.toml | Yes | 2026-05-21 |
+| 001 | Bootstrap & Server             | [x]    | scripts/server.sh, backend/app/api/main.py | Yes | 2026-05-21 |
 | 002 | Database Layer                 | [x]    | backend/app/db/ | Yes | 2026-05-21 |
 | 003 | LM Provider Router             | [x]    | backend/app/providers/ | Yes | 2026-05-21 |
-| 004 | All 7 Agent Implementations    | [x]    | backend/app/agents/, backend/app/schemas/agent_outputs.py | Yes | 2026-05-21 |
-| 005 | Run Engine & Orchestration     | [x]    | backend/app/services/orchestration_service.py, run_engine/ | Yes | 2026-05-21 |
-| 006 | File Service & Patch Guard     | [x]    | backend/app/services/file_service.py, tools/patch_guard.py | Yes | 2026-05-21 |
-| 007 | Projects API & Multi-Repo      | [x]    | backend/app/services/project_service.py, api/routes/ | Yes | 2026-05-21 |
-| 008 | Frontend IDE Shell             | [x]    | frontend/src/App.tsx, store/, ActivityBar | Yes | 2026-05-21 |
-| 009 | File Tree & Monaco Editor      | [x]    | frontend/src/components/FileTree/, Editor/ | Yes | 2026-05-21 |
-| 010 | Terminal Panel                 | [x]    | frontend/src/components/Terminal/, api terminal WS | Yes | 2026-05-21 |
-| 011 | Agent Panel & Pipeline UI      | [x]    | frontend/src/components/AgentPanel/ | Yes | 2026-05-21 |
-| 012 | Git Panel                      | [x]    | frontend/src/components/GitPanel/, git_service.py | Yes | 2026-05-21 |
-| 013 | Settings & LM Configuration    | [x]    | frontend/src/components/Settings/ | Yes | 2026-05-21 |
-| 014 | Validation Profiles & Tester   | [x]    | backend/app/tools/command_runner.py | Yes | 2026-05-21 |
-| 015 | Logging & Observability        | [x]    | backend/app/core/logging.py, LogViewer | Yes | 2026-05-21 |
-| 016 | Onboarding & Empty States      | [x]    | frontend/src/components/Onboarding/ | Yes | 2026-05-21 |
-| 017 | Documentation & CR Registry    | [x]    | docs/, README.md, .env.example | Yes | 2026-05-21 |
-| 018 | Search, Rename, Artifacts, Delete | [x] | frontend SearchPanel, FileTree, ArtifactViewer, ProjectDeleteDialog; api rename endpoint | Yes | 2026-05-21 |
+| 004 | All 7 Agent Implementations    | [x]    | backend/app/agents/ | Yes | 2026-05-21 |
+| 005 | Run Engine & Orchestration     | [x]    | orchestration_service.py, workspace_service.py | Yes | 2026-05-21 |
+| 006 | File Service & Patch Guard     | [x]    | file_service.py, patch_guard.py | Yes | 2026-05-21 |
+| 007 | Projects API & Multi-Repo      | [x]    | project_service.py, api routes | Yes | 2026-05-21 |
+| 008 | Frontend IDE Shell             | [x]    | frontend/src/App.tsx, store/ | Yes | 2026-05-21 |
+| 009 | File Tree & Monaco Editor      | [x]    | FileTree/, Editor/ | Yes | 2026-05-21 |
+| 010 | Terminal Panel                 | [x]    | Terminal/, terminal WS | Yes | 2026-05-21 |
+| 011 | Agent Panel & Pipeline UI      | [x]    | AgentPanel/, ApproveDialog Monaco diff | Yes | 2026-05-21 |
+| 012 | Git Panel                      | [x]    | GitPanel/, git_service.py | Yes | 2026-05-21 |
+| 013 | Settings & LM Configuration    | [x]    | Settings/, POST /api/settings/reset | Yes | 2026-05-21 |
+| 014 | Validation Profiles & Tester   | [x]    | command_runner.py | Yes | 2026-05-21 |
+| 015 | Logging & Observability        | [x]    | logging.py, LogViewer | Yes | 2026-05-21 |
+| 016 | Onboarding & Empty States      | [x]    | Onboarding/, onboarding/status API | Yes | 2026-05-21 |
+| 017 | Documentation & CR Registry    | [x]    | docs/CHANGE_REQUESTS/, README.md | Yes | 2026-05-21 |
+| 018 | Search, Rename, Artifacts, Delete | [x] | SearchPanel, FileTree, ProjectDeleteDialog | Yes | 2026-05-21 |
 
-## Verification Summary (2026-05-21, re-verified)
+## Verification Summary (2026-05-21 — plan completion)
 
-- `./scripts/server.sh start` → health 200 `{"status":"ok","version":"0.1.0"}`
-- Second start → `Server already running (pid 98447)`
-- `npm --prefix frontend run build` → success (tsc + vite)
-- `pytest` → 14 passed
-- Browser E2E → `http://localhost:5177` (fixed Vite dev port; fails if busy instead of auto-increment)
-  - Search, Settings, Agent validation, delete confirm, Git, onboarding Help, Monaco open file
+### Automated
 
-## Gap Closure (2026-05-21)
+| Check | Result |
+|-------|--------|
+| `./scripts/server.sh stop` then `pytest -q` | **38 passed** |
+| `npm --prefix frontend run build` | Success (tsc + vite) |
+| `GET /api/health` | `{"status":"ok","version":"0.1.0"}` |
+| `POST /api/settings/reset` | Reverts to `http://192.168.128.70:1234/v1`, `worker_count: 1` |
+| `test_run_workspace_isolation` | Run workspace under `backend/workspaces/{run_id}`, source unchanged until approve |
 
-- Search panel: file search by path fragment in sidebar
-- File tree: inline rename, drag-and-drop move, proper context menu (rename/delete/copy path)
-- File tree auto-refresh: global WS triggers refresh 3s after `run_completed` / `code_patch_applied` / `awaiting_approval`
-- Agent panel: WS run status from pipeline events; collapsible JSON artifacts with copy
-- Project delete: type-name-to-confirm dialog in top bar
-- Project switch: clears editor tabs and agent state; overlay shows project name
-- Terminal: explicit Ctrl+C (`\x03`) relay to PTY
-- Duplicate route modules removed (consolidated in `api.py` only)
-- Onboarding: Skip button; re-open via Help menu
+### Browser E2E (`http://localhost:5177`)
+
+| Flow | Result |
+|------|--------|
+| Manage Projects → Add Project 3-step wizard | Pass — Step 1 (name/description) → Step 2 (repo/picker) → Step 3 (validation profile + Create) |
+| Manage Projects (list / edit / remove) | Pass |
+| Settings (`Cmd+,` / gear) | Pass |
+| Editor + Monaco | Pass |
+| Agent panel (RUNS tab) | Pass — task form, stage chips, Approve/Reject/Retry |
+| Approve dialog Monaco diff (§7B) | Implemented — side-by-side `DiffEditor` per changed file from coder artifact; requires `awaiting_approval` run to exercise live |
+| Terminal / Git panel | Pass |
+
+### Gap fixes (final pass)
+
+1. **§7H Manage Projects Add** — `ProjectAddWizard.tsx` (3 steps: details → repository with Browse/Git → validation profile review); wired in `ProjectManagerDialog` add mode.
+2. **§7B ApproveDialog Monaco diff** — `coderPatchDiff.ts` + `applyLineChanges.ts`; `ApproveDialog` loads original (project source) vs proposed (coder patch) in Monaco `DiffEditor` with per-file tabs.
+3. **Per-run workspace isolation** — `workspace_service.prepare_run_workspace()`; approve promotes then discards.
+4. **Settings reset** — `POST /api/settings/reset`.
+5. **Fresh-DB onboarding** — `GET /api/onboarding/status`; Help menu re-opens wizard.
+
+## Known limitations (non-blocking)
+
+- **LM Studio live test** at `192.168.128.70:1234` not verified on this machine when LAN host is offline; Test Connection works when reachable.
+- **pytest teardown** — background run workers may log `Event loop is closed` after TestClient shutdown (benign; tests still pass).
+
+## Commands
+
+```bash
+./scripts/server.sh start-all       # backend :8500 + frontend :5177
+./scripts/server.sh status
+
+cd backend && .venv/bin/pytest -q
+npm --prefix frontend run build
+```

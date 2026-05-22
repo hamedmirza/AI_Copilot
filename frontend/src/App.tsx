@@ -3,27 +3,27 @@ import { Toaster } from 'sonner'
 import { api } from '@/api/client'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { ActivityBar } from '@/components/ActivityBar/ActivityBar'
-import { FileTree } from '@/components/FileTree/FileTree'
 import { EditorPanel } from '@/components/Editor/EditorPanel'
 import { AgentPanel } from '@/components/AgentPanel/AgentPanel'
+import { ChatPanel } from '@/components/Chat/ChatPanel'
 import { GitPanel } from '@/components/GitPanel/GitPanel'
 import { TerminalPanel } from '@/components/Terminal/TerminalPanel'
 import { LogViewer } from '@/components/LogViewer/LogViewer'
 import { SettingsPanel } from '@/components/Settings/SettingsPanel'
-import { SearchPanel } from '@/components/Search/SearchPanel'
 import { OnboardingWizard } from '@/components/Onboarding/OnboardingWizard'
 import { ProjectManagerDialog } from '@/components/Project/ProjectManagerDialog'
 import { StatusBar } from '@/components/StatusBar/StatusBar'
-import { useAppStore, useEditorStore, useProjectStore, useRunStore, useSettingsStore, useUIStore } from '@/store'
+import { useAppStore, useChatStore, useEditorStore, useProjectStore, useRunStore, useSettingsStore, useUIStore } from '@/store'
 import { Button, EmptyState } from '@/components/ui/primitives'
 import { showError } from '@/lib/toast'
+import { getContribution } from '@/workbench/registry'
 
 function SidebarContent() {
   const panel = useUIStore((s) => s.activePanel)
-  if (panel === 'agents') return <AgentPanel />
-  if (panel === 'git') return <GitPanel />
-  if (panel === 'search') return <SearchPanel />
-  return <FileTree />
+  const contrib = getContribution('sidebar', panel)
+  if (!contrib) return null
+  const Component = contrib.Component
+  return <Component />
 }
 
 function ResizeHandle({ onDrag }: { onDrag: (delta: number) => void }) {
@@ -47,45 +47,63 @@ function ResizeHandle({ onDrag }: { onDrag: (delta: number) => void }) {
 
 export default function App() {
   const {
-    sidebarWidth, rightPanelWidth, bottomPanelHeight,
+    sidebarWidth, sidebarCollapsed, rightPanelWidth, bottomPanelHeight,
     rightPanelCollapsed, bottomPanelCollapsed, bottomTab,
+    rightPanelTab, activeCenterView,
     setSidebarWidth, setRightPanelWidth, setBottomPanelHeight,
     activePanel,
   } = useUIStore()
   const { projects, currentProjectId, setProjects, setCurrentProject } = useProjectStore()
   const { setSettings } = useSettingsStore()
-  const { setBackendOnline, setShowOnboarding, setShowSettings } = useAppStore()
+  const {
+    onboardingReady,
+    setBackendOnline,
+    setOnboardingReady,
+    setShowOnboarding,
+    setShowSettings,
+    setWsConnections,
+  } = useAppStore()
   const [switching, setSwitching] = useState(false)
   const [projectManagerOpen, setProjectManagerOpen] = useState(false)
   const [projectManagerMode, setProjectManagerMode] = useState<'list' | 'add'>('list')
 
   const currentProject = projects.find((p) => String(p.id) === currentProjectId)
-  const panelTitle = activePanel === 'agents' ? 'Agents'
-    : activePanel === 'git' ? 'Git'
-    : activePanel === 'search' ? 'Search'
-    : 'Explorer'
+  const sidebarContrib = getContribution('sidebar', activePanel)
+  const panelTitle = sidebarContrib?.title ?? 'Explorer'
+  const browserContrib = getContribution('center', 'browser')
+  const BrowserComponent = browserContrib?.Component
 
   useEffect(() => {
     api.health()
       .then(() => setBackendOnline(true))
       .catch(() => setBackendOnline(false))
     api.settings.get().then(setSettings).catch(() => {})
-    api.onboarding.status().then((s) => {
-      if (!s.complete) setShowOnboarding(true)
-    }).catch(() => {})
-    api.projects.list().then((p) => {
+    Promise.all([
+      api.onboarding.status().catch(() => ({ complete: false, project_count: 0 })),
+      api.projects.list().catch(() => []),
+    ]).then(([onboarding, p]) => {
       setProjects(p)
+      if (!onboarding.complete || p.length === 0) setShowOnboarding(true)
       if (p.length > 0 && !currentProjectId) setCurrentProject(String(p[0].id))
-    }).catch(showError)
+    }).catch(showError).finally(() => setOnboardingReady(true))
   }, [])
 
   const bumpTreeRefresh = useEditorStore((s) => s.bumpTreeRefresh)
   const setRunStatus = useRunStore((s) => s.setRunStatus)
   const currentRunId = useRunStore((s) => s.currentRunId)
+  const spawnedRunIds = useChatStore((s) => s.spawnedRunIds)
+  const addRunEvent = useChatStore((s) => s.addRunEvent)
+
+  const gitPanelVisible =
+    activePanel === 'git' || (bottomTab === 'git' && !bottomPanelCollapsed)
 
   useWebSocket('/api/ws/events', useCallback((data) => {
     const ev = data as Record<string, unknown>
     const type = String(ev.type || '')
+    if (type === 'ping' && typeof ev.connections === 'number') {
+      setWsConnections(ev.connections)
+    }
+    const runId = String(ev.run_id || '')
     if (type === 'awaiting_approval') setRunStatus('awaiting_approval', String(ev.stage || ''))
     else if (type === 'run_blocked') setRunStatus('blocked', String(ev.stage || ''))
     else if (type === 'run_failed') setRunStatus('failed', String(ev.stage || ''))
@@ -93,10 +111,13 @@ export default function App() {
     else if (type.endsWith('_started') && ev.run_id === currentRunId) {
       setRunStatus('running', type.replace('_started', ''))
     }
+    if (runId && spawnedRunIds.includes(runId)) {
+      addRunEvent(runId, ev)
+    }
     if (['run_completed', 'code_patch_applied', 'awaiting_approval'].includes(type)) {
       window.setTimeout(() => bumpTreeRefresh(), 3000)
     }
-  }, [bumpTreeRefresh, setRunStatus, currentRunId]), true)
+  }, [addRunEvent, bumpTreeRefresh, currentRunId, setRunStatus, setWsConnections, spawnedRunIds]), true)
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -120,8 +141,9 @@ export default function App() {
     setSwitching(true)
     useEditorStore.getState().clearWorkspace()
     useRunStore.getState().resetRunPanel()
+    useChatStore.getState().resetChatState()
     setCurrentProject(id)
-    useUIStore.getState().setActivePanel('explorer')
+    useUIStore.getState().openSidebarPanel('explorer')
     bumpTreeRefresh()
     setTimeout(() => setSwitching(false), 500)
   }
@@ -196,20 +218,28 @@ export default function App() {
       <div className="flex-1 flex overflow-hidden">
         <ActivityBar />
 
-        <div style={{ width: sidebarWidth }} className="shrink-0 border-r border-[var(--border)] overflow-hidden flex flex-col">
-          <div className="px-3 py-1.5 text-xs uppercase text-[var(--text-secondary)] border-b border-[var(--border)]">
-            {panelTitle}
-          </div>
-          <div className="flex-1 overflow-hidden">
-            <SidebarContent />
-          </div>
-        </div>
+        {!sidebarCollapsed && (
+          <>
+            <div style={{ width: sidebarWidth }} className="shrink-0 border-r border-[var(--border)] overflow-hidden flex flex-col">
+              <div className="px-3 py-1.5 text-xs uppercase text-[var(--text-secondary)] border-b border-[var(--border)]">
+                {panelTitle}
+              </div>
+              <div className="flex-1 overflow-hidden">
+                <SidebarContent />
+              </div>
+            </div>
 
-        <ResizeHandle onDrag={(d) => setSidebarWidth(Math.max(180, sidebarWidth + d))} />
+            <ResizeHandle onDrag={(d) => setSidebarWidth(Math.max(180, sidebarWidth + d))} />
+          </>
+        )}
 
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="flex-1 overflow-hidden">
-            <EditorPanel />
+            {activeCenterView === 'browser' && BrowserComponent ? (
+              <BrowserComponent />
+            ) : (
+              <EditorPanel />
+            )}
           </div>
 
           {!bottomPanelCollapsed && (
@@ -247,7 +277,7 @@ export default function App() {
                 </div>
                 <div className="flex-1 overflow-hidden">
                   {bottomTab === 'terminal' && <TerminalPanel />}
-                  {bottomTab === 'git' && <GitPanel />}
+                  {bottomTab === 'git' && <GitPanel pollWhenVisible={gitPanelVisible} />}
                   {bottomTab === 'problems' && <LogViewer />}
                 </div>
               </div>
@@ -258,8 +288,23 @@ export default function App() {
         {!rightPanelCollapsed && (
           <>
             <ResizeHandle onDrag={(d) => setRightPanelWidth(Math.max(200, rightPanelWidth - d))} />
-            <div style={{ width: rightPanelWidth }} className="shrink-0 border-l border-[var(--border)] overflow-hidden">
-              <AgentPanel />
+            <div style={{ width: rightPanelWidth }} className="shrink-0 border-l border-[var(--border)] overflow-hidden flex flex-col">
+              <div className="flex border-b border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">
+                {(['chat', 'runs'] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    className={`px-3 py-2 text-xs uppercase tracking-wide ${
+                      rightPanelTab === tab ? 'border-b border-[var(--accent)] text-white' : 'text-[var(--text-secondary)]'
+                    }`}
+                    onClick={() => useUIStore.getState().setRightPanelTab(tab)}
+                  >
+                    {tab}
+                  </button>
+                ))}
+              </div>
+              <div className="flex-1 overflow-hidden">
+                {rightPanelTab === 'chat' ? <ChatPanel /> : <AgentPanel />}
+              </div>
             </div>
           </>
         )}

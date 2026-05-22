@@ -6,11 +6,18 @@ class SettingsResponse(BaseModel):
     lmstudio_api_key: str
     lmstudio_model: str
     ollama_base_url: str
+    ollama_model: str
     ollama_enabled: bool
+    lmstudio_role_models_json: dict[str, str] = Field(default_factory=dict)
+    ollama_role_models_json: dict[str, str] = Field(default_factory=dict)
     provider_timeout_seconds: int
     auto_resume_enabled: bool
     worker_count: int
     max_review_retries: int
+    chat_history_limit: int
+    chat_max_context_tokens: int
+    chat_max_output_tokens: int
+    nothink_default: bool
     stop_on_first_failure: bool
     model_planner: str
     model_architect: str
@@ -19,6 +26,12 @@ class SettingsResponse(BaseModel):
     model_reviewer: str
     model_tester: str
     model_supervisor: str
+    model_chat: str
+    model_chat_agent: str
+    model_chat_planner: str
+    model_chat_debugger: str
+    model_chat_architect: str
+    chat_modes_json: str
     editor_font_size: int
     editor_tab_size: int
     editor_auto_save: bool
@@ -34,11 +47,19 @@ class SettingsUpdate(BaseModel):
     lmstudio_api_key: str | None = None
     lmstudio_model: str | None = None
     ollama_base_url: str | None = None
+    ollama_model: str | None = None
     ollama_enabled: bool | None = None
+    sync_role_models: bool | None = None
+    lmstudio_role_models_json: dict[str, str] | None = None
+    ollama_role_models_json: dict[str, str] | None = None
     provider_timeout_seconds: int | None = None
     auto_resume_enabled: bool | None = None
     worker_count: int | None = None
     max_review_retries: int | None = None
+    chat_history_limit: int | None = None
+    chat_max_context_tokens: int | None = None
+    chat_max_output_tokens: int | None = None
+    nothink_default: bool | None = None
     stop_on_first_failure: bool | None = None
     model_planner: str | None = None
     model_architect: str | None = None
@@ -47,6 +68,12 @@ class SettingsUpdate(BaseModel):
     model_reviewer: str | None = None
     model_tester: str | None = None
     model_supervisor: str | None = None
+    model_chat: str | None = None
+    model_chat_agent: str | None = None
+    model_chat_planner: str | None = None
+    model_chat_debugger: str | None = None
+    model_chat_architect: str | None = None
+    chat_modes_json: str | None = None
     editor_font_size: int | None = None
     editor_tab_size: int | None = None
     editor_auto_save: bool | None = None
@@ -110,6 +137,8 @@ class RunResponse(BaseModel):
     workspace_path: str | None
     review_attempts: int
     error_message: str | None
+    operator_feedback: str | None = None
+    promote_snapshot: dict | None = None
     created_at: str
     updated_at: str
 
@@ -137,6 +166,10 @@ class ApproveRequest(BaseModel):
 
 class RejectRequest(BaseModel):
     reason: str = Field(min_length=1)
+
+
+class RetryRequest(BaseModel):
+    feedback: str = ""
 
 
 class FileWriteRequest(BaseModel):

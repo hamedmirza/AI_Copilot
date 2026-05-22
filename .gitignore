@@ -34,3 +34,7 @@ frontend/dist/
 
 # PID
 /tmp/ai-copilot.pid
+
+# Per-run pipeline workspaces
+backend/workspaces/
+runtime/

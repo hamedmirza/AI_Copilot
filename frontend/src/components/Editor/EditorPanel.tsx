@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Editor from '@monaco-editor/react'
+import type { editor as MonacoEditor } from 'monaco-editor'
 import { api } from '@/api/client'
 import { useEditorStore, useProjectStore, useSettingsStore } from '@/store'
 import { showError, showSuccess } from '@/lib/toast'
@@ -12,11 +13,14 @@ export function EditorPanel() {
   const markClean = useEditorStore((s) => s.markClean)
   const closeTab = useEditorStore((s) => s.closeTab)
   const setActiveTab = useEditorStore((s) => s.setActiveTab)
+  const promoteTab = useEditorStore((s) => s.promoteTab)
+  const setSelection = useEditorStore((s) => s.setSelection)
   const projectId = useProjectStore((s) => s.currentProjectId)
   const settings = useSettingsStore((s) => s.settings)
   const [saving, setSaving] = useState<string | null>(null)
   const [confirmClose, setConfirmClose] = useState<string | null>(null)
   const autoSaveTimer = useRef<number | null>(null)
+  const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null)
 
   const current = tabs.find((t) => t.path === activeTab)
 
@@ -63,6 +67,25 @@ export function EditorPanel() {
     }
   }
 
+  useEffect(() => {
+    if (!current) {
+      setSelection(null)
+      return
+    }
+    const editor = editorRef.current
+    if (!editor) return
+    const selection = editor.getSelection()
+    if (!selection) return
+    const model = editor.getModel()
+    const text = model?.getValueInRange(selection) || ''
+    setSelection({
+      path: current.path,
+      text,
+      startLineNumber: selection.startLineNumber,
+      endLineNumber: selection.endLineNumber,
+    })
+  }, [current?.path, setSelection])
+
   if (tabs.length === 0) {
     return <EmptyState title="No files open" description="Open a file from the Explorer to start editing" />
   }
@@ -77,10 +100,14 @@ export function EditorPanel() {
               activeTab === tab.path ? 'bg-[var(--bg-primary)]' : 'hover:bg-[var(--bg-tertiary)]'
             }`}
             onClick={() => setActiveTab(tab.path)}
+            onDoubleClick={() => promoteTab(tab.path)}
+            title={tab.preview ? 'Preview — double-click to keep open' : undefined}
           >
             {tab.dirty && <span className="w-2 h-2 rounded-full bg-white" />}
             {saving === tab.path && <span className="spinner" />}
-            <span>{tab.path.split('/').pop()}</span>
+            <span className={tab.preview ? 'italic opacity-75' : ''}>
+              {tab.path.split('/').pop()}
+            </span>
             <button
               className="ml-1 opacity-60 hover:opacity-100"
               onClick={(e) => { e.stopPropagation(); handleClose(tab.path) }}
@@ -103,7 +130,29 @@ export function EditorPanel() {
               minimap: { enabled: false },
               scrollBeyondLastLine: false,
             }}
-            onChange={(v) => updateTabContent(current.path, v || '')}
+            onChange={(v) => {
+              if (current.preview) promoteTab(current.path)
+              updateTabContent(current.path, v || '')
+            }}
+            onMount={(editor) => {
+              editorRef.current = editor
+              const syncSelection = () => {
+                const selection = editor.getSelection()
+                const model = editor.getModel()
+                if (!selection || !model) {
+                  setSelection(null)
+                  return
+                }
+                setSelection({
+                  path: current.path,
+                  text: model.getValueInRange(selection),
+                  startLineNumber: selection.startLineNumber,
+                  endLineNumber: selection.endLineNumber,
+                })
+              }
+              syncSelection()
+              editor.onDidChangeCursorSelection(syncSelection)
+            }}
           />
         </div>
       )}

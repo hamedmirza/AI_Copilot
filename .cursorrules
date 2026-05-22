@@ -1,0 +1,30 @@
+# AI Copilot — Cursor rules
+
+## Read first
+- AGENTS.md — stack, commands, conventions
+- Cursor_Guide.md — execution checklist pointer
+- docs/COMPREHENSIVE_RULES_AND_GUIDELINES.md
+
+## Code principles
+- Minimal scope: smallest correct diff; no drive-by refactors
+- Match existing naming, imports, and file layout
+- Backend Python 3.12+ in `backend/.venv`; never rely on system Python 3.9 for tests
+- Frontend: React 19 + Vite; run `npm --prefix frontend run build` after TSX changes
+
+## Servers
+- Use `./scripts/server.sh` (backend 8500, frontend 5177 strictPort)
+- Do not invent alternate ports or auto-increment behavior
+
+## Testing
+- `cd backend && .venv/bin/pytest` for backend
+- Monkeypatch native OS dialogs in tests; Finder E2E is manual on macOS only
+- See docs/TESTING.md
+
+## Verification before "done"
+- docs/VERIFICATION_RULES.md
+- docs/QUALITY_GATEWAY.md
+- docs/TASK_VERIFICATION_TEMPLATE.md
+
+## Git
+- Do not commit unless the user explicitly asks
+- Never commit `.env`, secrets, or `backend/app.db`

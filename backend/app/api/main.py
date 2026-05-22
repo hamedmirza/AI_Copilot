@@ -29,13 +29,15 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     event_bus.set_loop(loop)
     run_engine.set_loop(loop)
-    worker_count = 1
     db = SessionLocal()
     try:
         worker_count = int(ConfigService(db).get_all().get("worker_count", 1))
+        run_engine.configure_workers(worker_count)
     finally:
         db.close()
     yield
+    event_bus.set_loop(None)
+    run_engine.set_loop(None)
 
 
 app = FastAPI(title="AI Copilot", version="0.1.0", lifespan=lifespan)

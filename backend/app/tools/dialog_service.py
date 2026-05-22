@@ -4,13 +4,28 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import dataclass
+
+PICK_DIRECTORY_TIMEOUT_SECONDS = 120
 
 
-def pick_directory(*, prompt: str = "Select a project folder") -> str | None:
-    """Open the OS folder picker. Returns absolute path or None if cancelled."""
-    if sys.platform == "darwin":
-        return _pick_directory_macos(prompt)
-    return _pick_directory_tk(prompt)
+@dataclass(frozen=True)
+class PickDirectoryResult:
+    path: str | None
+    cancelled: bool
+    error: str | None = None
+
+
+def pick_directory(*, prompt: str = "Select a project folder") -> PickDirectoryResult:
+    """Open the OS folder picker. Returns path, cancel, or timeout error."""
+    try:
+        if sys.platform == "darwin":
+            path = _pick_directory_macos(prompt)
+        else:
+            path = _pick_directory_tk(prompt)
+    except subprocess.TimeoutExpired:
+        return PickDirectoryResult(path=None, cancelled=True, error="timeout")
+    return PickDirectoryResult(path=path, cancelled=path is None)
 
 
 def _pick_directory_macos(prompt: str) -> str | None:
@@ -24,7 +39,7 @@ def _pick_directory_macos(prompt: str) -> str | None:
         ["osascript", "-e", script],
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=PICK_DIRECTORY_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         return None

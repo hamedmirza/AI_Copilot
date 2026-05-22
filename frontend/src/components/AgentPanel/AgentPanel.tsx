@@ -1,28 +1,54 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '@/api/client'
+import { useRunDetail } from '@/hooks/useRunDetail'
 import { useEditorStore, useProjectStore, useRunStore } from '@/store'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button, EmptyState, Skeleton } from '@/components/ui/primitives'
+import type { RunSummary } from '@/types/runs'
+import { ApproveDialog } from './ApproveDialog'
 import { ArtifactViewer } from './ArtifactViewer'
+import { RunDetailDrawer } from './RunDetailDrawer'
+import { RunHistoryList } from './RunHistoryList'
+import { RunLogPanel } from '@/components/shared/RunLogPanel'
+import { normalizeRunEvents } from '@/lib/runEvents'
 
 const STAGES = ['planner', 'architect', 'ui_designer', 'coder', 'reviewer', 'tester', 'supervisor']
 
 export function AgentPanel() {
   const projectId = useProjectStore((s) => s.currentProjectId)
-  const { currentRunId, runStatus, events, runs, setCurrentRun, setRunStatus, addEvent, setEvents, setRuns } = useRunStore()
+  const { currentRunId, runStatus, events, runs, setCurrentRun, setRunStatus, addEvent, setRuns } = useRunStore()
+  const { artifacts, loading: detailLoading, hydrateRun } = useRunDetail()
   const [description, setDescription] = useState('')
   const [validationProfile, setValidationProfile] = useState('python')
   const [submitting, setSubmitting] = useState(false)
   const [descError, setDescError] = useState('')
   const [rejectReason, setRejectReason] = useState('')
   const [showReject, setShowReject] = useState(false)
+  const [showApprove, setShowApprove] = useState(false)
   const [rejectError, setRejectError] = useState('')
   const [loading, setLoading] = useState(false)
-  const [artifacts, setArtifacts] = useState<Array<{ id: number; artifact_type: string; content: Record<string, unknown>; created_at: string }>>([])
   const [artifactsLoading, setArtifactsLoading] = useState(false)
+  const [retryBusy, setRetryBusy] = useState(false)
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [drawerRunId, setDrawerRunId] = useState<string | null>(null)
+  const [drawerMode, setDrawerMode] = useState<'detail' | 'list'>('detail')
   const logRef = useRef<HTMLDivElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
+  const [logExpanded, setLogExpanded] = useState(false)
+  const normalizedEvents = useMemo(
+    () => normalizeRunEvents(events as Array<Record<string, unknown>>),
+    [events],
+  )
+
+  const runSummaries: RunSummary[] = runs.map((r) => ({
+    id: String(r.id),
+    status: String(r.status),
+    current_stage: r.current_stage != null ? String(r.current_stage) : null,
+    task_id: r.task_id != null ? String(r.task_id) : undefined,
+    error_message: r.error_message != null ? String(r.error_message) : null,
+    created_at: String(r.created_at || ''),
+  }))
 
   const loadRuns = useCallback(async () => {
     if (!projectId) return
@@ -39,29 +65,18 @@ export function AgentPanel() {
 
   useEffect(() => { loadRuns() }, [loadRuns])
 
-  const loadArtifacts = useCallback(async () => {
-    if (!currentRunId) {
-      setArtifacts([])
-      return
-    }
+  useEffect(() => {
+    if (!currentRunId) return
     setArtifactsLoading(true)
-    try {
-      const data = await api.runs.artifacts(currentRunId) as Array<{ id: number; artifact_type: string; content: Record<string, unknown>; created_at: string }>
-      setArtifacts(data)
-    } catch (e) {
-      showError(e)
-    } finally {
-      setArtifactsLoading(false)
-    }
-  }, [currentRunId])
-
-  useEffect(() => { loadArtifacts() }, [loadArtifacts])
+    hydrateRun(currentRunId, false)
+      .finally(() => setArtifactsLoading(false))
+  }, [currentRunId, hydrateRun])
 
   useEffect(() => {
     if (events.some((e) => e.type?.toString().includes('_complete'))) {
-      loadArtifacts()
+      if (currentRunId) void hydrateRun(currentRunId, false)
     }
-  }, [events, loadArtifacts])
+  }, [events, currentRunId, hydrateRun])
 
   const bumpTreeRefresh = useEditorStore((s) => s.bumpTreeRefresh)
 
@@ -71,6 +86,7 @@ export function AgentPanel() {
     else if (type === 'run_blocked') setRunStatus('blocked', String(ev.stage || ''))
     else if (type === 'run_failed') setRunStatus('failed', String(ev.stage || ''))
     else if (type === 'run_completed') setRunStatus('completed', String(ev.stage || ''))
+    else if (type === 'run_changes_requested') setRunStatus('changes_requested', String(ev.stage || ''))
     else if (type.endsWith('_started')) setRunStatus('running', type.replace('_started', ''))
     if (['run_completed', 'code_patch_applied', 'awaiting_approval'].includes(type)) {
       window.setTimeout(() => bumpTreeRefresh(), 3000)
@@ -103,10 +119,36 @@ export function AgentPanel() {
   )
 
   useEffect(() => {
-    if (autoScroll && logRef.current) {
-      logRef.current.scrollTop = logRef.current.scrollHeight
+    if (!logExpanded || !autoScroll || !logRef.current) return
+    const scrollEl = logRef.current.querySelector('[data-run-log-scroll]') as HTMLElement | null
+    if (!scrollEl) return
+    scrollEl.scrollTop = scrollEl.scrollHeight
+  }, [normalizedEvents, autoScroll, logExpanded])
+
+  const selectRun = useCallback(async (runId: string) => {
+    await hydrateRun(runId, true)
+  }, [hydrateRun])
+
+  const openDrawer = (runId: string, mode: 'detail' | 'list' = 'detail') => {
+    setDrawerRunId(runId)
+    setDrawerMode(mode)
+    setDrawerOpen(true)
+  }
+
+  const handleRetryWithFeedback = useCallback(async (feedback: string) => {
+    if (!currentRunId) return
+    setRetryBusy(true)
+    try {
+      await api.runs.retry(currentRunId, feedback ? { feedback } : undefined)
+      setRunStatus('running')
+      showSuccess('Retrying pipeline')
+      await hydrateRun(currentRunId, true)
+    } catch (e) {
+      showError(e)
+    } finally {
+      setRetryBusy(false)
     }
-  }, [events, autoScroll])
+  }, [currentRunId, hydrateRun, setRunStatus])
 
   const submitTask = async () => {
     if (description.trim().length < 10) {
@@ -126,7 +168,7 @@ export function AgentPanel() {
       const run = result.run
       setCurrentRun(run.id)
       setRunStatus(run.status)
-      setEvents([])
+      await hydrateRun(run.id, true)
       showSuccess('Task submitted')
       await loadRuns()
     } catch (e) {
@@ -199,17 +241,10 @@ export function AgentPanel() {
         })}
       </div>
 
-      <div className="flex gap-2 mb-2">
+      <div className="flex gap-2 mb-2 flex-wrap">
         <Button
           disabled={runStatus !== 'awaiting_approval'}
-          onClick={async () => {
-            if (!currentRunId || !confirm('Approve and apply changes?')) return
-            try {
-              await api.runs.approve(currentRunId)
-              showSuccess('Approved — applying changes')
-              setRunStatus('completed')
-            } catch (e) { showError(e) }
-          }}
+          onClick={() => setShowApprove(true)}
         >
           Approve
         </Button>
@@ -219,63 +254,74 @@ export function AgentPanel() {
         <Button
           variant="secondary"
           disabled={!['blocked', 'changes_requested'].includes(runStatus)}
-          onClick={async () => {
-            if (!currentRunId) return
-            try {
-              await api.runs.retry(currentRunId)
-              setRunStatus('running')
-              showSuccess('Retrying from coder stage')
-            } catch (e) { showError(e) }
-          }}
+          onClick={() => void handleRetryWithFeedback('')}
         >
           Retry
         </Button>
+        {currentRunId && (
+          <Button variant="ghost" className="text-xs" onClick={() => openDrawer(currentRunId)}>
+            View details
+          </Button>
+        )}
       </div>
 
-      <div
-        ref={logRef}
-        className="flex-1 overflow-auto bg-[#1a1a1a] rounded p-2 text-xs font-mono mb-2"
-        onScroll={(e) => {
-          const el = e.currentTarget
-          const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-          setAutoScroll(atBottom)
-        }}
-      >
-        {events.length === 0 && !loading && (
+      <div className={logExpanded ? 'flex-1 min-h-0 flex flex-col mb-2' : 'mb-2 shrink-0'}>
+        {events.length === 0 && !loading ? (
           <EmptyState title="No runs yet" description="Submit a task to the Agent panel to get started" />
-        )}
-        {events.map((ev, i) => (
-          <div key={i} className={`py-0.5 ${
-            ev.severity === 'error' ? 'text-[var(--error)]' :
-            ev.severity === 'warn' ? 'text-[var(--warning)]' : 'text-[var(--text-secondary)]'
-          }`}>
-            [{String(ev.type)}] {String(ev.message || '')}
+        ) : (
+          <div ref={logRef} className={logExpanded ? 'flex-1 min-h-0 flex flex-col' : undefined}>
+            <RunLogPanel
+              events={normalizedEvents}
+              fullHeight={logExpanded}
+              onExpandedChange={setLogExpanded}
+              onLogScroll={logExpanded ? (e) => {
+                const el = e.currentTarget
+                const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+                setAutoScroll(atBottom)
+              } : undefined}
+              emptyLabel={runStatus === 'running' ? 'Pipeline running…' : 'Waiting for updates…'}
+            />
           </div>
-        ))}
+        )}
       </div>
-      {!autoScroll && (
+      {logExpanded && !autoScroll && (
         <Button variant="ghost" className="text-xs mb-2" onClick={() => setAutoScroll(true)}>
           ↓ Jump to bottom
         </Button>
       )}
 
-      <ArtifactViewer artifacts={artifacts} loading={artifactsLoading} />
+      <div className={logExpanded ? 'shrink-0 overflow-auto max-h-48' : 'flex-1 min-h-0 overflow-auto'}>
+        <ArtifactViewer
+          artifacts={artifacts}
+          loading={artifactsLoading || detailLoading}
+          onRetryWithFeedback={handleRetryWithFeedback}
+          retryBusy={retryBusy}
+        />
+      </div>
 
-      {loading ? (
-        <Skeleton className="h-20 w-full" />
-      ) : (
-        <div className="max-h-32 overflow-auto border-t border-[var(--border)] pt-2">
-          <p className="text-xs text-[var(--text-secondary)] mb-1">Run History</p>
-          {runs.map((r) => (
-            <div
-              key={String(r.id)}
-              className="text-xs py-1 hover:bg-[var(--bg-tertiary)] cursor-pointer px-1 rounded"
-              onClick={() => { setCurrentRun(String(r.id)); setRunStatus(String(r.status)); setEvents([]) }}
-            >
-              {String(r.id).slice(0, 8)} — {String(r.status)}
-            </div>
-          ))}
-        </div>
+      <div className="border-t border-[var(--border)] pt-2 shrink-0">
+        <p className="text-xs text-[var(--text-secondary)] mb-1">Run History</p>
+        {loading ? (
+          <Skeleton className="h-20 w-full" />
+        ) : (
+          <RunHistoryList
+            runs={runSummaries}
+            currentRunId={currentRunId}
+            onSelect={(id) => void selectRun(id)}
+            onOpenDetails={(id) => openDrawer(id)}
+            onViewAll={() => openDrawer(runSummaries[0]?.id || currentRunId || '', 'list')}
+          />
+        )}
+      </div>
+
+      {showApprove && currentRunId && projectId && (
+        <ApproveDialog
+          runId={currentRunId}
+          projectId={projectId}
+          artifacts={artifacts}
+          onClose={() => setShowApprove(false)}
+          onApproved={() => setRunStatus('completed')}
+        />
       )}
 
       {showReject && (
@@ -297,12 +343,26 @@ export function AgentPanel() {
                   await api.runs.reject(currentRunId, rejectReason)
                   showSuccess('Run rejected')
                   setShowReject(false)
+                  await hydrateRun(currentRunId, true)
                 } catch (e) { showError(e) }
               }}>Submit</Button>
             </div>
           </div>
         </div>
       )}
+
+      <RunDetailDrawer
+        open={drawerOpen}
+        runId={drawerRunId}
+        runs={runSummaries}
+        mode={drawerMode}
+        onClose={() => setDrawerOpen(false)}
+        onRunChange={(id) => {
+          setDrawerRunId(id)
+          setDrawerMode('detail')
+          void selectRun(id)
+        }}
+      />
     </div>
   )
 }

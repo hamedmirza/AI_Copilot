@@ -14,6 +14,7 @@ export function FileTree() {
   const setTreeItems = useEditorStore((s) => s.setTreeItems)
   const toggleFolder = useEditorStore((s) => s.toggleFolder)
   const openTab = useEditorStore((s) => s.openTab)
+  const openPreview = useEditorStore((s) => s.openPreview)
   const renameTabPath = useEditorStore((s) => s.renameTabPath)
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState<{ parent: string; type: 'file' | 'folder' } | null>(null)
@@ -49,11 +50,16 @@ export function FileTree() {
     return () => document.removeEventListener('mousedown', close)
   }, [contextMenu])
 
-  const openFile = async (path: string) => {
+  const openFile = async (path: string, asPreview = false) => {
     if (!projectId) return
     try {
       const data = await api.files.read(projectId, path)
-      openTab({ path, content: data.content, dirty: false, language: getLanguage(path) })
+      const tab = { path, content: data.content, dirty: false, language: getLanguage(path) }
+      if (asPreview) {
+        openPreview(tab)
+      } else {
+        openTab(tab)
+      }
     } catch (e) {
       showError(e)
     }
@@ -67,7 +73,7 @@ export function FileTree() {
       setCreating(null)
       setNewName('')
       await refresh()
-      if (creating.type === 'file') await openFile(path)
+      if (creating.type === 'file') await openFile(path, false)
     } catch (e) {
       showError(e)
     }
@@ -127,8 +133,25 @@ export function FileTree() {
     }
   }
 
-  const dirs = treeItems.filter((i) => i.type === 'directory')
-  const files = treeItems.filter((i) => i.type === 'file')
+  const childDirs = (parent: string) =>
+    treeItems.filter((i) => {
+      if (i.type !== 'directory') return false
+      if (parent) {
+        const rel = i.path.slice(parent.length + 1)
+        return i.path.startsWith(parent + '/') && rel.length > 0 && !rel.includes('/')
+      }
+      return !i.path.includes('/')
+    })
+
+  const childFiles = (parent: string) =>
+    treeItems.filter((i) => {
+      if (i.type !== 'file') return false
+      if (parent) {
+        const rel = i.path.slice(parent.length + 1)
+        return i.path.startsWith(parent + '/') && rel.length > 0 && !rel.includes('/')
+      }
+      return !i.path.includes('/')
+    })
 
   const renderFile = (f: { path: string }, indent = 0) => {
     const isRenaming = renaming === f.path
@@ -140,7 +163,8 @@ export function FileTree() {
           dropTarget === f.path ? 'bg-[var(--accent)]/20' : ''
         }`}
         style={{ paddingLeft: indent * 12 + 8 }}
-        onDoubleClick={() => !isRenaming && openFile(f.path)}
+        onClick={() => !isRenaming && openFile(f.path, true)}
+        onDoubleClick={() => !isRenaming && openFile(f.path, false)}
         onContextMenu={(e) => {
           e.preventDefault()
           setContextMenu({ path: f.path, x: e.clientX, y: e.clientY })
@@ -170,35 +194,45 @@ export function FileTree() {
     )
   }
 
-  const renderDir = (d: { path: string }) => (
-    <div key={d.path}>
-      <div
-        className={`flex items-center gap-1 px-2 py-0.5 hover:bg-[var(--bg-tertiary)] cursor-pointer ${
-          dropTarget === d.path ? 'bg-[var(--accent)]/20 ring-1 ring-[var(--accent)]' : ''
-        }`}
-        onClick={() => toggleFolder(d.path)}
-        onDragOver={(e) => {
-          e.preventDefault()
-          if (dragPath && dragPath !== d.path) setDropTarget(d.path)
-        }}
-        onDragLeave={() => setDropTarget(null)}
-        onDrop={(e) => {
-          e.preventDefault()
-          if (dragPath) handleMove(dragPath, d.path)
-          setDragPath(null)
-          setDropTarget(null)
-        }}
-      >
-        <span>{expandedFolders[d.path] !== false ? '▼' : '▶'}</span>
-        <span>{d.path.split('/').pop()}</span>
+  const renderDir = (d: { path: string }, depth = 0) => {
+    const indent = depth * 12 + 8
+    const expanded = expandedFolders[d.path] !== false
+    return (
+      <div key={d.path}>
+        <div
+          className={`flex items-center gap-1 py-0.5 hover:bg-[var(--bg-tertiary)] cursor-pointer ${
+            dropTarget === d.path ? 'bg-[var(--accent)]/20 ring-1 ring-[var(--accent)]' : ''
+          }`}
+          style={{ paddingLeft: indent }}
+          onClick={() => toggleFolder(d.path)}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            setContextMenu({ path: d.path, x: e.clientX, y: e.clientY })
+          }}
+          onDragOver={(e) => {
+            e.preventDefault()
+            if (dragPath && dragPath !== d.path) setDropTarget(d.path)
+          }}
+          onDragLeave={() => setDropTarget(null)}
+          onDrop={(e) => {
+            e.preventDefault()
+            if (dragPath) handleMove(dragPath, d.path)
+            setDragPath(null)
+            setDropTarget(null)
+          }}
+        >
+          <span>{expanded ? '▼' : '▶'}</span>
+          <span className="truncate">{d.path.split('/').pop()}</span>
+        </div>
+        {expanded && (
+          <>
+            {childDirs(d.path).map((sub) => renderDir(sub, depth + 1))}
+            {childFiles(d.path).map((f) => renderFile(f, depth + 1))}
+          </>
+        )}
       </div>
-      {expandedFolders[d.path] !== false &&
-        files.filter((f) => {
-          const rel = f.path.slice(d.path.length + 1)
-          return f.path.startsWith(d.path + '/') && !rel.includes('/')
-        }).map((f) => renderFile(f, 2))}
-    </div>
-  )
+    )
+  }
 
   if (!projectId) {
     return <EmptyState title="No project selected" description="Create or select a project to browse files" />
@@ -271,8 +305,8 @@ export function FileTree() {
             />
           </div>
         )}
-        {dirs.map(renderDir)}
-        {files.filter((f) => !f.path.includes('/')).map((f) => renderFile(f))}
+        {childDirs('').map((d) => renderDir(d, 0))}
+        {childFiles('').map((f) => renderFile(f))}
         {treeItems.length === 0 && (
           <EmptyState title="Empty workspace" description="Create a file to get started" />
         )}

@@ -18,6 +18,9 @@ ALLOWED_EXECUTABLES = frozenset(
         "tsc",
         "vitest",
         "npx",
+        "git",
+        "rg",
+        "grep",
     }
 )
 

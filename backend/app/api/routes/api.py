@@ -15,6 +15,8 @@ from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.orm import Session
 
+from app.api.deps import verify_websocket_token
+from app.api.routes.chat import router as chat_router
 from app.core.exceptions import (
     AICopilotError,
     CommandRejectedError,
@@ -36,6 +38,7 @@ from app.schemas.api import (
     ProjectCreate,
     ProjectUpdate,
     RejectRequest,
+    RetryRequest,
     TaskCreate,
 )
 from app.services.config_service import ConfigService
@@ -46,6 +49,7 @@ from app.services.run_engine.event_bus import event_bus
 from app.services.project_service import ProjectService
 
 router = APIRouter()
+router.include_router(chat_router)
 
 
 def _project_to_response(p, db: Session) -> dict:
@@ -66,8 +70,24 @@ def _project_to_response(p, db: Session) -> dict:
 
 
 @router.get("/health")
-def health():
-    return {"status": "ok", "version": "0.1.0"}
+def health(db: Session = Depends(get_db)):
+    import time
+
+    from app.services.run_engine.event_bus import event_bus
+
+    worker_count = 1
+    try:
+        worker_count = int(ConfigService(db).get_all().get("worker_count", 1))
+    except Exception:
+        pass
+    uptime = max(0, int(time.time() - event_bus.started_at))
+    return {
+        "status": "ok",
+        "version": "0.1.0",
+        "uptime_seconds": uptime,
+        "worker_count": worker_count,
+        "ws_connections": event_bus.ws_connections,
+    }
 
 
 @router.get("/health/provider")
@@ -75,13 +95,7 @@ def provider_health(db: Session = Depends(get_db)):
     ConfigService(db).reload_registry()
     from app.providers.registry import ProviderRegistry
 
-    result = ProviderRegistry.get().health_lmstudio()
-    return {
-        "lmstudio": result.status,
-        "model_count": result.model_count,
-        "error": result.error,
-        "models": result.models,
-    }
+    return ProviderRegistry.get().health_provider_summary()
 
 
 @router.get("/settings")
@@ -94,16 +108,35 @@ def update_settings(body: dict, db: Session = Depends(get_db)):
     from app.schemas.api import SettingsUpdate
 
     update = SettingsUpdate(**body)
-    return ConfigService(db).update_settings(update)
+    settings = ConfigService(db).update_settings(update)
+    run_engine.configure_workers(settings.worker_count)
+    return settings
+
+
+@router.post("/settings/reset")
+def reset_settings(db: Session = Depends(get_db)):
+    settings = ConfigService(db).reset_to_defaults()
+    run_engine.configure_workers(settings.worker_count)
+    return settings
 
 
 @router.get("/settings/models")
-def list_models(db: Session = Depends(get_db)):
+def list_models(provider: str | None = None, db: Session = Depends(get_db)):
     ConfigService(db).reload_registry()
     from app.providers.registry import ProviderRegistry
 
-    models = ProviderRegistry.get().list_models()
-    return {"models": models}
+    registry = ProviderRegistry.get()
+    if provider in ("lmstudio", "ollama"):
+        detailed = registry.list_models_detailed_for_provider(provider)
+    else:
+        detailed = registry.list_models_detailed()
+    return {
+        "provider": provider or registry.active_provider(),
+        "models": detailed.models,
+        "catalog": detailed.catalog,
+        "recommendations": detailed.recommendations,
+        "resources": detailed.resources,
+    }
 
 
 @router.get("/onboarding/status")
@@ -115,12 +148,19 @@ def onboarding_status(db: Session = Depends(get_db)):
 
 
 @router.post("/dialog/pick-directory")
-def pick_directory_dialog(body: dict | None = None):
-    from app.tools.dialog_service import pick_directory
+async def pick_directory_dialog(body: dict | None = None):
+    from app.tools.dialog_service import PICK_DIRECTORY_TIMEOUT_SECONDS, pick_directory
 
     prompt = (body or {}).get("prompt") or "Select a project folder"
-    path = pick_directory(prompt=str(prompt))
-    return {"cancelled": path is None, "path": path}
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: pick_directory(prompt=str(prompt))),
+            timeout=PICK_DIRECTORY_TIMEOUT_SECONDS + 5,
+        )
+    except asyncio.TimeoutError:
+        return {"cancelled": True, "path": None, "error": "timeout"}
+    return {"cancelled": result.cancelled, "path": result.path, "error": result.error}
 
 
 @router.get("/projects")
@@ -272,6 +312,12 @@ def get_run(run_id: str, db: Session = Depends(get_db)):
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
     if not run:
         raise HTTPException(404, "Run not found")
+    promote_snapshot = None
+    if run.promote_snapshot_json:
+        try:
+            promote_snapshot = json.loads(run.promote_snapshot_json)
+        except json.JSONDecodeError:
+            promote_snapshot = None
     return {
         "id": run.id,
         "project_id": run.project_id,
@@ -281,6 +327,8 @@ def get_run(run_id: str, db: Session = Depends(get_db)):
         "workspace_path": run.workspace_path,
         "review_attempts": run.review_attempts,
         "error_message": run.error_message,
+        "operator_feedback": run.operator_feedback,
+        "promote_snapshot": promote_snapshot,
         "created_at": run.created_at.isoformat(),
         "updated_at": run.updated_at.isoformat(),
     }
@@ -342,6 +390,8 @@ def project_runs(project_id: str, db: Session = Depends(get_db)):
             "id": r.id,
             "status": r.status,
             "current_stage": r.current_stage,
+            "task_id": r.task_id,
+            "error_message": (r.error_message or "")[:120] or None,
             "created_at": r.created_at.isoformat(),
         }
         for r in runs
@@ -350,16 +400,60 @@ def project_runs(project_id: str, db: Session = Depends(get_db)):
 
 @router.post("/runs/{run_id}/approve")
 def approve_run(run_id: str, body: ApproveRequest, db: Session = Depends(get_db)):
+    from pathlib import Path
+
     from app.core.enums import RunStatus
-    from app.db.models import RunModel
+    from app.db.models import ArtifactModel, RunModel
+    from app.services.snapshot_service import snapshot_promoted_files
+    from app.services.workspace_service import cleanup_run_workspace, promote_to_source
 
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
     if not run:
         raise HTTPException(404, "Run not found")
     if run.status != RunStatus.AWAITING_APPROVAL:
         raise HTTPException(400, "Run not awaiting approval")
+    project = ProjectService(db).get(run.project_id)
+    source = Path(project.source_repo_spec)
+    paths: list[str] = []
+    coder = (
+        db.query(ArtifactModel)
+        .filter(ArtifactModel.run_id == run_id, ArtifactModel.artifact_type == "coder")
+        .order_by(ArtifactModel.id.desc())
+        .first()
+    )
+    if coder:
+        try:
+            content = json.loads(coder.content_json)
+            for change in content.get("file_changes") or []:
+                path = change.get("path") or change.get("file_path")
+                if path:
+                    paths.append(str(path))
+        except json.JSONDecodeError:
+            paths = []
+    if not paths and run.workspace_path:
+        workspace = Path(run.workspace_path)
+        for path in workspace.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(workspace)
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            src_file = source / rel
+            if src_file.is_file():
+                try:
+                    if path.read_bytes() != src_file.read_bytes():
+                        paths.append(str(rel))
+                except OSError:
+                    continue
+    if paths:
+        snapshot_meta = snapshot_promoted_files(run_id, source, paths)
+        run.promote_snapshot_json = json.dumps(snapshot_meta)
+    if run.workspace_path:
+        promote_to_source(Path(run.workspace_path), source)
     run.status = RunStatus.COMPLETED
+    run.operator_feedback = None
     db.commit()
+    cleanup_run_workspace(run_id)
     event_bus.emit(run_id, {"type": "run_completed", "run_id": run_id})
     return {"ok": True}
 
@@ -379,7 +473,7 @@ def reject_run(run_id: str, body: RejectRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/runs/{run_id}/retry")
-def retry_run(run_id: str, db: Session = Depends(get_db)):
+def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depends(get_db)):
     from app.core.enums import RunStatus
     from app.db.models import RunModel
     from app.services.orchestration_service import claim_run
@@ -389,12 +483,88 @@ def retry_run(run_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Run not found")
     if run.status not in (RunStatus.BLOCKED, RunStatus.CHANGES_REQUESTED):
         raise HTTPException(400, "Run not retryable")
+    if body and body.feedback:
+        run.operator_feedback = body.feedback.strip()
     run.status = RunStatus.PENDING
     run.review_attempts = 0
     db.commit()
     if claim_run(db, run.id):
         run_engine.enqueue(run.id)
     return {"ok": True}
+
+
+@router.post("/runs/{run_id}/rollback-workspace")
+def rollback_run_workspace(run_id: str, db: Session = Depends(get_db)):
+    from pathlib import Path
+
+    from app.core.enums import RunStatus
+    from app.db.models import RunModel
+    from app.services.workspace_service import reset_run_workspace
+
+    run = db.query(RunModel).filter(RunModel.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    allowed = {
+        RunStatus.AWAITING_APPROVAL.value,
+        RunStatus.CHANGES_REQUESTED.value,
+        RunStatus.BLOCKED.value,
+        RunStatus.FAILED.value,
+    }
+    if run.status not in allowed:
+        raise HTTPException(400, "Run workspace cannot be rolled back in current status")
+    project = ProjectService(db).get(run.project_id)
+    workspace = reset_run_workspace(Path(project.source_repo_spec), run_id)
+    run.workspace_path = str(workspace)
+    run.operator_feedback = None
+    if run.status == RunStatus.AWAITING_APPROVAL.value:
+        run.status = RunStatus.CHANGES_REQUESTED.value
+        run.error_message = "Workspace reset; re-run pipeline to regenerate changes."
+    db.commit()
+    event_bus.emit(
+        run_id,
+        {
+            "type": "workspace_rolled_back",
+            "run_id": run_id,
+            "message": "Run workspace reset from project source",
+        },
+    )
+    return {"ok": True, "workspace_path": str(workspace)}
+
+
+@router.post("/runs/{run_id}/rollback-promote")
+def rollback_run_promote(run_id: str, db: Session = Depends(get_db)):
+    from pathlib import Path
+
+    from app.core.enums import RunStatus
+    from app.db.models import RunModel
+    from app.services.snapshot_service import restore_promoted_files
+
+    run = db.query(RunModel).filter(RunModel.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    if run.status != RunStatus.COMPLETED.value:
+        raise HTTPException(400, "Only completed runs with a promotion snapshot can be rolled back")
+    if not run.promote_snapshot_json:
+        raise HTTPException(400, "No promotion snapshot for this run")
+    try:
+        snapshot_meta = json.loads(run.promote_snapshot_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "Invalid promotion snapshot metadata") from exc
+    project = ProjectService(db).get(run.project_id)
+    restored = restore_promoted_files(run_id, Path(project.source_repo_spec), snapshot_meta)
+    run.promote_snapshot_json = None
+    run.status = RunStatus.CHANGES_REQUESTED.value
+    run.error_message = f"Promoted changes rolled back ({restored} file(s) restored)"
+    db.commit()
+    event_bus.emit(
+        run_id,
+        {
+            "type": "run_changes_requested",
+            "run_id": run_id,
+            "message": run.error_message,
+        },
+    )
+    return {"ok": True, "restored_files": restored}
 
 
 @router.get("/projects/{project_id}/git/status")
@@ -520,6 +690,7 @@ terminal_sessions: dict[str, Any] = {}
 
 @router.websocket("/ws/terminal/{session_id}")
 async def terminal_ws(websocket: WebSocket, session_id: str, project_id: str = Query(...)):
+    verify_websocket_token(websocket)
     await websocket.accept()
     from app.db.session import SessionLocal
 
@@ -572,6 +743,7 @@ async def terminal_ws(websocket: WebSocket, session_id: str, project_id: str = Q
 
 @router.websocket("/ws/runs/{run_id}")
 async def run_ws(websocket: WebSocket, run_id: str):
+    verify_websocket_token(websocket)
     await websocket.accept()
     event_bus.ws_connections += 1
     q = event_bus.subscribe_run(run_id)
@@ -580,9 +752,14 @@ async def run_ws(websocket: WebSocket, run_id: str):
             try:
                 event = await asyncio.wait_for(q.get(), timeout=30)
                 await websocket.send_json(event)
-                if event.get("type") in ("run_completed", "run_blocked", "run_awaiting_approval"):
-                    if event.get("type") == "run_completed":
-                        break
+                if event.get("type") in (
+                    "run_completed",
+                    "run_blocked",
+                    "run_failed",
+                    "run_changes_requested",
+                    "awaiting_approval",
+                ):
+                    break
             except asyncio.TimeoutError:
                 await websocket.send_json({"type": "ping"})
     except WebSocketDisconnect:
@@ -594,6 +771,7 @@ async def run_ws(websocket: WebSocket, run_id: str):
 
 @router.websocket("/ws/events")
 async def events_ws(websocket: WebSocket):
+    verify_websocket_token(websocket)
     await websocket.accept()
     event_bus.ws_connections += 1
     q = event_bus.subscribe_global()

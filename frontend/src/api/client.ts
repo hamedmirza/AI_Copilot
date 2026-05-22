@@ -24,27 +24,89 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     } catch { /* ignore */ }
     throw new Error(message)
   }
+  if (res.status === 204) return undefined as T
+  const contentType = res.headers.get('content-type') || ''
+  if (!contentType.includes('application/json')) {
+    return undefined as T
+  }
   return res.json()
 }
 
+function buildQuery(params: Record<string, string | number | undefined | null>): string {
+  const query = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      query.set(key, String(value))
+    }
+  })
+  const result = query.toString()
+  return result ? `?${result}` : ''
+}
+
 export const api = {
-  health: () => request<{ status: string; version: string }>('/api/health'),
-  providerHealth: () => request<{ lmstudio: string; model_count: number; error?: string }>('/api/health/provider'),
+  health: () => request<{
+    status: string
+    version: string
+    uptime_seconds?: number
+    worker_count?: number
+    ws_connections?: number
+  }>('/api/health'),
+  providerHealth: () =>
+    request<{
+      active_provider: 'lmstudio' | 'ollama'
+      lmstudio: string
+      ollama: string
+      model_count: number
+      lmstudio_model_count?: number
+      ollama_model_count?: number
+      lmstudio_models?: string[]
+      ollama_models?: string[]
+      error?: string
+      lmstudio_error?: string
+      ollama_error?: string
+      resources_pressure?: string
+      loaded_size_gb?: number
+      recommendations?: Record<string, string>
+      models?: string[]
+    }>('/api/health/provider'),
   settings: {
     get: () => request<Record<string, unknown>>('/api/settings'),
     update: (data: Record<string, unknown>) =>
       request('/api/settings', { method: 'PUT', body: JSON.stringify(data) }),
-    models: () => request<{ models: string[] }>('/api/settings/models'),
+    reset: () => request<Record<string, unknown>>('/api/settings/reset', { method: 'POST' }),
+    models: (provider?: 'lmstudio' | 'ollama') =>
+      request<{
+        provider?: string
+        models: string[]
+        catalog?: Array<{
+          id: string
+          state: string
+          loaded: boolean
+          size_gb: number
+          tool_use: boolean
+          params: string
+          quantization: string
+        }>
+        recommendations?: Record<string, string>
+        resources?: {
+          pressure: 'ok' | 'elevated' | 'high'
+          loaded_count: number
+          loaded_size_gb: number
+        }
+      }>(`/api/settings/models${provider ? `?provider=${provider}` : ''}`),
   },
   onboarding: {
     status: () => request<{ complete: boolean; project_count: number }>('/api/onboarding/status'),
   },
   dialog: {
     pickDirectory: (prompt?: string) =>
-      request<{ cancelled: boolean; path: string | null }>('/api/dialog/pick-directory', {
-        method: 'POST',
-        body: JSON.stringify({ prompt }),
-      }),
+      request<{ cancelled: boolean; path: string | null; error?: string | null }>(
+        '/api/dialog/pick-directory',
+        {
+          method: 'POST',
+          body: JSON.stringify({ prompt }),
+        },
+      ),
   },
   projects: {
     list: () => request<Array<Record<string, unknown>>>('/api/projects'),
@@ -82,6 +144,38 @@ export const api = {
     create: (data: Record<string, unknown>) =>
       request('/api/tasks', { method: 'POST', body: JSON.stringify(data) }),
   },
+  chat: {
+    modes: () => request<Array<Record<string, unknown>>>('/api/chat/modes'),
+    sessions: {
+      list: (projectId: string, q?: string) =>
+        request<Array<Record<string, unknown>>>(`/api/chat/sessions${buildQuery({ project_id: projectId, q })}`),
+      create: (data: Record<string, unknown>) =>
+        request<Record<string, unknown>>('/api/chat/sessions', { method: 'POST', body: JSON.stringify(data) }),
+      get: (id: string) =>
+        request<Record<string, unknown>>(`/api/chat/sessions/${id}`),
+      update: (id: string, data: Record<string, unknown>) =>
+        request<Record<string, unknown>>(`/api/chat/sessions/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify(data),
+        }),
+      delete: (id: string) =>
+        request<{ ok?: boolean }>(`/api/chat/sessions/${id}`, { method: 'DELETE' }),
+    },
+    messages: {
+      list: (sessionId: string) =>
+        request<{ items: Array<Record<string, unknown>>; total: number }>(`/api/chat/sessions/${sessionId}/messages`),
+      send: (sessionId: string, data: Record<string, unknown>) =>
+        request<Record<string, unknown>>(`/api/chat/sessions/${sessionId}/messages`, {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }),
+    },
+    spawnTask: (sessionId: string, data: Record<string, unknown>) =>
+      request<Record<string, unknown>>(`/api/chat/sessions/${sessionId}/spawn-task`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+  },
   runs: {
     get: (id: string) => request(`/api/runs/${id}`),
     events: (id: string) => request(`/api/runs/${id}/events`),
@@ -90,7 +184,41 @@ export const api = {
       request(`/api/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ comment }) }),
     reject: (id: string, reason: string) =>
       request(`/api/runs/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
-    retry: (id: string) => request(`/api/runs/${id}/retry`, { method: 'POST' }),
+    retry: (id: string, body?: { feedback?: string }) =>
+      request(`/api/runs/${id}/retry`, {
+        method: 'POST',
+        body: JSON.stringify(body ?? {}),
+      }),
+    rollbackWorkspace: (id: string) =>
+      request(`/api/runs/${id}/rollback-workspace`, { method: 'POST' }),
+    rollbackPromote: (id: string) =>
+      request(`/api/runs/${id}/rollback-promote`, { method: 'POST' }),
+  },
+  mcp: {
+    servers: {
+      list: () => request<Array<Record<string, unknown>>>('/api/mcp/servers'),
+      create: (data: Record<string, unknown>) =>
+        request<Record<string, unknown>>('/api/mcp/servers', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }),
+      update: (id: string, data: Record<string, unknown>) =>
+        request<Record<string, unknown>>(`/api/mcp/servers/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify(data),
+        }),
+      delete: (id: string) =>
+        request<{ ok?: boolean }>(`/api/mcp/servers/${id}`, { method: 'DELETE' }),
+      test: (id: string) =>
+        request<Record<string, unknown>>(`/api/mcp/servers/${id}/test`, { method: 'POST' }),
+      export: () =>
+        request<{ servers: Array<Record<string, unknown>> }>('/api/mcp/servers/export'),
+      import: (data: Record<string, unknown>) =>
+        request<{ ok: boolean; count: number; servers: Array<Record<string, unknown>> }>('/api/mcp/servers/import', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }),
+    },
   },
   git: {
     status: (projectId: string) => request(`/api/projects/${projectId}/git/status`),
