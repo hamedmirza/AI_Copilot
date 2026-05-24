@@ -10,13 +10,13 @@ export function applyLineChanges(
   content: string,
   lineChanges: Array<{ start_line: number; end_line: number; new_content: string }>,
 ): string {
-  let lines = splitLinesKeepEnds(content)
+  const lines = splitLinesKeepEnds(content)
 
   const sorted = [...lineChanges].sort((a, b) => b.start_line - a.start_line)
   for (const change of sorted) {
     const start = Math.max(1, change.start_line) - 1
     const end = Math.max(start, change.end_line - 1)
-    let newContent = change.new_content ?? ''
+    const newContent = change.new_content ?? ''
     let newLines = newContent.split(/\n/)
     if (newLines.length > 1 || newContent.includes('\n')) {
       newLines = newContent.split(/\n/).map((line, i, arr) =>

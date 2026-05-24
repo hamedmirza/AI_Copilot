@@ -524,6 +524,101 @@ def test_resume_run_endpoint_enqueues_resumable_run(client):
     assert captured == [run.id]
 
 
+def test_resume_run_endpoint_rejects_non_resumable_run(client):
+    from app.core.enums import RunStatus
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="ResumeReject",
+            source_repo_spec="/tmp/resume-reject",
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Resume reject task",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        runs = [
+            RunModel(project_id=project.id, task_id=task.id, status=RunStatus.COMPLETED.value),
+            RunModel(project_id=project.id, task_id=task.id, status=RunStatus.BLOCKED.value),
+            RunModel(project_id=project.id, task_id=task.id, status=RunStatus.CHANGES_REQUESTED.value),
+        ]
+        db.add_all(runs)
+        db.commit()
+        run_ids = [run.id for run in runs]
+    finally:
+        db.close()
+
+    for run_id in run_ids:
+        response = client.post(f"/api/runs/{run_id}/resume", headers=HEADERS)
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Run is not resumable"
+
+
+def test_lifespan_auto_resume_enabled_enqueues_one_inflight_run(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import app.api.main as main_module
+    from app.db.session import SessionLocal
+    from app.schemas.api import SettingsUpdate
+    from app.services.config_service import ConfigService
+
+    db = SessionLocal()
+    try:
+        ConfigService(db).update_settings(SettingsUpdate(auto_resume_enabled=True))
+    finally:
+        db.close()
+
+    captured: list[int] = []
+
+    def fake_resume_inflight_runs(db, limit=1):  # type: ignore[no-untyped-def]
+        captured.append(limit)
+        return []
+
+    monkeypatch.setattr(main_module, "resume_inflight_runs", fake_resume_inflight_runs)
+
+    with TestClient(main_module.app):
+        pass
+
+    assert captured == [1]
+
+
+def test_lifespan_auto_resume_disabled_skips_resume(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import app.api.main as main_module
+    from app.db.session import SessionLocal
+    from app.schemas.api import SettingsUpdate
+    from app.services.config_service import ConfigService
+
+    db = SessionLocal()
+    try:
+        ConfigService(db).update_settings(SettingsUpdate(auto_resume_enabled=False))
+    finally:
+        db.close()
+
+    captured: list[int] = []
+
+    def fake_resume_inflight_runs(db, limit=1):  # type: ignore[no-untyped-def]
+        captured.append(limit)
+        return []
+
+    monkeypatch.setattr(main_module, "resume_inflight_runs", fake_resume_inflight_runs)
+
+    with TestClient(main_module.app):
+        pass
+
+    assert captured == []
+
+
 def test_reviewer_context_includes_changed_file_snapshot(client, tmp_path):
     import json as _json
 
@@ -1693,3 +1788,67 @@ def test_approve_snapshot_and_rollback_promote(client, tmp_path):
     run_body = client.get(f"/api/runs/{run_id}", headers=HEADERS).json()
     assert run_body["status"] == RunStatus.CHANGES_REQUESTED.value
     assert run_body["promote_snapshot"] is None
+
+
+def test_read_run_workspace_file(client, tmp_path):
+    from app.core.enums import RunStatus
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "package.json").write_text('{"name":"demo"}\n')
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "package.json").write_text('{"name":"run-workspace"}\n')
+    (workspace / ".npmrc").write_text("legacy-peer-deps=true\n")
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="WorkspaceRead",
+            source_repo_spec=str(source),
+            validation_profile="react",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Read workspace files",
+            validation_profile="react",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status=RunStatus.AWAITING_APPROVAL.value,
+            workspace_path=str(workspace),
+        )
+        db.add(run)
+        db.commit()
+        run_id = run.id
+    finally:
+        db.close()
+
+    workspace_file = client.get(
+        f"/api/runs/{run_id}/files/package.json",
+        headers=HEADERS,
+    )
+    assert workspace_file.status_code == 200
+    assert workspace_file.json()["content"] == '{"name":"run-workspace"}\n'
+
+    dotfile = client.get(
+        f"/api/runs/{run_id}/files/.npmrc",
+        headers=HEADERS,
+    )
+    assert dotfile.status_code == 200
+    assert dotfile.json()["content"] == "legacy-peer-deps=true\n"
+
+    missing = client.get(
+        f"/api/runs/{run_id}/files/missing.txt",
+        headers=HEADERS,
+    )
+    assert missing.status_code == 404

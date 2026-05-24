@@ -138,7 +138,7 @@ export function toChatMessage(value: JsonRecord): ChatMessage {
   }
 }
 
-function parseToolOutput(content: string, metadata?: Record<string, unknown>): unknown {
+function parseToolOutput(content: string): unknown {
   if (!content.trim()) return ''
   try {
     return JSON.parse(content) as unknown
@@ -155,7 +155,7 @@ export function prepareMessagesForDisplay(messages: ChatMessage[]): ChatMessage[
     const callId = message.tool_call_id || ''
     if (!callId) continue
     toolOutputs.set(callId, {
-      result: parseToolOutput(message.content, message.metadata),
+      result: parseToolOutput(message.content),
       error: Boolean(message.metadata?.error),
     })
   }
@@ -282,11 +282,10 @@ export function formatRelativeChatTime(value?: string | null): string {
 }
 
 export function summarizeToolResult(value: unknown, maxLength = 4000): string {
-  let text = ''
+  if (value === null || value === undefined) return ''
+  let text: string
   if (typeof value === 'string') {
     text = value
-  } else if (value === null || value === undefined) {
-    return ''
   } else {
     try {
       text = JSON.stringify(value, null, 2)

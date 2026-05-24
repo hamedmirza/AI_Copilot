@@ -12,10 +12,9 @@ export function useWebSocket(
   const backoffRef = useRef(1000)
   const timerRef = useRef<number | null>(null)
   const onMessageRef = useRef(onMessage)
+  const connectRef = useRef<(() => void) | null>(null)
   const intentionalCloseRef = useRef(false)
   const setReconnecting = useAppStore((s) => s.setWsReconnecting)
-
-  onMessageRef.current = onMessage
 
   const connect = useCallback(() => {
     if (!enabled || !path || intentionalCloseRef.current) return
@@ -45,13 +44,21 @@ export function useWebSocket(
       if (trackStatus) setReconnecting(true)
       const delay = Math.min(backoffRef.current, 30000)
       backoffRef.current = Math.min(backoffRef.current * 2, 30000)
-      timerRef.current = window.setTimeout(connect, delay)
+      timerRef.current = window.setTimeout(() => connectRef.current?.(), delay)
     }
 
     ws.onerror = () => {
       if (!intentionalCloseRef.current) ws.close()
     }
   }, [path, enabled, trackStatus, setReconnecting])
+
+  useEffect(() => {
+    onMessageRef.current = onMessage
+  }, [onMessage])
+
+  useEffect(() => {
+    connectRef.current = connect
+  }, [connect])
 
   useEffect(() => {
     intentionalCloseRef.current = false

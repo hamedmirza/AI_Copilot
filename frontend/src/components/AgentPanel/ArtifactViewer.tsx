@@ -14,11 +14,10 @@ import {
   LayoutTemplate,
   ListChecks,
 } from 'lucide-react'
-import { api } from '@/api/client'
+import { openRunFile } from '@/lib/openRunFile'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button } from '@/components/ui/primitives'
 import { useEditorStore, useProjectStore } from '@/store'
-import { getLanguage } from '@/lib/utils'
 import {
   formatRunRelativeTime,
   isReviewArtifactType,
@@ -29,6 +28,7 @@ import { ReviewArtifactPanel } from './ReviewArtifactPanel'
 interface ArtifactViewerProps {
   artifacts: RunArtifact[]
   loading: boolean
+  runId?: string | null
   onRetryWithFeedback?: (feedback: string) => void | Promise<void>
   retryBusy?: boolean
 }
@@ -158,22 +158,46 @@ function BulletList({
   )
 }
 
-function useOpenFile() {
+function useOpenFile(
+  runId?: string | null,
+  artifacts?: RunArtifact[],
+  changeEntry?: Record<string, unknown>,
+  inlineContent?: string | null,
+) {
   const projectId = useProjectStore((s) => s.currentProjectId)
   const openTab = useEditorStore((s) => s.openTab)
   return async (path: string) => {
-    if (!projectId || !path) return
-    try {
-      const data = await api.files.read(projectId, path)
-      openTab({ path, content: data.content, dirty: false, language: getLanguage(path) })
-    } catch (e) {
-      showError(e)
+    const opened = await openRunFile({
+      projectId,
+      runId,
+      path,
+      artifacts,
+      changeEntry,
+      inlineContent,
+      openTab,
+    })
+    if (!opened) {
+      showError(new Error(`File not found: ${path}`))
     }
   }
 }
 
-function FileLink({ path, className }: { path: string; className?: string }) {
-  const openFile = useOpenFile()
+function FileLink({
+  path,
+  className,
+  runId,
+  artifacts,
+  changeEntry,
+  inlineContent,
+}: {
+  path: string
+  className?: string
+  runId?: string | null
+  artifacts?: RunArtifact[]
+  changeEntry?: Record<string, unknown>
+  inlineContent?: string | null
+}) {
+  const openFile = useOpenFile(runId, artifacts, changeEntry, inlineContent)
   return (
     <button
       type="button"
@@ -251,7 +275,15 @@ function PlanArtifact({ content }: { content: Record<string, unknown> }) {
   )
 }
 
-function ArchitectArtifact({ content }: { content: Record<string, unknown> }) {
+function ArchitectArtifact({
+  content,
+  runId,
+  artifacts,
+}: {
+  content: Record<string, unknown>
+  runId?: string | null
+  artifacts?: RunArtifact[]
+}) {
   const overview = asString(content.overview)
   const modules = asStringArray(content.modules)
   const fileChanges = asRecordArray(content.file_changes)
@@ -294,7 +326,7 @@ function ArchitectArtifact({ content }: { content: Record<string, unknown> }) {
                       {action}
                     </span>
                     {path ? (
-                      <FileLink path={path} className="flex-1" />
+                      <FileLink path={path} className="flex-1" runId={runId} artifacts={artifacts} />
                     ) : (
                       <span className="text-xs text-[var(--text-secondary)] italic">
                         unspecified path
@@ -394,7 +426,15 @@ function UiDesignArtifact({ content }: { content: Record<string, unknown> }) {
   )
 }
 
-function CoderArtifact({ content }: { content: Record<string, unknown> }) {
+function CoderArtifact({
+  content,
+  runId,
+  artifacts,
+}: {
+  content: Record<string, unknown>
+  runId?: string | null
+  artifacts?: RunArtifact[]
+}) {
   const summary = asString(content.summary)
   const fileChanges = asRecordArray(content.file_changes)
   const requiresApproval = Boolean(content.requires_operator_approval)
@@ -417,7 +457,12 @@ function CoderArtifact({ content }: { content: Record<string, unknown> }) {
           <SectionHeading>File changes ({fileChanges.length})</SectionHeading>
           <div className="space-y-1.5">
             {fileChanges.map((entry, i) => (
-              <CoderFileChange key={`${asString(entry.path)}-${i}`} entry={entry} />
+              <CoderFileChange
+                key={`${asString(entry.path)}-${i}`}
+                entry={entry}
+                runId={runId}
+                artifacts={artifacts}
+              />
             ))}
           </div>
         </div>
@@ -426,7 +471,15 @@ function CoderArtifact({ content }: { content: Record<string, unknown> }) {
   )
 }
 
-function CoderFileChange({ entry }: { entry: Record<string, unknown> }) {
+function CoderFileChange({
+  entry,
+  runId,
+  artifacts,
+}: {
+  entry: Record<string, unknown>
+  runId?: string | null
+  artifacts?: RunArtifact[]
+}) {
   const [open, setOpen] = useState(false)
   const path = asString(entry.path)
   const lineChanges = asRecordArray(entry.line_changes)
@@ -448,7 +501,14 @@ function CoderFileChange({ entry }: { entry: Record<string, unknown> }) {
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </button>
         {path ? (
-          <FileLink path={path} className="flex-1" />
+          <FileLink
+            path={path}
+            className="flex-1"
+            runId={runId}
+            artifacts={artifacts}
+            changeEntry={entry}
+            inlineContent={fullContent}
+          />
         ) : (
           <span className="text-xs text-[var(--text-secondary)] italic flex-1">
             unspecified path
@@ -644,16 +704,24 @@ function JsonSection({
 
 // --- dispatcher + outer viewer --------------------------------------------
 
-function RenderTypedArtifact({ artifact }: { artifact: RunArtifact }) {
+function RenderTypedArtifact({
+  artifact,
+  runId,
+  artifacts,
+}: {
+  artifact: RunArtifact
+  runId?: string | null
+  artifacts?: RunArtifact[]
+}) {
   switch (artifact.artifact_type) {
     case 'plan':
       return <PlanArtifact content={artifact.content} />
     case 'architect':
-      return <ArchitectArtifact content={artifact.content} />
+      return <ArchitectArtifact content={artifact.content} runId={runId} artifacts={artifacts} />
     case 'ui_design':
       return <UiDesignArtifact content={artifact.content} />
     case 'coder':
-      return <CoderArtifact content={artifact.content} />
+      return <CoderArtifact content={artifact.content} runId={runId} artifacts={artifacts} />
     case 'test_plan':
       return <TestPlanArtifact content={artifact.content} />
     default:
@@ -667,10 +735,14 @@ function RenderTypedArtifact({ artifact }: { artifact: RunArtifact }) {
 
 function ArtifactBody({
   artifact,
+  runId,
+  artifacts,
   onRetryWithFeedback,
   retryBusy,
 }: {
   artifact: RunArtifact
+  runId?: string | null
+  artifacts?: RunArtifact[]
   onRetryWithFeedback?: (feedback: string) => void | Promise<void>
   retryBusy?: boolean
 }) {
@@ -681,6 +753,8 @@ function ArtifactBody({
       <div className="space-y-2">
         <ReviewArtifactPanel
           artifact={artifact}
+          runId={runId}
+          artifacts={artifacts}
           onRetryWithFeedback={onRetryWithFeedback || (() => {})}
           busy={retryBusy}
         />
@@ -691,7 +765,7 @@ function ArtifactBody({
 
   return (
     <div className="space-y-2">
-      <RenderTypedArtifact artifact={artifact} />
+      <RenderTypedArtifact artifact={artifact} runId={runId} artifacts={artifacts} />
       <RawJsonToggle showRaw={showRaw} onToggle={() => setShowRaw(!showRaw)} content={artifact.content} />
     </div>
   )
@@ -728,6 +802,7 @@ function RawJsonToggle({
 export function ArtifactViewer({
   artifacts,
   loading,
+  runId,
   onRetryWithFeedback,
   retryBusy,
 }: ArtifactViewerProps) {
@@ -795,6 +870,8 @@ export function ArtifactViewer({
                 <div className="p-2 border-t border-[var(--border)]">
                   <ArtifactBody
                     artifact={a}
+                    runId={runId}
+                    artifacts={artifacts}
                     onRetryWithFeedback={onRetryWithFeedback}
                     retryBusy={retryBusy}
                   />

@@ -32,6 +32,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json()
 }
 
+function encodeFilePath(path: string): string {
+  return path.split('/').map((segment) => encodeURIComponent(segment)).join('/')
+}
+
 function buildQuery(params: Record<string, string | number | undefined | null>): string {
   const query = new URLSearchParams()
   Object.entries(params).forEach(([key, value]) => {
@@ -125,9 +129,11 @@ export const api = {
   },
   files: {
     read: (projectId: string, path: string) =>
-      request<{ content: string; line_count: number }>(`/api/projects/${projectId}/files/${path}`),
+      request<{ content: string; line_count: number }>(
+        `/api/projects/${projectId}/files/${encodeFilePath(path)}`,
+      ),
     write: (projectId: string, path: string, content: string) =>
-      request(`/api/projects/${projectId}/files/${path}`, {
+      request(`/api/projects/${projectId}/files/${encodeFilePath(path)}`, {
         method: 'PUT',
         body: JSON.stringify({ content }),
       }),
@@ -137,9 +143,9 @@ export const api = {
         body: JSON.stringify({ path, content, is_directory: isDirectory }),
       }),
     delete: (projectId: string, path: string) =>
-      request(`/api/projects/${projectId}/files/${path}`, { method: 'DELETE' }),
+      request(`/api/projects/${projectId}/files/${encodeFilePath(path)}`, { method: 'DELETE' }),
     rename: (projectId: string, path: string, newPath: string) =>
-      request(`/api/projects/${projectId}/files/${path}/rename`, {
+      request(`/api/projects/${projectId}/files/${encodeFilePath(path)}/rename`, {
         method: 'POST',
         body: JSON.stringify({ new_path: newPath }),
       }),
@@ -185,6 +191,10 @@ export const api = {
     events: (id: string) => request(`/api/runs/${id}/events`),
     artifacts: (id: string) => request(`/api/runs/${id}/artifacts`),
     postmortem: (id: string) => request(`/api/runs/${id}/postmortem`),
+    readWorkspaceFile: (id: string, path: string) =>
+      request<{ content: string; line_count: number }>(
+        `/api/runs/${id}/files/${encodeFilePath(path)}`,
+      ),
     failureSummary: (projectId?: string) =>
       request(`/api/runs/failure-summary${buildQuery({ project_id: projectId })}`),
     approve: (id: string, comment = '') =>
@@ -195,6 +205,10 @@ export const api = {
       request(`/api/runs/${id}/retry`, {
         method: 'POST',
         body: JSON.stringify(body ?? {}),
+      }),
+    resume: (id: string) =>
+      request<{ ok: boolean; run_id: string; status: string }>(`/api/runs/${id}/resume`, {
+        method: 'POST',
       }),
     rollbackWorkspace: (id: string) =>
       request(`/api/runs/${id}/rollback-workspace`, { method: 'POST' }),

@@ -358,6 +358,7 @@ export function AgentPanel() {
         <ArtifactViewer
           artifacts={artifacts}
           loading={artifactsLoading || detailLoading}
+          runId={currentRunId}
           onRetryWithFeedback={handleRetryWithFeedback}
           retryBusy={retryBusy}
         />

@@ -238,6 +238,10 @@ export function isRetryableStatus(status: string): boolean {
   return ['blocked', 'changes_requested'].includes(status)
 }
 
+export function isResumableStatus(status: string): boolean {
+  return ['pending', 'running'].includes(status)
+}
+
 export function canRollbackWorkspace(status: string): boolean {
   return ['awaiting_approval', 'changes_requested', 'blocked', 'failed'].includes(status)
 }

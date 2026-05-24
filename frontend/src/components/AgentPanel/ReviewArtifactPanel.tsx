@@ -1,8 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Copy, ExternalLink } from 'lucide-react'
-import { api } from '@/api/client'
+import { openRunFile } from '@/lib/openRunFile'
 import { useEditorStore, useProjectStore } from '@/store'
-import { getLanguage } from '@/lib/utils'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button } from '@/components/ui/primitives'
 import { parseReviewContent, type RunArtifact } from '@/types/runs'
@@ -16,6 +15,8 @@ interface ReviewArtifactPanelProps {
   artifact: RunArtifact
   compact?: boolean
   busy?: boolean
+  runId?: string | null
+  artifacts?: RunArtifact[]
   onRetryWithFeedback: (feedback: string) => void | Promise<void>
 }
 
@@ -23,6 +24,8 @@ export function ReviewArtifactPanel({
   artifact,
   compact = false,
   busy,
+  runId,
+  artifacts,
   onRetryWithFeedback,
 }: ReviewArtifactPanelProps) {
   const projectId = useProjectStore((s) => s.currentProjectId)
@@ -65,13 +68,9 @@ export function ReviewArtifactPanel({
   )
 
   const openPath = async (path: string) => {
-    if (!projectId || !path) return
-    try {
-      const data = await api.files.read(projectId, path)
-      openTab({ path, content: data.content, dirty: false, language: getLanguage(path) })
-    } catch (e) {
-      showError(e)
-    }
+    if (!path) return
+    const opened = await openRunFile({ projectId, runId, path, artifacts, openTab })
+    if (!opened) showError(new Error(`File not found: ${path}`))
   }
 
   return (

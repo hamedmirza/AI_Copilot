@@ -92,7 +92,6 @@ export function ChatPanel() {
   const pendingToolCalls = useChatStore((state) => state.pendingToolCalls)
   const runEventsById = useChatStore((state) => state.runEventsById)
   const spawnedRunIds = useChatStore((state) => state.spawnedRunIds)
-  const streamingContent = useChatStore((state) => state.streamingContent)
   const assistantStatus = useChatStore((state) => state.assistantStatus)
   const setSessions = useChatStore((state) => state.setSessions)
   const upsertSession = useChatStore((state) => state.upsertSession)

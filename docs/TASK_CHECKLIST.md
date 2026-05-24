@@ -20,6 +20,34 @@
 | 016 | Onboarding & Empty States      | [x]    | Onboarding/, onboarding/status API | Yes | 2026-05-21 |
 | 017 | Documentation & CR Registry    | [x]    | docs/CHANGE_REQUESTS/, README.md | Yes | 2026-05-21 |
 | 018 | Search, Rename, Artifacts, Delete | [x] | SearchPanel, FileTree, ProjectDeleteDialog | Yes | 2026-05-21 |
+| 019 | Run Workspace File Open, Resume Controls, and Startup Auto-Resume | [x] | openRunFile, runs.resume UI, auto_resume settings | Partial (auto 2026-05-24, manual pending) | 2026-05-24 |
+| 020 | Full Repo Operator Runtime Layer | [ ] | runtime contract, bootstrap/remediation, managed services, health/smoke UI/API | No | - |
+
+## Verification Summary (2026-05-24 — CR-019 truth-alignment pass)
+
+### Automated
+
+| Check | Result |
+|-------|--------|
+| `cd backend && .venv/bin/pytest -q` | **117 passed**, 3 warnings |
+| `npm --prefix frontend run build` | Success (tsc + vite) |
+| `GET /api/health` | 200 OK |
+| `GET /api/runs/{id}/files/{path}` | Covered by pytest (`package.json` + dotfile `.npmrc`) |
+| `POST /api/runs/{id}/resume` | Covered by pytest (success + rejection cases) |
+| Lifespan auto-resume enabled | Covered by pytest (`resume_inflight_runs(..., limit=1)`) |
+| Lifespan auto-resume disabled | Covered by pytest (no resume call) |
+
+### Manual verification status
+
+| Flow | Status |
+|------|--------|
+| Settings → Pipeline runtime → auto-resume checkbox | Pending live re-verification |
+| RUNS tab → run detail → **Resume run** button | Pending live re-verification |
+| Run-context file link before approval | Pending live re-verification |
+| Dotfile workspace path open | Pending live re-verification |
+| Post-approve fallback to project source | Pending live re-verification |
+
+**Truth note:** CR-019 implementation is present, but the remaining manual checks have not been re-executed and re-recorded in a way that proves the live flows end to end. Keep this row at `Verified = Partial` until the seeded manual pass is completed.
 
 ## Verification Summary (2026-05-21 — plan completion)
 
@@ -31,7 +59,7 @@
 | `npm --prefix frontend run build` | Success (tsc + vite) |
 | `GET /api/health` | `{"status":"ok","version":"0.1.0"}` |
 | `POST /api/settings/reset` | Reverts to `http://192.168.128.70:1234/v1`, `worker_count: 1` |
-| `test_run_workspace_isolation` | Run workspace under `backend/workspaces/{run_id}`, source unchanged until approve |
+| `test_run_workspace_isolation` | Run workspace under `runtime/workspaces/{run_id}`, source unchanged until approve |
 
 ### Browser E2E (`http://localhost:5177`)
 
@@ -67,3 +95,10 @@
 cd backend && .venv/bin/pytest -q
 npm --prefix frontend run build
 ```
+
+## Verification row policy
+
+- `Status = [x]` means implementation landed.
+- `Verified = Yes` requires both automated checks and all required manual-only checks to be completed and recorded.
+- If manual checks remain open, use `Verified = Partial` or `No`.
+- Do not use a CR title broader than the capability that actually shipped.

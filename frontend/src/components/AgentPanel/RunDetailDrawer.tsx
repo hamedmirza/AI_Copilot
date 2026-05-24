@@ -9,6 +9,7 @@ import { STAGES } from '@/components/Chat/types'
 import {
   canRollbackPromote,
   canRollbackWorkspace,
+  isResumableStatus,
   isRetryableStatus,
   latestReviewArtifact,
   type GlobalSkillRecord,
@@ -83,6 +84,21 @@ export function RunDetailDrawer({
       await api.runs.retry(runId, feedback ? { feedback } : undefined)
       setRunStatus('running')
       showSuccess('Pipeline retry started')
+      await hydrateRun(runId, true)
+    } catch (e) {
+      showError(e)
+    } finally {
+      setBusy(false)
+    }
+  }, [hydrateRun, runId, setRunStatus])
+
+  const handleResume = useCallback(async () => {
+    if (!runId) return
+    setBusy(true)
+    try {
+      await api.runs.resume(runId)
+      setRunStatus('running')
+      showSuccess('Run re-queued')
       await hydrateRun(runId, true)
     } catch (e) {
       showError(e)
@@ -245,6 +261,16 @@ export function RunDetailDrawer({
                 >
                   Retry pipeline
                 </Button>
+                {isResumableStatus(status) && (
+                  <Button
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => void handleResume()}
+                    title="Re-queue a stuck pending or running run"
+                  >
+                    Resume run
+                  </Button>
+                )}
                 {canRollbackWorkspace(status) && (
                   <Button
                     variant="secondary"
@@ -270,6 +296,8 @@ export function RunDetailDrawer({
                   <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">Review</p>
                   <ReviewArtifactPanel
                     artifact={reviewArtifact}
+                    runId={runId}
+                    artifacts={artifacts}
                     busy={busy}
                     onRetryWithFeedback={handleRetry}
                   />
@@ -332,6 +360,7 @@ export function RunDetailDrawer({
               <ArtifactViewer
                 artifacts={artifacts}
                 loading={loading}
+                runId={runId}
                 onRetryWithFeedback={handleRetry}
                 retryBusy={busy}
               />

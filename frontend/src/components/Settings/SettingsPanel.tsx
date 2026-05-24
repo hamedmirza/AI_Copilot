@@ -70,7 +70,6 @@ export function SettingsPanel() {
   const [testing, setTesting] = useState(false)
   const [testByProvider, setTestByProvider] = useState<Partial<Record<ProviderKind, { ok: boolean; msg: string }>>>({})
   const [saved, setSaved] = useState(false)
-  const [providerStatus, setProviderStatus] = useState('unknown')
   const [lmstudioStatus, setLmstudioStatus] = useState('unknown')
   const [ollamaStatus, setOllamaStatus] = useState('unknown')
   const [mcpServers, setMcpServers] = useState<Array<Record<string, unknown>>>([])
@@ -101,7 +100,6 @@ export function SettingsPanel() {
         })
         setMcpServers(servers)
         void api.providerHealth().then((health) => {
-          setProviderStatus(health.active_provider === 'ollama' ? health.ollama : health.lmstudio)
           setLmstudioStatus(health.lmstudio)
           setOllamaStatus(health.ollama)
         }).catch(() => {})
@@ -211,7 +209,6 @@ export function SettingsPanel() {
         provider === 'ollama'
           ? (health.ollama_model_count ?? 0)
           : (health.lmstudio_model_count ?? 0)
-      setProviderStatus(health.active_provider === 'ollama' ? health.ollama : health.lmstudio)
       setLmstudioStatus(health.lmstudio)
       setOllamaStatus(health.ollama)
       const label = providerLabel(provider)
@@ -389,6 +386,24 @@ export function SettingsPanel() {
               <p className="text-xs mt-2 text-[var(--text-secondary)]">
                 Active: <strong className="text-[var(--text-primary)]">{providerLabel(activeProvider)}</strong>
                 {pendingProvider !== activeProvider && ` — Apply to switch to ${providerLabel(pendingProvider)}.`}
+              </p>
+            </section>
+
+            <section>
+              <h3 className="text-sm font-medium mb-2 text-[var(--text-secondary)]">Pipeline runtime</h3>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={
+                    settings.auto_resume_enabled !== false
+                    && settings.auto_resume_enabled !== 'false'
+                  }
+                  onChange={(e) => void save('auto_resume_enabled', e.target.checked)}
+                />
+                Resume interrupted runs on server startup
+              </label>
+              <p className="text-xs mt-1 text-[var(--text-secondary)]">
+                When enabled, the backend re-enqueues one pending or running run after restart.
               </p>
             </section>
 

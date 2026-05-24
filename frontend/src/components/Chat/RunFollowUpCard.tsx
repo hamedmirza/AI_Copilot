@@ -99,6 +99,8 @@ export function RunFollowUpCard({ runId, events, runStatus, busy, onRetry }: Run
         <ReviewArtifactPanel
           artifact={reviewArtifact}
           compact
+          runId={runId}
+          artifacts={artifacts}
           busy={busy}
           onRetryWithFeedback={(feedback) => onRetry(runId, feedback)}
         />

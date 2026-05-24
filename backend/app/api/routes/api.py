@@ -466,6 +466,28 @@ def get_run_postmortem(run_id: str, db: Session = Depends(get_db)):
     return _artifact_to_response(artifact)
 
 
+@router.get("/runs/{run_id}/files/{path:path}")
+def read_run_workspace_file(run_id: str, path: str, db: Session = Depends(get_db)):
+    from pathlib import Path
+
+    from app.db.models import RunModel
+
+    _guard_traversal(path)
+    run = db.query(RunModel).filter(RunModel.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    if not run.workspace_path or not Path(run.workspace_path).is_dir():
+        raise HTTPException(404, "Run workspace not available")
+    project = ProjectService(db).get(run.project_id)
+    fs = FileService(Path(run.workspace_path), project.protected_files)
+    try:
+        return fs.read_file(path)
+    except PathTraversalError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except NotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @router.get("/projects/{project_id}/runs")
 def project_runs(project_id: str, db: Session = Depends(get_db)):
     from app.db.models import RunModel, TaskModel

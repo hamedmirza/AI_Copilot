@@ -56,7 +56,6 @@ export default function App() {
   const { projects, currentProjectId, setProjects, setCurrentProject } = useProjectStore()
   const { setSettings } = useSettingsStore()
   const {
-    onboardingReady,
     setBackendOnline,
     setOnboardingReady,
     setShowOnboarding,
@@ -66,7 +65,6 @@ export default function App() {
   const [projectManagerOpen, setProjectManagerOpen] = useState(false)
   const [projectManagerMode, setProjectManagerMode] = useState<'list' | 'add'>('list')
 
-  const currentProject = projects.find((p) => String(p.id) === currentProjectId)
   const sidebarContrib = getContribution('sidebar', activePanel)
   const panelTitle = sidebarContrib?.title ?? 'Explorer'
   const browserContrib = getContribution('center', 'browser')
