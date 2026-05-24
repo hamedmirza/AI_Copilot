@@ -1,46 +1,26 @@
-# E2E Runs UX Seed File
+# E2E UX Manual Verification Seed
 
-## Manual Verification Seed
-Follow these steps to manually verify the E2E runs UX flow. Document results in [docs/TASK_VERIFICATION_TEMPLATE.md](docs/TASK_VERIFICATION_TEMPLATE.md).
+## Format
+- `ID`: Unique run identifier
+- `UX_TYPE`: Category of user experience test
+- `DESCRIPTION`: Brief overview of the test criteria
+- `EXPECTED_OUTCOME`: Desired result
 
-## Prerequisites
-- [ ] Backend server running (`scripts/server.sh` or `uvicorn app.main:app`)
-- [ ] Frontend dev server running (`npm run dev`)
-- [ ] Database (`backend/app.db`) initialized with at least one historical or active run record
-- [ ] WebSocket connections enabled and accessible at `/ws/runs/{id}` and `/ws/events`
+## Runs
+### Run 1
+- ID: e2e_ux_001
+- UX_TYPE: Onboarding Flow
+- DESCRIPTION: Verify first-time user welcome screen loads correctly
+- EXPECTED_OUTCOME: Welcome screen appears within 2s, 'Get Started' button is interactive
 
-### Verification Steps
+### Run 2
+- ID: e2e_ux_002
+- UX_TYPE: Dashboard Layout
+- DESCRIPTION: Check grid alignment and responsive behavior on desktop
+- EXPECTED_OUTCOME: Tiles are evenly spaced, no horizontal scroll, fonts render sharply
 
-1. **Run List Rendering**
-   - Load the main application UI.
-   - Verify that the Run History/List panel displays correctly.
-   - Confirm that `RunCard` components render the run title, status, and timestamp.
-   - Check badge colors and labels match `runStatusBadgeClass` logic in `frontend/src/types/runs.ts`.
-
-2. **WebSockets & Real-Time Updates**
-   - Trigger an action in the UI that initiates a run or event broadcast.
-   - Verify that `useWebSocket` hook captures events without dropping messages.
-   - Observe real-time status transitions in the UI (e.g., pending -> running -> completed).
-
-3. **Run Detail & Log Viewer**
-   - Click on a run ID to open `RunDetailDrawer`.
-   - Verify `RunLogPanel` and `TerminalPanel` render correctly.
-   - Confirm that `/nothink` toggle and model selection reflect correctly in the UI state.
-   - Check that tool calls and thought blocks render inside `ToolCallCard` and `MessageBubble`.
-
-4. **Agent & Artifact Flow**
-   - Verify that `AgentPanel` and `ReviewArtifactPanel` load without crashing.
-   - Confirm that `ApproveDialog` triggers as expected on agent tool calls.
-   - Test patch diff rendering via `coderPatchDiff` in the UI.
-
-5. **Error & Edge Cases**
-   - Terminate the backend while a run is active; verify graceful fallback or connection lost toast via `toast.ts`.
-   - Reload the page during an active WebSocket session; confirm state recovery or safe reconnection.
-
-### Known Manual-Only Checks
-- Database seeding requires manual or script-based DB population for consistent UX testing.
-- Live environment deployment or cross-browser testing is out of scope for this seed.
-
-### Documentation
-- Record pass/fail for each step using [docs/TASK_VERIFICATION_TEMPLATE.md](docs/TASK_VERIFICATION_TEMPLATE.md).
-- Ensure alignment with [docs/VERIFICATION_RULES.md](docs/VERIFICATION_RULES.md).
+### Run 3
+- ID: e2e_ux_003
+- UX_TYPE: Mobile Navigation
+- DESCRIPTION: Test hamburger menu toggle and swipe gestures
+- EXPECTED_OUTCOME: Menu slides smoothly, gestures have <100ms latency, no visual tearing

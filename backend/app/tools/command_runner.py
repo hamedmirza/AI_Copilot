@@ -1,6 +1,7 @@
 import re
 import shlex
 import subprocess
+import os
 from pathlib import Path
 
 from app.core.exceptions import CommandRejectedError
@@ -56,6 +57,14 @@ def validate_command(command: str) -> None:
 
 def run_command(command: str, cwd: Path, timeout: int = 300) -> tuple[int, str, str]:
     validate_command(command)
+    env = os.environ.copy()
+    path_parts = []
+    for rel in ("node_modules/.bin", "frontend/node_modules/.bin"):
+        candidate = cwd / rel
+        if candidate.exists():
+            path_parts.append(str(candidate))
+    if path_parts:
+        env["PATH"] = os.pathsep.join([*path_parts, env.get("PATH", "")])
     proc = subprocess.run(
         command,
         shell=True,
@@ -63,5 +72,6 @@ def run_command(command: str, cwd: Path, timeout: int = 300) -> tuple[int, str, 
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=env,
     )
     return proc.returncode, proc.stdout, proc.stderr

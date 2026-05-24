@@ -42,6 +42,24 @@ function buildMcpSummary(servers: Array<Record<string, unknown>>) {
   }).join('\n')
 }
 
+function extractRunIds(messages: ChatMessage[]): string[] {
+  const runIds = new Set<string>()
+  messages.forEach((message) => {
+    const metadata = message.metadata || {}
+    const runId = metadata.run_id
+    if (runId) {
+      runIds.add(String(runId))
+    }
+    const referencedRuns = metadata.run_ids
+    if (Array.isArray(referencedRuns)) {
+      referencedRuns.forEach((item) => {
+        if (item) runIds.add(String(item))
+      })
+    }
+  })
+  return Array.from(runIds)
+}
+
 type SessionSelectionOptions = {
   selectionMode?: ChatModelSelectionMode
   modelOverride?: string
@@ -249,7 +267,8 @@ export function ChatPanel() {
         return
       }
       setSessions(nextSessions)
-      const selected = nextSessions.find((session) => session.id === currentSessionId) || nextSessions[0]
+      const savedSessionId = useChatStore.getState().currentSessionId
+      const selected = nextSessions.find((session) => session.id === savedSessionId) || nextSessions[0]
       setCurrentSessionId(selected.id)
       setActiveMode(normalizeChatMode(selected.mode))
       setModelSelectionMode(normalizeModelSelectionMode(selected.model_override))
@@ -264,7 +283,6 @@ export function ChatPanel() {
   }, [
     activeMode,
     createSession,
-    currentSessionId,
     projectId,
     resetChatState,
     setSearchResults,
@@ -294,11 +312,7 @@ export function ChatPanel() {
       const items = Array.isArray(raw) ? raw : raw.items
       const parsed = items.map((message) => toChatMessage(message))
       setMessages(parsed)
-      setSpawnedRunIds(
-        parsed
-          .filter((message) => message.metadata?.type === 'run_spawned' && message.metadata?.run_id)
-          .map((message) => String(message.metadata?.run_id))
-      )
+      setSpawnedRunIds(extractRunIds(parsed))
     } catch (error) {
       showError(error)
       setMessages([])
@@ -885,14 +899,26 @@ export function ChatPanel() {
   const handleApproveRun = useCallback(async (runId: string) => {
     setRunActionBusy(true)
     try {
+      addRunEvent(runId, {
+        type: 'approval_started',
+        severity: 'info',
+        message: 'Approval submitted',
+        run_id: runId,
+      })
       await api.runs.approve(runId)
+      addRunEvent(runId, {
+        type: 'run_completed',
+        severity: 'info',
+        message: 'Run approved and promoted',
+        run_id: runId,
+      })
       showSuccess('Run approved')
     } catch (error) {
       showError(error)
     } finally {
       setRunActionBusy(false)
     }
-  }, [])
+  }, [addRunEvent])
 
   const handleRejectRun = useCallback(async (runId: string) => {
     const reason = prompt('Reason for rejection?')

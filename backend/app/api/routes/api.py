@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import ptyprocess
+from starlette.concurrency import run_in_threadpool
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -503,9 +504,9 @@ def project_runs(project_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/runs/{run_id}/approve")
-def approve_run(run_id: str, body: ApproveRequest, db: Session = Depends(get_db)):
+async def approve_run(run_id: str, body: ApproveRequest, db: Session = Depends(get_db)):
     try:
-        return approve_run_sync(run_id, body.comment or "")
+        return await run_in_threadpool(approve_run_sync, run_id, body.comment or "")
     except NotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValidationError as exc:
@@ -553,6 +554,20 @@ def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depen
     if claim_run(db, run.id):
         run_engine.enqueue(run.id)
     return {"ok": True}
+
+
+@router.post("/runs/{run_id}/resume")
+def resume_run(run_id: str, db: Session = Depends(get_db)):
+    from app.core.enums import RunStatus
+    from app.db.models import RunModel
+
+    run = db.query(RunModel).filter(RunModel.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    if run.status not in (RunStatus.RUNNING.value, RunStatus.PENDING.value):
+        raise HTTPException(400, "Run is not resumable")
+    run_engine.enqueue(run.id)
+    return {"ok": True, "run_id": run.id, "status": run.status}
 
 
 @router.post("/runs/{run_id}/rollback-workspace")

@@ -34,6 +34,10 @@ def test_settings_reset(client):
     body = r.json()
     assert body["lmstudio_base_url"] == "http://192.168.128.70:1234/v1"
     assert body["worker_count"] == 1
+    assert body["stop_on_first_failure"] is True
+    assert body["ollama_enabled"] is False
+    assert body["model_planner"] == "qwen3.6-27b"
+    assert body["model_chat_debugger"] == "qwen3.6-27b"
 
 
 def test_settings_reset_restores_validation_profiles(client):
@@ -46,6 +50,21 @@ def test_settings_reset_restores_validation_profiles(client):
     profiles = json.loads(body["validation_profiles_json"])
     assert "python" in profiles
     assert profiles["python"] == ["ruff check .", "mypy .", "pytest -q"]
+
+
+def test_settings_update_syncs_active_provider_role_snapshot(client):
+    body = client.put(
+        "/api/settings",
+        json={
+            "ollama_enabled": False,
+            "model_planner": "qwen3.6-27b",
+            "model_chat_debugger": "qwen3.6-27b",
+        },
+        headers=HEADERS,
+    ).json()
+    snapshot = body["lmstudio_role_models_json"]
+    assert snapshot["model_planner"] == "qwen3.6-27b"
+    assert snapshot["model_chat_debugger"] == "qwen3.6-27b"
 
 
 def test_onboarding_status_empty(client):
@@ -178,6 +197,146 @@ def test_run_workspace_isolation(client, tmp_path):
     assert (proj_a / "secret.txt").read_text() == "project-a\n"
 
 
+def test_run_workspace_excludes_runtime_db_files(tmp_path):
+    from app.services.workspace_service import prepare_run_workspace
+
+    source = tmp_path / "source"
+    (source / "backend").mkdir(parents=True)
+    (source / "backend" / "app.db").write_text("live-db")
+    (source / "backend" / "app.db-wal").write_text("live-wal")
+    (source / "backend" / "app.db-shm").write_text("live-shm")
+    (source / "frontend").mkdir()
+    (source / "frontend" / "index.ts").write_text("export const ok = true;\n")
+
+    workspace = prepare_run_workspace(source, "exclude-db-files")
+
+    assert not (workspace / "backend" / "app.db").exists()
+    assert not (workspace / "backend" / "app.db-wal").exists()
+    assert not (workspace / "backend" / "app.db-shm").exists()
+    assert (workspace / "frontend" / "index.ts").exists()
+
+
+def test_record_event_survives_poisoned_session(tmp_path):
+    from sqlalchemy.exc import IntegrityError
+
+    from app.db.models import ProjectModel, RunEventModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "poisoned_session_workspace"
+    workspace.mkdir()
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="PoisonedSession",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Keep run row intact after event fallback",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(project_id=project.id, task_id=task.id, status="running", workspace_path=str(workspace))
+        db.add(run)
+        db.commit()
+        run_id = run.id
+
+        db.add(
+            RunEventModel(
+                run_id="missing-run-id",
+                event_type="broken",
+                stage="planner",
+                severity="error",
+                message="break the session",
+                payload_json="{}",
+            )
+        )
+        try:
+            db.commit()
+        except IntegrityError:
+            pass
+
+        service = OrchestrationService()
+        service._record_event(db, run_id, "planner_started", "planner", "info", "planner started")
+
+        fresh = SessionLocal()
+        try:
+            persisted_run = fresh.get(RunModel, run_id)
+            events = (
+                fresh.query(RunEventModel)
+                .filter(RunEventModel.run_id == run_id, RunEventModel.event_type == "planner_started")
+                .all()
+            )
+        finally:
+            fresh.close()
+    finally:
+        db.close()
+
+    assert persisted_run is not None
+    assert len(events) == 1
+
+
+def test_awaiting_approval_event_is_persisted(client, tmp_path):
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.orchestration_service import OrchestrationService
+
+    project_root = tmp_path / "awaiting_approval_project"
+    project_root.mkdir()
+    (project_root / "app.py").write_text("print('ready')\n")
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="Awaiting Approval",
+            source_repo_spec=str(project_root),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Simple implementation task",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status="running",
+            workspace_path=str(project_root),
+        )
+        db.add(run)
+        db.commit()
+
+        service = OrchestrationService()
+        service._stage_planner = lambda db_arg, run_id, ctx: {"summary": "ok"}  # type: ignore[method-assign]
+        service._stage_architect = lambda db_arg, run_id, ctx: {"overview": "ok"}  # type: ignore[method-assign]
+        service._stage_ui = lambda db_arg, run_id, ctx: {"skipped": True}  # type: ignore[method-assign]
+        service._stage_coder = lambda db_arg, run_id, ctx, fs: {"summary": "ok"}  # type: ignore[method-assign]
+        service._stage_reviewer_loop = lambda db_arg, run_id, ctx, fs, workspace, source: True  # type: ignore[method-assign]
+        service._stage_tester = lambda db_arg, run_id, ctx, workspace: True  # type: ignore[method-assign]
+
+        service._pipeline(db, run.id)
+        db.refresh(run)
+        assert run.status == "awaiting_approval"
+
+        events = client.get(f"/api/runs/{run.id}/events", headers=HEADERS).json()
+    finally:
+        db.close()
+
+    assert any(str(event["event_type"]) == "awaiting_approval" for event in events)
+
+
 def test_worker_count_update_reconfigures_run_engine(client):
     from app.services.orchestration_service import run_engine
 
@@ -189,6 +348,180 @@ def test_worker_count_update_reconfigures_run_engine(client):
     assert response.status_code == 200
     assert response.json()["worker_count"] == 3
     assert run_engine._max_workers == 3
+
+
+def test_resume_inflight_runs_enqueues_running_and_pending(client):
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.orchestration_service import resume_inflight_runs, run_engine
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="ResumeInflight",
+            source_repo_spec="/tmp/resume-inflight",
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Resume inflight runs",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        pending_run = RunModel(project_id=project.id, task_id=task.id, status="pending")
+        running_run = RunModel(project_id=project.id, task_id=task.id, status="running")
+        completed_run = RunModel(project_id=project.id, task_id=task.id, status="completed")
+        db.add_all([pending_run, running_run, completed_run])
+        db.commit()
+
+        captured: list[str] = []
+        original_enqueue = run_engine.enqueue
+        run_engine.enqueue = lambda run_id: captured.append(run_id)  # type: ignore[assignment]
+        try:
+            resumed = resume_inflight_runs(db)
+        finally:
+            run_engine.enqueue = original_enqueue  # type: ignore[assignment]
+    finally:
+        db.close()
+
+    assert set(resumed) == {pending_run.id, running_run.id}
+    assert set(captured) == {pending_run.id, running_run.id}
+
+
+def test_resume_inflight_runs_prioritizes_later_stage_runs(client):
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.orchestration_service import resume_inflight_runs, run_engine
+    from datetime import UTC, datetime, timedelta
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="ResumePriority",
+            source_repo_spec="/tmp/resume-priority",
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Resume priority ordering",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        older = datetime.now(UTC) - timedelta(hours=2)
+        newer = datetime.now(UTC) - timedelta(minutes=5)
+        planner_run = RunModel(project_id=project.id, task_id=task.id, status="running", current_stage="planner")
+        reviewer_run = RunModel(project_id=project.id, task_id=task.id, status="running", current_stage="reviewer")
+        tester_run = RunModel(project_id=project.id, task_id=task.id, status="pending", current_stage="tester")
+        db.add_all([planner_run, reviewer_run, tester_run])
+        db.flush()
+        planner_run.updated_at = older
+        reviewer_run.updated_at = newer
+        tester_run.updated_at = older
+        db.commit()
+
+        captured: list[str] = []
+        original_enqueue = run_engine.enqueue
+        run_engine.enqueue = lambda run_id: captured.append(run_id)  # type: ignore[assignment]
+        try:
+            resume_inflight_runs(db, limit=3)
+        finally:
+            run_engine.enqueue = original_enqueue  # type: ignore[assignment]
+    finally:
+        db.close()
+
+    assert captured[:3] == [tester_run.id, reviewer_run.id, planner_run.id]
+
+
+def test_resume_inflight_runs_can_limit_batch_size(client):
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.orchestration_service import resume_inflight_runs, run_engine
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="ResumeLimit",
+            source_repo_spec="/tmp/resume-limit",
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Resume batch limit",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        runs = [
+            RunModel(project_id=project.id, task_id=task.id, status="running", current_stage="planner"),
+            RunModel(project_id=project.id, task_id=task.id, status="running", current_stage="reviewer"),
+        ]
+        db.add_all(runs)
+        db.commit()
+
+        captured: list[str] = []
+        original_enqueue = run_engine.enqueue
+        run_engine.enqueue = lambda run_id: captured.append(run_id)  # type: ignore[assignment]
+        try:
+            resumed = resume_inflight_runs(db, limit=1)
+        finally:
+            run_engine.enqueue = original_enqueue  # type: ignore[assignment]
+    finally:
+        db.close()
+
+    assert len(resumed) == 1
+    assert captured == resumed
+
+
+def test_resume_run_endpoint_enqueues_resumable_run(client):
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.orchestration_service import run_engine
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="ResumeEndpoint",
+            source_repo_spec="/tmp/resume-endpoint",
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Resume endpoint task",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(project_id=project.id, task_id=task.id, status="running", current_stage="reviewer")
+        db.add(run)
+        db.commit()
+
+        captured: list[str] = []
+        original_enqueue = run_engine.enqueue
+        run_engine.enqueue = lambda run_id: captured.append(run_id)  # type: ignore[assignment]
+        try:
+            response = client.post(f"/api/runs/{run.id}/resume", headers=HEADERS)
+        finally:
+            run_engine.enqueue = original_enqueue  # type: ignore[assignment]
+    finally:
+        db.close()
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert captured == [run.id]
 
 
 def test_reviewer_context_includes_changed_file_snapshot(client, tmp_path):
@@ -242,11 +575,12 @@ def test_reviewer_context_includes_changed_file_snapshot(client, tmp_path):
         db.commit()
 
         service = OrchestrationService()
-        review_context, changed_files = service._build_reviewer_context(
+        review_context, changed_files, structural_summaries = service._build_reviewer_context(
             db,
             run.id,
             "Review the patch",
             FileService(workspace),
+            workspace,
         )
     finally:
         db.close()
@@ -254,8 +588,433 @@ def test_reviewer_context_includes_changed_file_snapshot(client, tmp_path):
     assert changed_files == ["main.py"]
     assert "FILE: main.py" in review_context
     assert "Declared coder change:" in review_context
+    assert "Original file snapshot:" in review_context
     assert "Current file snapshot:" in review_context
     assert "print('hello reviewer')" in review_context
+    assert len(structural_summaries) == 1
+
+
+def test_coder_guard_rejects_destructive_full_file_replacement(tmp_path):
+    from app.core.exceptions import PatchGuardError
+    from app.services.file_service import FileService
+
+    workspace = tmp_path / "coder_guard"
+    workspace.mkdir()
+    target = workspace / "frontend/src/components/RunHistoryList.tsx"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "\n".join(
+            [
+                "import React from 'react'",
+                "import { Button } from '@/components/ui/primitives'",
+                "import { runStatusLabel } from '@/types/runs'",
+                "",
+                "interface RunHistoryListProps {",
+                "  runs: string[]",
+                "  currentRunId: string | null",
+                "}",
+                "",
+                "export function RunHistoryList({ runs, currentRunId }: RunHistoryListProps) {",
+                "  return <div>{runs.join(currentRunId ?? '')}</div>",
+                "}",
+            ]
+            + [f"export const marker{i} = {i}" for i in range(15)]
+        )
+        + "\n"
+    )
+
+    fs = FileService(workspace)
+    try:
+        fs.apply_coder_changes(
+            [
+                {
+                    "path": "frontend/src/components/RunHistoryList.tsx",
+                    "full_content": "export const RunHistoryList = () => <div>toy</div>\n",
+                }
+            ]
+        )
+    except PatchGuardError as exc:
+        assert "destructive full-file replacement" in str(exc) or "removed exported or declared symbols" in str(exc)
+    else:
+        raise AssertionError("expected PatchGuardError")
+
+
+def test_reviewer_guard_detects_structural_regression():
+    from app.services.change_guard import summarize_structure
+    from app.services.orchestration_service import OrchestrationService
+
+    before = "\n".join(
+        [
+            "import React from 'react'",
+            "import { Button } from '@/components/ui/primitives'",
+            "interface RunHistoryListProps {",
+            "  runs: string[]",
+            "  currentRunId: string | null",
+            "}",
+            "export function RunHistoryList({ runs, currentRunId }: RunHistoryListProps) {",
+            "  return <div>{runs.join(currentRunId ?? '')}</div>",
+            "}",
+        ]
+        + [f"export const marker{i} = {i}" for i in range(15)]
+    )
+    after = "export const RunHistoryList = () => <div>toy</div>\n"
+    summary = summarize_structure(
+        "frontend/src/components/RunHistoryList.tsx",
+        before,
+        after,
+        True,
+        True,
+    )
+
+    issues = OrchestrationService()._deterministic_review_issues([summary])
+    assert issues
+    assert any("Structural regression" in issue["message"] for issue in issues)
+
+
+def test_tester_enforces_frontend_build_for_frontend_changes(client, tmp_path, monkeypatch):
+    import json as _json
+
+    import app.services.orchestration_service as orchestration_module
+    from app.db.models import ArtifactModel, ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "frontend_validation_workspace"
+    workspace.mkdir()
+    (workspace / "frontend/src").mkdir(parents=True)
+    (workspace / "frontend/src/App.tsx").write_text("export const App = () => null\n")
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="FrontendValidation",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Frontend implementation task",
+            validation_profile="python",
+            task_kind="validation",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status="running",
+            current_stage="tester",
+            workspace_path=str(workspace),
+            task_kind="validation",
+        )
+        db.add(run)
+        db.flush()
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="coder",
+                content_json=_json.dumps(
+                    {
+                        "summary": "Updated frontend file",
+                        "file_changes": [{"path": "frontend/src/App.tsx", "line_changes": []}],
+                        "requires_operator_approval": False,
+                    }
+                ),
+            )
+        )
+        db.commit()
+
+        executed: list[str] = []
+
+        monkeypatch.setattr(orchestration_module, "validate_command", lambda command: None)
+        monkeypatch.setattr(
+            orchestration_module,
+            "run_command",
+            lambda command, workspace_path: (executed.append(command) or (0, "ok", "")),
+        )
+
+        service = OrchestrationService()
+        assert service._stage_tester(db, run.id, "Validate frontend change", workspace) is True
+    finally:
+        db.close()
+
+    assert "npm --prefix frontend run build" in executed
+
+
+def test_prepare_run_workspace_links_frontend_node_modules(tmp_path):
+    from app.services.workspace_service import prepare_run_workspace
+
+    source = tmp_path / "source_repo"
+    (source / "frontend/node_modules/.bin").mkdir(parents=True)
+    (source / "frontend/node_modules/.bin/tsc").write_text("tsc\n")
+    (source / "frontend/package.json").write_text('{"name":"frontend"}\n')
+
+    workspace = prepare_run_workspace(source, "workspace-link-test")
+    linked = workspace / "frontend/node_modules"
+    assert linked.exists()
+    assert linked.is_symlink()
+    assert linked.resolve() == (source / "frontend/node_modules").resolve()
+
+
+def test_run_command_prepends_workspace_node_modules_bin(tmp_path):
+    from app.tools.command_runner import run_command
+
+    workspace = tmp_path / "cmd_workspace"
+    (workspace / "frontend/node_modules/.bin").mkdir(parents=True)
+    shim = workspace / "frontend/node_modules/.bin/tsc"
+    shim.write_text("#!/bin/sh\necho local-tsc\n", encoding="utf-8")
+    shim.chmod(0o755)
+
+    code, stdout, stderr = run_command("tsc", workspace)
+    assert code == 0
+    assert "local-tsc" in stdout
+    assert stderr == ""
+
+
+def test_stage_coder_retries_after_guard_rejection(client, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import app.services.orchestration_service as orchestration_module
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.file_service import FileService
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "coder_retry_workspace"
+    workspace.mkdir()
+    target = workspace / "frontend/src/types/runs.ts"
+    target.parent.mkdir(parents=True)
+    (workspace / "frontend/node_modules/.bin").mkdir(parents=True)
+    tsc_shim = workspace / "frontend/node_modules/.bin/tsc"
+    tsc_shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    tsc_shim.chmod(0o755)
+    target.write_text(
+        "\n".join(
+            [
+                "export interface RunSummary {",
+                "  id: string",
+                "  status: string",
+                "  failure_class?: string | null",
+                "  recovery_status?: string | null",
+                "}",
+            ]
+            + [f"export const item{i} = {i}" for i in range(20)]
+        )
+        + "\n"
+    )
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="CoderRetry",
+            source_repo_spec=str(workspace),
+            validation_profile="react",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(project_id=project.id, description="Retry coder on guard rejection", validation_profile="react")
+        db.add(task)
+        db.flush()
+        run = RunModel(project_id=project.id, task_id=task.id, status="running", workspace_path=str(workspace))
+        db.add(run)
+        db.commit()
+
+        calls = {"count": 0}
+
+        class FakeRegistry:
+            def active_provider(self):
+                return "ollama"
+
+            def resolve_stage(self, stage):
+                return object()
+
+        class FakeCoderAgent:
+            def __init__(self, provider):
+                self.provider = provider
+
+            def code(self, context):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    return SimpleNamespace(
+                        file_changes=[
+                            {
+                                "path": "frontend/src/types/runs.ts",
+                                "full_content": "export const RunHistoryList = () => null\n",
+                            }
+                        ],
+                        model_dump=lambda: {
+                            "summary": "bad patch",
+                            "file_changes": [
+                                {
+                                    "path": "frontend/src/types/runs.ts",
+                                    "full_content": "export const RunHistoryList = () => null\n",
+                                }
+                            ],
+                            "requires_operator_approval": False,
+                        },
+                    )
+                return SimpleNamespace(
+                    file_changes=[
+                        {
+                            "path": "frontend/src/types/runs.ts",
+                            "line_changes": [
+                                {
+                                    "start_line": 6,
+                                    "end_line": 6,
+                                    "new_content": "}\n\nexport function hasRecoveryMetadata(run: RunSummary): boolean {\n  return Boolean(run.failure_class || run.recovery_status)\n}\n",
+                                }
+                            ],
+                        }
+                    ],
+                    model_dump=lambda: {
+                        "summary": "good patch",
+                        "file_changes": [
+                            {
+                                "path": "frontend/src/types/runs.ts",
+                                "line_changes": [
+                                    {
+                                        "start_line": 6,
+                                        "end_line": 6,
+                                        "new_content": "}\n\nexport function hasRecoveryMetadata(run: RunSummary): boolean {\n  return Boolean(run.failure_class || run.recovery_status)\n}\n",
+                                    }
+                                ],
+                            }
+                        ],
+                        "requires_operator_approval": False,
+                    },
+                )
+
+        monkeypatch.setattr(orchestration_module.ProviderRegistry, "get", staticmethod(lambda: FakeRegistry()))
+        monkeypatch.setattr(orchestration_module, "CoderAgent", FakeCoderAgent)
+
+        service = OrchestrationService()
+        assert service._stage_coder(db, run.id, "Apply a minimal patch", FileService(workspace)) is True
+    finally:
+        db.close()
+
+    content = target.read_text()
+    assert calls["count"] == 2
+    assert "hasRecoveryMetadata" in content
+    assert "item19" in content
+
+
+def test_running_run_resumes_from_current_stage(client, tmp_path):
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "resume_stage_workspace"
+    workspace.mkdir()
+    (workspace / "seed.txt").write_text("ok\n")
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="ResumeStage",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Resume from reviewer",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status="running",
+            current_stage="reviewer",
+            workspace_path=str(workspace),
+        )
+        db.add(run)
+        db.commit()
+
+        service = OrchestrationService()
+        called: list[str] = []
+        service._stage_planner = lambda db_arg, run_id, ctx: called.append("planner") or {"summary": "ok"}  # type: ignore[method-assign]
+        service._stage_architect = lambda db_arg, run_id, ctx: called.append("architect") or {"overview": "ok"}  # type: ignore[method-assign]
+        service._stage_ui = lambda db_arg, run_id, ctx: called.append("ui_designer") or {"skipped": True}  # type: ignore[method-assign]
+        service._stage_coder = lambda db_arg, run_id, ctx, fs: called.append("coder") or {"summary": "ok"}  # type: ignore[method-assign]
+        service._stage_reviewer_loop = lambda db_arg, run_id, ctx, fs, workspace_arg, source_arg: called.append("reviewer") or True  # type: ignore[method-assign]
+        service._stage_tester = lambda db_arg, run_id, ctx, workspace_arg: called.append("tester") or True  # type: ignore[method-assign]
+
+        service._pipeline(db, run.id)
+    finally:
+        db.close()
+
+    assert called == ["reviewer", "tester"]
+
+
+def test_validation_task_tester_skips_llm_planning(client, tmp_path):
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "validation_tester_workspace"
+    workspace.mkdir()
+    (workspace / "seed.txt").write_text("seed\n")
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="ValidationTester",
+            source_repo_spec=str(workspace),
+            validation_profile="custom",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Validation-only task",
+            validation_profile="custom",
+            task_kind="validation",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status="running",
+            current_stage="tester",
+            workspace_path=str(workspace),
+            task_kind="validation",
+        )
+        db.add(run)
+        db.commit()
+
+        service = OrchestrationService()
+        service._log_provider = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("tester LLM should be skipped"))  # type: ignore[method-assign]
+
+        service._stage_tester(db, run.id, "validate this", workspace)
+
+        events = client.get(f"/api/runs/{run.id}/events", headers=HEADERS).json()
+        artifacts = client.get(f"/api/runs/{run.id}/artifacts", headers=HEADERS).json()
+    finally:
+        db.close()
+
+    assert any(event["event_type"] == "tester_llm_skipped" for event in events)
+    assert any(artifact["artifact_type"] == "test_plan" for artifact in artifacts)
+
+
+def test_profile_commands_are_skipped_for_non_matching_changed_files(client):
+    from app.services.orchestration_service import OrchestrationService
+
+    service = OrchestrationService()
+    commands = ["ruff check .", "mypy .", "pytest -q"]
+    filtered = service._profile_commands_for_changed_files("python", commands, ["notes.txt"])
+    assert filtered == []
+    kept = service._profile_commands_for_changed_files("python", commands, ["module.py"])
+    assert kept == commands
 
 
 def test_reviewer_missing_context_fails_fast(client, tmp_path):
@@ -333,6 +1092,7 @@ def test_reviewer_missing_context_fails_fast(client, tmp_path):
             run.id,
             "Review the patch",
             FileService(workspace),
+            workspace,
             workspace,
         )
         db.refresh(run)
@@ -441,6 +1201,87 @@ def test_stage_tester_runs_profile_and_skips_forbidden_llm_commands(client, tmp_
     rejected = [event for event in events if event.event_type == "validation_rejected"]
     assert any("forbidden pattern" in event.message for event in rejected)
     assert run.status == "running"
+
+
+def test_stage_tester_optional_command_failure_does_not_block(client, tmp_path, monkeypatch):
+    import json as _json
+
+    from app.db.models import ArtifactModel, ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "tester_optional_workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('ok')\n")
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="TesterOptional",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(project_id=project.id, description="Validate", validation_profile="python")
+        db.add(task)
+        db.flush()
+        run = RunModel(project_id=project.id, task_id=task.id, status="running", workspace_path=str(workspace))
+        db.add(run)
+        db.flush()
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="coder",
+                content_json=_json.dumps(
+                    {
+                        "summary": "Updated main.py",
+                        "file_changes": [{"path": "main.py", "line_changes": []}],
+                    }
+                ),
+            )
+        )
+        db.commit()
+
+        monkeypatch.setattr("app.services.orchestration_service.validate_command", lambda command: None)
+        monkeypatch.setattr(
+            "app.services.orchestration_service.get_profile_commands",
+            lambda profiles_json, profile: ["python3 -m compileall ."],
+        )
+        calls: list[str] = []
+
+        def fake_run_command(command: str, cwd):
+            calls.append(command)
+            if command.startswith("python3 -m compileall"):
+                return 0, "ok", ""
+            return 127, "", "missing"
+
+        monkeypatch.setattr("app.services.orchestration_service.run_command", fake_run_command)
+        service = OrchestrationService()
+        service._save_artifact = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        service._log_provider = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+        class FakePlan:
+            commands = [type("Cmd", (), {"command": "rg missing_symbol main.py"})()]
+
+            def model_dump(self):
+                return {"passed": True, "summary": "plan", "commands": [], "notes": []}
+
+        monkeypatch.setattr(
+            "app.services.orchestration_service.TesterAgent",
+            lambda provider: type("Agent", (), {"test_plan": lambda self, ctx: FakePlan()})(),
+        )
+
+        result = service._stage_tester(db, run.id, "Validate", workspace)
+        db.refresh(run)
+    finally:
+        db.close()
+
+    assert result is True
+    assert run.status == "running"
+    assert any(cmd.startswith("python3 -m compileall -q main.py") for cmd in calls)
+    assert any(cmd.startswith("rg ") for cmd in calls)
 
 
 def test_websocket_requires_token(client, tmp_path):

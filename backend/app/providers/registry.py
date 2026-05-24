@@ -10,7 +10,7 @@ from app.core.enums import PipelineStage, ProviderStatus
 from app.providers.base import BaseProvider
 from app.providers.fake import FakeProvider
 from app.providers.lmstudio import LMStudioProvider
-from app.providers.ollama import OllamaProvider
+from app.providers.ollama import OllamaProvider, normalize_ollama_base_url, probe_ollama_endpoints
 from app.services.lmstudio_catalog import LMStudioCatalog, SETTINGS_ROLE_KEYS
 
 
@@ -126,7 +126,65 @@ class ProviderRegistry:
             self._config.get(model_map.get(stage_key, ""), "")
             or self._config.get(default_model_key, "")
         )
+        selected = self._resolve_runnable_model(stage_key, selected)
         return self._provider_for_model(selected)
+
+    def _stage_mode(self, stage_key: str) -> str:
+        return {
+            "planner_chat": "planner",
+            "debugger": "debugger",
+            "architect_chat": "architect",
+            "agent": "agent",
+            "general": "general",
+            "chat": "general",
+        }.get(stage_key, stage_key)
+
+    def _resolve_runnable_model(self, stage_key: str, selected: str) -> str:
+        selected = str(selected or "").strip()
+        if not selected:
+            default_key = "ollama_model" if self._config.get("ollama_enabled") else "lmstudio_model"
+            selected = str(self._config.get(default_key, "")).strip()
+        available = self.list_models()
+        if not available or not selected:
+            return selected
+        if selected in available:
+            if not self._config.get("ollama_enabled"):
+                catalog = self.get_lmstudio_catalog()
+                if catalog is not None:
+                    resolved, _unload = catalog.resolve_runnable(selected, self._stage_mode(stage_key))
+                    if resolved:
+                        return resolved
+            return selected
+        if self._model_listed(selected, available):
+            return selected
+        mode = self._stage_mode(stage_key)
+        matched = self._first_matching_model(available, self._auto_model_patterns(mode))
+        if matched:
+            logger.warning(
+                "Model %r is not available for stage %s; using %r instead",
+                selected,
+                stage_key,
+                matched,
+            )
+            return matched
+        default_key = "ollama_model" if self._config.get("ollama_enabled") else "lmstudio_model"
+        configured_default = str(self._config.get(default_key, "")).strip()
+        if configured_default and configured_default in available:
+            logger.warning(
+                "Model %r is not available for stage %s; using default %r instead",
+                selected,
+                stage_key,
+                configured_default,
+            )
+            return configured_default
+        fallback = available[0]
+        logger.warning(
+            "Model %r is not available for stage %s; using first catalog model %r instead",
+            selected,
+            stage_key,
+            fallback,
+        )
+        return fallback
 
     def get_lmstudio_catalog(self, *, refresh: bool = False) -> LMStudioCatalog | None:
         if self.fake_provider is not None or self._config.get("ollama_enabled"):
@@ -427,26 +485,72 @@ class ProviderRegistry:
             },
         )
 
+    def _agent_models_for_ollama_check(self, available: list[str]) -> list[str]:
+        saved = self._config.get("ollama_role_models_json")
+        if isinstance(saved, dict):
+            values = [str(value).strip() for value in saved.values() if str(value).strip()]
+            if values:
+                return list(dict.fromkeys(values))
+        configured = self._configured_agent_models()
+        scoped = [model for model in configured if self._is_ollama_style_model_id(model)]
+        if scoped:
+            return scoped
+        default = str(self._config.get("ollama_model", "")).strip()
+        return [default] if default else []
+
     def health_ollama(self) -> HealthResult:
         if self.fake_provider is not None:
             return HealthResult(status="healthy", model_count=1, error=None, models=["fake-model"])
-        provider = self._ollama_provider()
-        health = provider.healthcheck()
+        configured_base = str(self._config.get("ollama_base_url", "http://127.0.0.1:11434/v1"))
+        working_base, _tried = probe_ollama_endpoints(configured_base)
+        if working_base is None:
+            return HealthResult(
+                status=ProviderStatus.UNREACHABLE.value,
+                model_count=0,
+                error="Ollama unreachable at configured and fallback endpoints.",
+                models=[],
+                resources_pressure="ok",
+                loaded_size_gb=None,
+                recommendations=None,
+            )
+        provider = OllamaProvider(
+            working_base,
+            model=str(self._config.get("ollama_model", "")),
+            timeout_seconds=self._timeout(),
+        )
         models = provider.list_models()
         configured = str(self._config.get("ollama_model", "")).strip()
-        status = health.status
-        detail = health.detail
-        if status != ProviderStatus.UNREACHABLE and models:
-            if configured and configured in models:
-                status = ProviderStatus.HEALTHY
-                detail = f"Ollama reachable and configured model '{configured}' is available."
-            elif configured:
-                status = ProviderStatus.DEGRADED
-                detail = f"Ollama reachable but configured model '{configured}' not found."
-            else:
-                status = ProviderStatus.DEGRADED
-                detail = "Ollama reachable. Select a default model in Settings."
+        agent_models = self._agent_models_for_ollama_check(models)
+        status = ProviderStatus.HEALTHY
+        detail = "Ollama reachable."
+        normalized_configured = normalize_ollama_base_url(configured_base)
+        if working_base != normalized_configured:
+            status = ProviderStatus.DEGRADED
+            detail = (
+                f"Ollama reachable at {working_base} but configured URL is {normalized_configured}. "
+                "Update ollama_base_url in Settings."
+            )
+        elif models and agent_models and all(self._model_listed(model, models) for model in agent_models):
+            status = ProviderStatus.HEALTHY
+            detail = "Ollama reachable and configured agent models are available."
+        elif models and agent_models:
+            missing = [model for model in agent_models if not self._model_listed(model, models)]
+            status = ProviderStatus.DEGRADED
+            detail = f"Ollama reachable but agent models not found: {', '.join(missing)}"
+        elif models and configured and configured in models:
+            status = ProviderStatus.HEALTHY
+            detail = f"Ollama reachable and configured model '{configured}' is available."
+        elif models and configured:
+            status = ProviderStatus.DEGRADED
+            detail = f"Ollama reachable but configured model '{configured}' not found."
+        elif models:
+            status = ProviderStatus.DEGRADED
+            detail = "Ollama reachable. Select a default model in Settings."
+        else:
+            status = ProviderStatus.DEGRADED
+            detail = "Ollama reachable but no models were returned."
         error = detail if status != ProviderStatus.HEALTHY else None
+        recommendations = self._list_ollama_models_detailed().recommendations or None
         return HealthResult(
             status=status.value,
             model_count=len(models),
@@ -454,7 +558,7 @@ class ProviderRegistry:
             models=models,
             resources_pressure="ok",
             loaded_size_gb=None,
-            recommendations=self._list_ollama_models_detailed().recommendations or None,
+            recommendations=recommendations,
         )
 
     def health_lmstudio(self) -> HealthResult:
@@ -518,6 +622,8 @@ class ProviderRegistry:
         lm = self.health_lmstudio()
         ollama = self.health_ollama()
         primary = ollama if active == "ollama" else lm
+        configured_ollama = normalize_ollama_base_url(str(self._config.get("ollama_base_url", "")))
+        working_ollama, _ = probe_ollama_endpoints(configured_ollama)
         return {
             "active_provider": active,
             "lmstudio": lm.status,
@@ -525,6 +631,9 @@ class ProviderRegistry:
             "error": primary.error,
             "lmstudio_error": lm.error,
             "ollama_error": ollama.error,
+            "suggested_ollama_base_url": (
+                working_ollama if working_ollama and working_ollama != configured_ollama else None
+            ),
             "model_count": primary.model_count,
             "lmstudio_model_count": lm.model_count,
             "ollama_model_count": ollama.model_count,

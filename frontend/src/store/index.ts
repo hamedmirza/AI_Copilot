@@ -144,6 +144,7 @@ interface RunState {
   setEvents: (e: Array<Record<string, unknown>>) => void
   setRuns: (r: Array<Record<string, unknown>>) => void
   resetRunPanel: () => void
+  resetRunForProjectSwitch: () => void
 }
 
 export interface LMStudioModelCatalogEntry {
@@ -234,6 +235,7 @@ interface ChatState {
   setPendingRunId: (runId: string | null) => void
   setComposerPrefill: (text: string) => void
   resetChatState: () => void
+  resetChatForProjectSwitch: () => void
 }
 
 export const useUIStore = create<UIState>()(
@@ -376,6 +378,7 @@ export const useRunStore = create<RunState>((set) => ({
   setEvents: (events) => set({ events }),
   setRuns: (runs) => set({ runs }),
   resetRunPanel: () => set({ currentRunId: null, runStatus: 'idle', currentStage: null, events: [], runs: [] }),
+  resetRunForProjectSwitch: () => set({ currentRunId: null, runStatus: 'idle', currentStage: null, events: [], runs: [] }),
 }))
 
 export const useSettingsStore = create<SettingsState>((set) => ({
@@ -515,4 +518,22 @@ export const useChatStore = create<ChatState>((set) => ({
     pendingRunId: null,
     composerPrefill: '',
   }),
+  resetChatForProjectSwitch: () => set((state) => ({
+    sessions: [],
+    currentSessionId: null,
+    historySearchQuery: '',
+    messages: [],
+    streaming: false,
+    pendingToolCalls: [],
+    spawnedRunIds: [],
+    streamingContent: '',
+    assistantStatus: null,
+    runEventsById: {},
+    pendingRunId: null,
+    composerPrefill: '',
+    activeMode: state.activeMode,
+    modelSelectionMode: state.modelSelectionMode,
+    selectedModel: state.selectedModel,
+    historyOpen: state.historyOpen,
+  })),
 }))

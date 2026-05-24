@@ -1,4 +1,5 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { api } from '@/api/client'
 import { Button } from '@/components/ui/primitives'
 import { RunLogPanel } from '@/components/shared/RunLogPanel'
 import { filterSignificantRunEvents, normalizeRunEvent, runStatusFromEvents, stageStatusFromEvents } from '@/lib/runEvents'
@@ -18,12 +19,43 @@ interface RunCardProps {
 
 export function RunCard({ runId, displayName, events, busy, onApprove, onReject, onRetry }: RunCardProps) {
   const title = runDisplayLabel({ id: runId, display_name: displayName ?? '' })
+  const [polledStatus, setPolledStatus] = useState<string | null>(null)
   const displayEvents = useMemo(
     () => events.map((event) => normalizeRunEvent(event as Record<string, unknown>)),
     [events],
   )
-  const runStatus = runStatusFromEvents(displayEvents)
+  const eventStatus = runStatusFromEvents(displayEvents)
+  const runStatus = polledStatus || eventStatus
   const hasLog = filterSignificantRunEvents(displayEvents).length > 0 || displayEvents.length > 0
+
+  useEffect(() => {
+    let cancelled = false
+    const refreshStatus = async () => {
+      try {
+        const run = await api.runs.get(runId) as { status?: string }
+        if (!cancelled) {
+          setPolledStatus(run.status ? String(run.status) : null)
+        }
+      } catch {
+        if (!cancelled) {
+          setPolledStatus(null)
+        }
+      }
+    }
+    void refreshStatus()
+    if (!['pending', 'running', 'awaiting_approval'].includes(eventStatus)) {
+      return () => {
+        cancelled = true
+      }
+    }
+    const intervalId = window.setInterval(() => {
+      void refreshStatus()
+    }, 4000)
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
+  }, [eventStatus, runId])
 
   return (
     <div className="border border-[var(--border)] rounded-md bg-[var(--bg-tertiary)] p-3 space-y-3">

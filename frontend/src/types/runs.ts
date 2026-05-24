@@ -17,8 +17,15 @@ export interface RunSummary {
   status: string
   current_stage?: string | null
   task_id?: string
+  task_kind?: string | null
+  failure_class?: string | null
+  recovery_status?: string | null
   error_message?: string | null
   created_at: string
+}
+
+export function hasRecoveryMetadata(run: RunSummary): boolean {
+  return Boolean(run.failure_class || run.recovery_status)
 }
 
 export interface PromoteSnapshot {
@@ -38,8 +45,106 @@ export interface RunDetail {
   error_message: string | null
   operator_feedback: string | null
   promote_snapshot: PromoteSnapshot | null
+  task_kind?: string | null
+  failure_class?: string | null
+  failure_subclass?: string | null
+  failure_signature?: string | null
+  recovery_status?: string | null
+  superseded_by_run_id?: string | null
   created_at: string
   updated_at: string
+}
+
+export interface FailureSummaryRun {
+  id: string
+  status: string
+  current_stage?: string | null
+  error_message?: string | null
+  failure_subclass?: string | null
+  recovery_status?: string | null
+  superseded_by_run_id?: string | null
+  created_at: string
+}
+
+export interface FailureSummaryGroup {
+  count: number
+  actionable: number
+  runs: FailureSummaryRun[]
+}
+
+export interface FailureSummaryResponse {
+  groups: Record<string, FailureSummaryGroup>
+  total_runs: number
+}
+
+export interface LessonContent {
+  title?: string
+  scope?: string
+  source_run_id?: string
+  stages?: string[]
+  kind?: string
+  summary?: string
+  trigger_pattern?: string
+  guidance?: string
+  confidence?: number
+  applies_to_paths?: string[]
+  applies_to_task_kinds?: string[]
+  superseded?: boolean
+  body?: string
+}
+
+export interface LessonRecord {
+  id: number
+  project_id: string
+  run_id?: string | null
+  title: string
+  content: LessonContent
+  created_at: string
+}
+
+export interface GlobalSkillRecord {
+  id: string
+  name: string
+  summary: string
+  content: LessonContent
+  source_lesson_id?: number | null
+  source_run_id?: string | null
+  origin_project_id?: string | null
+  kind: string
+  stages: string[]
+  tags: string[]
+  confidence: number
+  promotion_state: string
+  times_applied: number
+  times_helpful: number
+  times_harmful: number
+  created_at: string
+  updated_at: string
+}
+
+export interface PostmortemRecord {
+  id: number
+  artifact_type: string
+  content: {
+    run_id: string
+    project_id: string
+    terminal_status: string
+    stage?: string | null
+    task_kind?: string | null
+    failure_class: string
+    failure_subclass?: string | null
+    failure_signature?: string | null
+    root_cause_summary: string
+    operator_visible_symptom: string
+    fix_recommendation: string
+    confidence: number
+    evidence?: {
+      event_ids?: number[]
+      artifact_types?: string[]
+      key_error_lines?: string[]
+    }
+  }
+  created_at: string
 }
 
 export interface RunEvent {

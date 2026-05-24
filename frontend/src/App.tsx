@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { startTransition, useCallback, useEffect, useRef, useState } from 'react'
 import { Toaster } from 'sonner'
 import { api } from '@/api/client'
 import { useWebSocket } from '@/hooks/useWebSocket'
@@ -63,7 +63,6 @@ export default function App() {
     setShowSettings,
     setWsConnections,
   } = useAppStore()
-  const [switching, setSwitching] = useState(false)
   const [projectManagerOpen, setProjectManagerOpen] = useState(false)
   const [projectManagerMode, setProjectManagerMode] = useState<'list' | 'add'>('list')
 
@@ -130,6 +129,7 @@ export default function App() {
   const setRunStatus = useRunStore((s) => s.setRunStatus)
   const currentRunId = useRunStore((s) => s.currentRunId)
   const spawnedRunIds = useChatStore((s) => s.spawnedRunIds)
+  const trackedRunEvents = useChatStore((s) => s.runEventsById)
   const addRunEvent = useChatStore((s) => s.addRunEvent)
 
   const gitPanelVisible =
@@ -149,13 +149,18 @@ export default function App() {
     else if (type.endsWith('_started') && ev.run_id === currentRunId) {
       setRunStatus('running', type.replace('_started', ''))
     }
-    if (runId && spawnedRunIds.includes(runId)) {
+    const trackedRunIds = new Set([
+      ...spawnedRunIds,
+      ...Object.keys(trackedRunEvents),
+      ...(currentRunId ? [currentRunId] : []),
+    ])
+    if (runId && trackedRunIds.has(runId)) {
       addRunEvent(runId, ev)
     }
     if (['run_completed', 'code_patch_applied', 'awaiting_approval'].includes(type)) {
       window.setTimeout(() => bumpTreeRefresh(), 3000)
     }
-  }, [addRunEvent, bumpTreeRefresh, currentRunId, setRunStatus, setWsConnections, spawnedRunIds]), true)
+  }, [addRunEvent, bumpTreeRefresh, currentRunId, setRunStatus, setWsConnections, spawnedRunIds, trackedRunEvents]), true)
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -176,14 +181,14 @@ export default function App() {
   const switchProject = async (id: string) => {
     const proj = projects.find((p) => String(p.id) === id)
     if (!proj) return
-    setSwitching(true)
     useEditorStore.getState().clearWorkspace()
-    useRunStore.getState().resetRunPanel()
-    useChatStore.getState().resetChatState()
-    setCurrentProject(id)
-    useUIStore.getState().openSidebarPanel('explorer')
-    bumpTreeRefresh()
-    setTimeout(() => setSwitching(false), 500)
+    useRunStore.getState().resetRunForProjectSwitch()
+    useChatStore.getState().resetChatForProjectSwitch()
+    startTransition(() => {
+      setCurrentProject(id)
+      useUIStore.getState().openSidebarPanel('explorer')
+      bumpTreeRefresh()
+    })
   }
 
   return (
@@ -235,12 +240,6 @@ export default function App() {
           Help
         </button>
       </div>
-
-      {switching && (
-        <div className="absolute inset-0 bg-black/40 z-40 flex items-center justify-center">
-          <span>Switching to {currentProject ? String(currentProject.name) : 'project'}...</span>
-        </div>
-      )}
 
       {projects.length === 0 ? (
         <div className="flex-1 overflow-hidden">

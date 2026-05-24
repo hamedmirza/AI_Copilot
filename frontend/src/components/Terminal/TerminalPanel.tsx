@@ -16,10 +16,27 @@ interface TermTab {
 
 export function TerminalPanel() {
   const projectId = useProjectStore((s) => s.currentProjectId)
-  const containerRef = useRef<HTMLDivElement>(null)
   const [tabs, setTabs] = useState<TermTab[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const termContainerRef = useRef<HTMLDivElement>(null)
+  const projectIdRef = useRef<string | null>(null)
+
+  const disposeTab = (tab: TermTab) => {
+    try {
+      tab.ws?.close()
+    } catch {
+      // ignore close failures during cleanup
+    }
+    tab.term.dispose()
+  }
+
+  const disposeAllTabs = () => {
+    setTabs((prev) => {
+      prev.forEach(disposeTab)
+      return []
+    })
+    setActiveId(null)
+  }
 
   const spawnTerminal = () => {
     if (!projectId) return
@@ -51,8 +68,19 @@ export function TerminalPanel() {
   }
 
   useEffect(() => {
-    if (projectId && tabs.length === 0) spawnTerminal()
+    if (projectIdRef.current === projectId) return
+    projectIdRef.current = projectId
+    disposeAllTabs()
+    if (projectId) {
+      queueMicrotask(() => {
+        spawnTerminal()
+      })
+    }
   }, [projectId])
+
+  useEffect(() => () => {
+    disposeAllTabs()
+  }, [])
 
   useEffect(() => {
     const active = tabs.find((t) => t.id === activeId)
@@ -76,8 +104,7 @@ export function TerminalPanel() {
 
   const closeTab = (id: string) => {
     const tab = tabs.find((t) => t.id === id)
-    tab?.ws?.close()
-    tab?.term.dispose()
+    if (tab) disposeTab(tab)
     setTabs((prev) => prev.filter((t) => t.id !== id))
     if (activeId === id) setActiveId(tabs.find((t) => t.id !== id)?.id ?? null)
   }

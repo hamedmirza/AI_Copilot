@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.defaults import DEFAULT_VALIDATION_PROFILES
 from app.db.models import AppConfigModel
 from app.schemas.api import SettingsResponse, SettingsUpdate
+from app.services.provider_switch import ROLE_KEYS
 
 
 BOOL_KEYS = {
@@ -73,19 +74,19 @@ class ConfigService:
         "chat_max_context_tokens": 32768,
         "chat_max_output_tokens": 4096,
         "nothink_default": True,
-        "stop_on_first_failure": False,
-        "model_planner": "qwen2.5-72b-instruct",
-        "model_architect": "qwen2.5-coder-32b-instruct",
-        "model_ui_designer": "qwen2.5-coder-32b-instruct",
-        "model_coder": "qwen2.5-coder-32b-instruct",
-        "model_reviewer": "qwen2.5-72b-instruct",
-        "model_tester": "qwen2.5-coder-7b-instruct",
-        "model_supervisor": "qwen2.5-72b-instruct",
-        "model_chat": "qwen2.5-72b-instruct",
-        "model_chat_agent": "qwen2.5-coder-32b-instruct",
-        "model_chat_planner": "qwen2.5-72b-instruct",
-        "model_chat_debugger": "qwen2.5-coder-32b-instruct",
-        "model_chat_architect": "qwen2.5-72b-instruct",
+        "stop_on_first_failure": True,
+        "model_planner": "qwen3.6-27b",
+        "model_architect": "qwen3.6-27b",
+        "model_ui_designer": "qwen3.6-27b",
+        "model_coder": "qwen3.6-27b",
+        "model_reviewer": "qwen3.6-27b",
+        "model_tester": "qwen3.6-27b",
+        "model_supervisor": "qwen3.6-27b",
+        "model_chat": "qwen3.6-27b",
+        "model_chat_agent": "qwen3.6-27b",
+        "model_chat_planner": "qwen3.6-27b",
+        "model_chat_debugger": "qwen3.6-27b",
+        "model_chat_architect": "qwen3.6-27b",
         "chat_modes_json": "[]",
         "editor_font_size": 14,
         "editor_tab_size": 2,
@@ -150,6 +151,15 @@ class ConfigService:
                 payload.update(build_provider_switch_updates(current, from_provider=old_provider, to_provider=new_provider))
             elif sync_role_models:
                 payload.update(sync_active_provider_role_models(current, new_provider))
+        role_overrides = {key: str(payload[key]).strip() for key in ROLE_KEYS if key in payload and str(payload[key]).strip()}
+        if role_overrides:
+            current = self.get_all()
+            active_provider = "ollama" if payload.get("ollama_enabled", current.get("ollama_enabled")) else "lmstudio"
+            snapshot_key = f"{active_provider}_role_models_json"
+            snapshot = current.get(snapshot_key)
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            payload[snapshot_key] = {**snapshot, **role_overrides}
         for key, value in payload.items():
             row = self.db.query(AppConfigModel).filter(AppConfigModel.key == key).first()
             str_value = json.dumps(value) if isinstance(value, (dict, list)) else str(value)

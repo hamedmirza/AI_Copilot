@@ -232,16 +232,24 @@ export function SettingsPanel() {
           await refreshModels()
         }
       } else if (status === 'degraded' && modelCount > 0) {
+        const suggestion =
+          provider === 'ollama' && health.suggested_ollama_base_url
+            ? ` Try ${health.suggested_ollama_base_url}.`
+            : ''
         result = {
           ok: false,
-          msg: err || 'Connected but model configuration needs attention',
+          msg: (err || 'Connected but model configuration needs attention') + suggestion,
         }
         await loadProviderModels(provider)
         if (provider === activeProvider) {
           await refreshModels()
         }
       } else {
-        result = { ok: false, msg: err || 'Connection failed' }
+        const suggestion =
+          provider === 'ollama' && health.suggested_ollama_base_url
+            ? ` Reachable at ${health.suggested_ollama_base_url} — update Ollama URL in Settings.`
+            : ''
+        result = { ok: false, msg: (err || 'Connection failed') + suggestion }
       }
       setTestByProvider((prev) => ({ ...prev, [provider]: result }))
     } catch (e) {

@@ -64,6 +64,7 @@ export const api = {
       error?: string
       lmstudio_error?: string
       ollama_error?: string
+      suggested_ollama_base_url?: string | null
       resources_pressure?: string
       loaded_size_gb?: number
       recommendations?: Record<string, string>
@@ -118,6 +119,9 @@ export const api = {
     delete: (id: string) => request(`/api/projects/${id}`, { method: 'DELETE' }),
     tree: (id: string) => request<{ items: Array<{ path: string; type: string; size: number }> }>(`/api/projects/${id}/tree`),
     runs: (id: string) => request(`/api/projects/${id}/runs`),
+    lessons: (id: string) => request(`/api/projects/${id}/lessons`),
+    createLessonFromRun: (projectId: string, runId: string) =>
+      request(`/api/projects/${projectId}/lessons/from-run/${runId}`, { method: 'POST' }),
   },
   files: {
     read: (projectId: string, path: string) =>
@@ -180,6 +184,9 @@ export const api = {
     get: (id: string) => request(`/api/runs/${id}`),
     events: (id: string) => request(`/api/runs/${id}/events`),
     artifacts: (id: string) => request(`/api/runs/${id}/artifacts`),
+    postmortem: (id: string) => request(`/api/runs/${id}/postmortem`),
+    failureSummary: (projectId?: string) =>
+      request(`/api/runs/failure-summary${buildQuery({ project_id: projectId })}`),
     approve: (id: string, comment = '') =>
       request(`/api/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ comment }) }),
     reject: (id: string, reason: string) =>
@@ -193,6 +200,15 @@ export const api = {
       request(`/api/runs/${id}/rollback-workspace`, { method: 'POST' }),
     rollbackPromote: (id: string) =>
       request(`/api/runs/${id}/rollback-promote`, { method: 'POST' }),
+  },
+  lessons: {
+    promoteGlobal: (lessonId: number) =>
+      request(`/api/lessons/${lessonId}/promote-global`, { method: 'POST' }),
+  },
+  skills: {
+    listGlobal: () => request('/api/skills/global'),
+    deprecate: (skillId: string) =>
+      request(`/api/skills/global/${skillId}/deprecate`, { method: 'POST' }),
   },
   mcp: {
     servers: {

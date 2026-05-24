@@ -11,6 +11,9 @@ import {
   canRollbackWorkspace,
   isRetryableStatus,
   latestReviewArtifact,
+  type GlobalSkillRecord,
+  type LessonRecord,
+  type PostmortemRecord,
   runDisplayLabel,
   runStatusBadgeClass,
   runStatusLabel,
@@ -28,6 +31,8 @@ interface RunDetailDrawerProps {
   open: boolean
   runId: string | null
   runs: RunSummary[]
+  projectLessons?: LessonRecord[]
+  globalSkills?: GlobalSkillRecord[]
   mode?: DrawerMode
   onClose: () => void
   onRunChange?: (runId: string) => void
@@ -37,6 +42,8 @@ export function RunDetailDrawer({
   open,
   runId,
   runs,
+  projectLessons = [],
+  globalSkills = [],
   mode = 'detail',
   onClose,
   onRunChange,
@@ -48,6 +55,7 @@ export function RunDetailDrawer({
   const [showApprove, setShowApprove] = useState(false)
   const [busy, setBusy] = useState(false)
   const [confirmRollback, setConfirmRollback] = useState<'workspace' | 'promote' | null>(null)
+  const [postmortem, setPostmortem] = useState<PostmortemRecord | null>(null)
 
   useEffect(() => {
     setListOnly(mode === 'list')
@@ -57,6 +65,14 @@ export function RunDetailDrawer({
     if (!open || !runId || listOnly) return
     void hydrateRun(runId, true)
   }, [open, runId, listOnly, hydrateRun])
+
+  useEffect(() => {
+    if (!open || !runId || listOnly) return
+    setPostmortem(null)
+    void api.runs.postmortem(runId)
+      .then((artifact) => setPostmortem(artifact as PostmortemRecord))
+      .catch(() => setPostmortem(null))
+  }, [listOnly, open, runId])
 
   const reviewArtifact = useMemo(() => latestReviewArtifact(artifacts), [artifacts])
 
@@ -183,6 +199,12 @@ export function RunDetailDrawer({
               {detail?.error_message && (
                 <p className="text-xs text-[var(--error)] mt-1">{detail.error_message}</p>
               )}
+              {detail?.failure_class && (
+                <p className="text-xs text-[var(--text-secondary)] mt-1">
+                  Failure class: {detail.failure_class}
+                  {detail.recovery_status ? ` · Recovery: ${detail.recovery_status}` : ''}
+                </p>
+              )}
             </div>
             <button type="button" className="p-1 hover:bg-[var(--bg-tertiary)] rounded shrink-0" onClick={onClose}>
               <X size={18} />
@@ -255,6 +277,57 @@ export function RunDetailDrawer({
               )}
 
               <RunLogPanel events={events} />
+
+              {(postmortem || projectLessons.length > 0 || globalSkills.length > 0) && (
+                <div className="grid gap-3 lg:grid-cols-3">
+                  <div className="border border-[var(--border)] rounded p-3">
+                    <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">Postmortem</p>
+                    {postmortem ? (
+                      <div className="space-y-2 text-xs">
+                        <p className="font-medium">{postmortem.content.root_cause_summary}</p>
+                        <p className="text-[var(--text-secondary)]">{postmortem.content.fix_recommendation}</p>
+                        <p className="text-[var(--text-secondary)]">
+                          Symptom: {postmortem.content.operator_visible_symptom}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-[var(--text-secondary)]">No postmortem for this run.</p>
+                    )}
+                  </div>
+
+                  <div className="border border-[var(--border)] rounded p-3">
+                    <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">Project Lessons</p>
+                    <div className="space-y-2 text-xs">
+                      {projectLessons.length === 0 ? (
+                        <p className="text-[var(--text-secondary)]">No project lessons available.</p>
+                      ) : (
+                        projectLessons.slice(0, 3).map((lesson) => (
+                          <div key={lesson.id}>
+                            <p className="font-medium">{lesson.title}</p>
+                            <p className="text-[var(--text-secondary)]">{lesson.content.guidance || lesson.content.summary}</p>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="border border-[var(--border)] rounded p-3">
+                    <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">Global Skills</p>
+                    <div className="space-y-2 text-xs">
+                      {globalSkills.length === 0 ? (
+                        <p className="text-[var(--text-secondary)]">No global skills available.</p>
+                      ) : (
+                        globalSkills.slice(0, 3).map((skill) => (
+                          <div key={skill.id}>
+                            <p className="font-medium">{skill.name}</p>
+                            <p className="text-[var(--text-secondary)]">{skill.summary}</p>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <ArtifactViewer
                 artifacts={artifacts}

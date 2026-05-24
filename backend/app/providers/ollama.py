@@ -31,6 +31,39 @@ def ollama_native_root(openai_base_url: str) -> str:
     return url.rstrip("/")
 
 
+def probe_ollama_endpoints(configured_base_url: str, timeout_seconds: float = 5.0) -> tuple[str | None, list[str]]:
+    """Return the first reachable Ollama OpenAI base URL and every candidate tried."""
+    candidates: list[str] = []
+    for raw in (
+        configured_base_url,
+        "http://127.0.0.1:11434",
+        "http://localhost:11434",
+        "http://172.10.1.2:11434",
+    ):
+        normalized = normalize_ollama_base_url(raw)
+        if normalized not in candidates:
+            candidates.append(normalized)
+    client = httpx.Client(
+        timeout=httpx.Timeout(
+            connect=timeout_seconds,
+            read=timeout_seconds,
+            write=timeout_seconds,
+            pool=timeout_seconds,
+        )
+    )
+    try:
+        for base_url in candidates:
+            try:
+                response = client.get(f"{ollama_native_root(base_url)}/api/tags")
+                response.raise_for_status()
+                return base_url, candidates
+            except httpx.HTTPError:
+                continue
+    finally:
+        client.close()
+    return None, candidates
+
+
 class OllamaProvider(BaseProvider):
     def __init__(
         self,

@@ -9,7 +9,7 @@ from app.core.logging import setup_logging
 from app.core.settings import get_settings
 from app.db.session import SessionLocal, run_migrations, seed_app_config
 from app.services.config_service import ConfigService
-from app.services.orchestration_service import run_engine
+from app.services.orchestration_service import resume_inflight_runs, run_engine
 from app.services.run_engine.event_bus import event_bus
 
 
@@ -33,6 +33,9 @@ async def lifespan(app: FastAPI):
     try:
         worker_count = int(ConfigService(db).get_all().get("worker_count", 1))
         run_engine.configure_workers(worker_count)
+        auto_resume = bool(ConfigService(db).get_all().get("auto_resume_enabled", True))
+        if auto_resume:
+            resume_inflight_runs(db, limit=1)
     finally:
         db.close()
     yield

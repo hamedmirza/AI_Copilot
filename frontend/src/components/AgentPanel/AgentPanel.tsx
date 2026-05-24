@@ -5,7 +5,7 @@ import { useEditorStore, useProjectStore, useRunStore } from '@/store'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button, EmptyState, Skeleton } from '@/components/ui/primitives'
-import type { RunSummary } from '@/types/runs'
+import type { FailureSummaryResponse, GlobalSkillRecord, LessonRecord, RunSummary } from '@/types/runs'
 import { ApproveDialog } from './ApproveDialog'
 import { ArtifactViewer } from './ArtifactViewer'
 import { RunDetailDrawer } from './RunDetailDrawer'
@@ -33,6 +33,10 @@ export function AgentPanel() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [drawerRunId, setDrawerRunId] = useState<string | null>(null)
   const [drawerMode, setDrawerMode] = useState<'detail' | 'list'>('detail')
+  const [failureSummary, setFailureSummary] = useState<FailureSummaryResponse | null>(null)
+  const [projectLessons, setProjectLessons] = useState<LessonRecord[]>([])
+  const [globalSkills, setGlobalSkills] = useState<GlobalSkillRecord[]>([])
+  const [learningBusy, setLearningBusy] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
   const [logExpanded, setLogExpanded] = useState(false)
@@ -47,24 +51,69 @@ export function AgentPanel() {
     status: String(r.status),
     current_stage: r.current_stage != null ? String(r.current_stage) : null,
     task_id: r.task_id != null ? String(r.task_id) : undefined,
+    task_kind: r.task_kind != null ? String(r.task_kind) : null,
+    failure_class: r.failure_class != null ? String(r.failure_class) : null,
+    recovery_status: r.recovery_status != null ? String(r.recovery_status) : null,
     error_message: r.error_message != null ? String(r.error_message) : null,
     created_at: String(r.created_at || ''),
   }))
 
   const loadRuns = useCallback(async () => {
-    if (!projectId) return
+    if (!projectId) {
+      setRuns([])
+      setCurrentRun(null)
+      setRunStatus('idle')
+      return
+    }
     setLoading(true)
     try {
       const data = await api.projects.runs(projectId)
-      setRuns(data as Array<Record<string, unknown>>)
+      const nextRuns = data as Array<Record<string, unknown>>
+      setRuns(nextRuns)
+      const awaitingApproval = nextRuns.find((run) => String(run.status) === 'awaiting_approval')
+      const activeRun = nextRuns.find((run) => String(run.id) === currentRunId)
+      const fallbackRun = awaitingApproval || activeRun || nextRuns[0]
+      if (!fallbackRun) {
+        setCurrentRun(null)
+        setRunStatus('idle')
+        return
+      }
+      if (String(fallbackRun.id) !== currentRunId) {
+        await hydrateRun(String(fallbackRun.id), true)
+      }
     } catch (e) {
       showError(e)
     } finally {
       setLoading(false)
     }
-  }, [projectId, setRuns])
+  }, [currentRunId, hydrateRun, projectId, setCurrentRun, setRunStatus, setRuns])
+
+  const loadLearning = useCallback(async () => {
+    if (!projectId) {
+      setFailureSummary(null)
+      setProjectLessons([])
+      setGlobalSkills([])
+      return
+    }
+    setLearningBusy(true)
+    try {
+      const [summary, lessons, skills] = await Promise.all([
+        api.runs.failureSummary(projectId) as Promise<FailureSummaryResponse>,
+        api.projects.lessons(projectId) as Promise<LessonRecord[]>,
+        api.skills.listGlobal() as Promise<GlobalSkillRecord[]>,
+      ])
+      setFailureSummary(summary)
+      setProjectLessons(lessons)
+      setGlobalSkills(skills)
+    } catch (e) {
+      showError(e)
+    } finally {
+      setLearningBusy(false)
+    }
+  }, [projectId])
 
   useEffect(() => { loadRuns() }, [loadRuns])
+  useEffect(() => { void loadLearning() }, [loadLearning])
 
   useEffect(() => {
     if (!currentRunId) return
@@ -144,12 +193,26 @@ export function AgentPanel() {
       setRunStatus('running')
       showSuccess('Retrying pipeline')
       await hydrateRun(currentRunId, true)
+      await loadLearning()
     } catch (e) {
       showError(e)
     } finally {
       setRetryBusy(false)
     }
-  }, [currentRunId, hydrateRun, setRunStatus])
+  }, [currentRunId, hydrateRun, loadLearning, setRunStatus])
+
+  const handlePromoteLesson = useCallback(async (lessonId: number) => {
+    setLearningBusy(true)
+    try {
+      await api.lessons.promoteGlobal(lessonId)
+      showSuccess('Lesson promoted to global skill')
+      await loadLearning()
+    } catch (e) {
+      showError(e)
+    } finally {
+      setLearningBusy(false)
+    }
+  }, [loadLearning])
 
   const submitTask = async () => {
     if (description.trim().length < 10) {
@@ -315,6 +378,77 @@ export function AgentPanel() {
         )}
       </div>
 
+      <div className="border-t border-[var(--border)] pt-2 mt-2 shrink-0 space-y-3">
+        <div>
+          <p className="text-xs text-[var(--text-secondary)] mb-1">Failed Run Recovery</p>
+          {learningBusy && !failureSummary ? (
+            <Skeleton className="h-14 w-full" />
+          ) : !failureSummary || failureSummary.total_runs === 0 ? (
+            <p className="text-xs text-[var(--text-secondary)]">No failed-run recovery backlog for this project.</p>
+          ) : (
+            <div className="space-y-1 max-h-24 overflow-auto">
+              {Object.entries(failureSummary.groups).map(([failureClass, group]) => (
+                <div key={failureClass} className="rounded border border-[var(--border)] px-2 py-1.5 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium">{failureClass.replaceAll('_', ' ')}</span>
+                    <span className="text-[var(--text-secondary)]">{group.actionable}/{group.count} actionable</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <p className="text-xs text-[var(--text-secondary)] mb-1">Project Lessons</p>
+          {projectLessons.length === 0 ? (
+            <p className="text-xs text-[var(--text-secondary)]">No project lessons yet.</p>
+          ) : (
+            <div className="space-y-1 max-h-32 overflow-auto">
+              {projectLessons.slice(0, 4).map((lesson) => (
+                <div key={lesson.id} className="rounded border border-[var(--border)] px-2 py-1.5 text-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="font-medium truncate">{lesson.title}</p>
+                      <p className="text-[var(--text-secondary)] mt-0.5 line-clamp-2">
+                        {lesson.content.summary || lesson.content.guidance || 'No summary'}
+                      </p>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      className="h-6 px-2 text-[10px]"
+                      disabled={learningBusy}
+                      onClick={() => void handlePromoteLesson(lesson.id)}
+                    >
+                      Promote
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <p className="text-xs text-[var(--text-secondary)] mb-1">Global Skills</p>
+          {globalSkills.length === 0 ? (
+            <p className="text-xs text-[var(--text-secondary)]">No global skills promoted yet.</p>
+          ) : (
+            <div className="space-y-1 max-h-32 overflow-auto">
+              {globalSkills.slice(0, 4).map((skill) => (
+                <div key={skill.id} className="rounded border border-[var(--border)] px-2 py-1.5 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium truncate">{skill.name}</span>
+                    <span className="text-[var(--text-secondary)] shrink-0">{skill.times_helpful}/{skill.times_applied}</span>
+                  </div>
+                  <p className="text-[var(--text-secondary)] mt-0.5 line-clamp-2">{skill.summary}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
       {showApprove && currentRunId && projectId && (
         <ApproveDialog
           runId={currentRunId}
@@ -363,6 +497,8 @@ export function AgentPanel() {
           setDrawerMode('detail')
           void selectRun(id)
         }}
+        projectLessons={projectLessons}
+        globalSkills={globalSkills}
       />
     </div>
   )

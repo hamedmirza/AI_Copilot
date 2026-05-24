@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '@/api/client'
 import { useEditorStore, useProjectStore } from '@/store'
 import { showError } from '@/lib/toast'
@@ -9,25 +9,43 @@ import { Search } from 'lucide-react'
 export function SearchPanel() {
   const projectId = useProjectStore((s) => s.currentProjectId)
   const treeItems = useEditorStore((s) => s.treeItems)
+  const treeRefreshTick = useEditorStore((s) => s.treeRefreshTick)
   const setTreeItems = useEditorStore((s) => s.setTreeItems)
   const openTab = useEditorStore((s) => s.openTab)
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
+  const lastLoadedProjectRef = useRef<string | null>(null)
+  const lastRefreshTickRef = useRef<number>(-1)
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
     if (!projectId) return
+    if (!force && lastLoadedProjectRef.current === projectId && treeItems.length > 0) return
     setLoading(true)
     try {
       const data = await api.projects.tree(projectId)
       setTreeItems(data.items)
+      lastLoadedProjectRef.current = projectId
     } catch (e) {
       showError(e)
     } finally {
       setLoading(false)
     }
-  }, [projectId, setTreeItems])
+  }, [projectId, setTreeItems, treeItems.length])
 
-  useEffect(() => { refresh() }, [refresh])
+  useEffect(() => {
+    if (!projectId) {
+      lastLoadedProjectRef.current = null
+      lastRefreshTickRef.current = treeRefreshTick
+      return
+    }
+    const projectChanged = lastLoadedProjectRef.current !== projectId
+    const refreshChanged = lastRefreshTickRef.current !== treeRefreshTick
+    const forceRefresh = !projectChanged && refreshChanged
+    if (projectChanged || forceRefresh || treeItems.length === 0) {
+      void refresh(forceRefresh)
+    }
+    lastRefreshTickRef.current = treeRefreshTick
+  }, [projectId, refresh, treeItems.length, treeRefreshTick])
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase()

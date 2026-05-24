@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 
 from app.core.exceptions import NotFoundError, PathTraversalError, PatchGuardError
+from app.services.change_guard import coder_guard_issues, summarize_structure
 from app.services.tree_cache import get_cached_tree, invalidate_tree_cache, store_tree_cache
 from app.tools.patch_guard import apply_line_changes, check_patch_allowed
 
@@ -100,19 +101,53 @@ class FileService:
             return self.read_file(new_path)
         return {"path": new_path, "type": "directory"}
 
-    def apply_coder_changes(self, file_changes: list[dict]) -> list[str]:
-        changed: list[str] = []
+    def preview_coder_changes(self, file_changes: list[dict]) -> list[dict]:
+        previews: list[dict] = []
         for fc in file_changes:
             rel = fc["path"]
             check_patch_allowed(rel, self.protected_files)
             path = _resolve_path(self.workspace, rel)
+            existed = path.exists()
+            existing = path.read_text(encoding="utf-8") if existed and path.is_file() else ""
+            used_full_content = fc.get("full_content") is not None
+            if used_full_content:
+                updated = str(fc["full_content"])
+            elif fc.get("line_changes"):
+                updated = apply_line_changes(existing, fc["line_changes"])
+            else:
+                updated = existing
+            summary = summarize_structure(rel, existing, updated, existed, used_full_content)
+            issues = coder_guard_issues(summary)
+            if issues:
+                raise PatchGuardError(rel, "; ".join(issues))
+            previews.append(
+                {
+                    "path": rel,
+                    "existed": existed,
+                    "used_full_content": used_full_content,
+                    "before_content": existing,
+                    "after_content": updated,
+                    "summary": summary,
+                }
+            )
+        return previews
+
+    def apply_coder_changes(self, file_changes: list[dict]) -> list[dict]:
+        previews = self.preview_coder_changes(file_changes)
+        changed: list[dict] = []
+        for fc, preview in zip(file_changes, previews, strict=False):
+            rel = fc["path"]
             if fc.get("full_content") is not None:
                 self.write_file(rel, fc["full_content"])
             elif fc.get("line_changes"):
-                existing = path.read_text(encoding="utf-8") if path.exists() else ""
-                updated = apply_line_changes(existing, fc["line_changes"])
-                self.write_file(rel, updated)
-            changed.append(rel)
+                self.write_file(rel, preview["after_content"])
+            changed.append(
+                {
+                    "path": rel,
+                    "summary": preview["summary"],
+                    "used_full_content": preview["used_full_content"],
+                }
+            )
         return changed
 
     def tree(self, rel_path: str = ".") -> dict:
