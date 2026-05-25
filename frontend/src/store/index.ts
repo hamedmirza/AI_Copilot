@@ -3,8 +3,10 @@ import { persist } from 'zustand/middleware'
 
 export type Panel = 'explorer' | 'search' | 'git' | 'agents' | 'settings'
 export type SidebarPanel = Exclude<Panel, 'settings'>
-export type CenterView = 'editor' | 'browser'
-export type RightPanelTab = 'chat' | 'runs'
+export type CenterView = 'editor' | 'browser' | 'kanban' | 'reporting'
+export type AgentPanelPlacement = 'sidebar' | 'right'
+export type RightPanelTab = 'chat' | 'runs' | 'agents'
+export type RunDrawerTab = 'conversation' | 'pipeline'
 export type ChatMode = 'general' | 'agent' | 'planner' | 'debugger' | 'architect'
 export type ChatModelSelectionMode = 'auto' | 'manual'
 
@@ -104,8 +106,12 @@ interface UIState {
   browserPickerActive: boolean
   pageElementSelection: PageElementSelection | null
   browserBridgeReady: boolean
+  browserAgentMode: boolean
+  browserAgentRunId: string | null
   bottomTab: 'terminal' | 'git' | 'problems'
+  agentPanelPlacement: AgentPanelPlacement
   rightPanelTab: RightPanelTab
+  runDrawerRequest: { runId: string; tab: RunDrawerTab; seq: number } | null
   setActivePanel: (p: Panel) => void
   toggleSidebar: () => void
   openSidebarPanel: (p: SidebarPanel) => void
@@ -120,10 +126,15 @@ interface UIState {
   setBrowserPickerActive: (active: boolean) => void
   setPageElementSelection: (sel: PageElementSelection | null) => void
   setBrowserBridgeReady: (ready: boolean) => void
+  setBrowserAgentMode: (active: boolean, runId?: string | null) => void
   setPickerBridgeInstalled: (projectId: string, installed: boolean) => void
   resetBrowserPickerForProjectSwitch: () => void
   setBottomTab: (t: 'terminal' | 'git' | 'problems') => void
+  setAgentPanelPlacement: (placement: AgentPanelPlacement) => void
+  openAgentsPanel: () => void
   setRightPanelTab: (t: RightPanelTab) => void
+  requestOpenRunDrawer: (runId: string, tab?: RunDrawerTab) => void
+  clearRunDrawerRequest: () => void
 }
 
 interface ProjectState {
@@ -277,7 +288,10 @@ export const useUIStore = create<UIState>()(
       browserPickerActive: false,
       pageElementSelection: null,
       browserBridgeReady: false,
+      browserAgentMode: false,
+      browserAgentRunId: null,
       bottomTab: 'terminal',
+      agentPanelPlacement: 'sidebar',
       rightPanelTab: 'chat',
       setActivePanel: (p) => set({ activePanel: p }),
       toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
@@ -299,6 +313,8 @@ export const useUIStore = create<UIState>()(
       setBrowserPickerActive: (browserPickerActive) => set({ browserPickerActive }),
       setPageElementSelection: (pageElementSelection) => set({ pageElementSelection }),
       setBrowserBridgeReady: (browserBridgeReady) => set({ browserBridgeReady }),
+      setBrowserAgentMode: (browserAgentMode, runId = null) =>
+        set({ browserAgentMode, browserAgentRunId: runId ?? null }),
       setPickerBridgeInstalled: (projectId, installed) =>
         set((s) => ({
           pickerBridgeInstalledByProject: {
@@ -311,9 +327,59 @@ export const useUIStore = create<UIState>()(
           browserPickerActive: false,
           pageElementSelection: null,
           browserBridgeReady: false,
+          browserAgentMode: false,
+          browserAgentRunId: null,
         }),
       setBottomTab: (t) => set({ bottomTab: t }),
-      setRightPanelTab: (t) => set({ rightPanelTab: t }),
+      setAgentPanelPlacement: (placement) =>
+        set((s) => {
+          if (placement === 'right') {
+            if (s.activePanel === 'agents') {
+              return {
+                agentPanelPlacement: 'right',
+                activePanel: 'explorer',
+                rightPanelTab: 'agents',
+                rightPanelCollapsed: false,
+              }
+            }
+            return { agentPanelPlacement: 'right' }
+          }
+          if (s.rightPanelTab === 'agents') {
+            return {
+              agentPanelPlacement: 'sidebar',
+              rightPanelTab: 'runs',
+              activePanel: 'agents',
+              sidebarCollapsed: false,
+            }
+          }
+          return { agentPanelPlacement: 'sidebar' }
+        }),
+      openAgentsPanel: () =>
+        set((s) => {
+          if (s.agentPanelPlacement === 'right') {
+            return { rightPanelCollapsed: false, rightPanelTab: 'agents' }
+          }
+          return { activePanel: 'agents', sidebarCollapsed: false }
+        }),
+      setRightPanelTab: (t) =>
+        set((s) => {
+          if (t === 'agents' && s.agentPanelPlacement !== 'right') {
+            return { rightPanelTab: t, agentPanelPlacement: 'right', rightPanelCollapsed: false }
+          }
+          return { rightPanelTab: t }
+        }),
+      runDrawerRequest: null as UIState['runDrawerRequest'],
+      requestOpenRunDrawer: (runId, tab = 'conversation') =>
+        set((s) => ({
+          runDrawerRequest: {
+            runId,
+            tab,
+            seq: (s.runDrawerRequest?.seq ?? 0) + 1,
+          },
+          rightPanelCollapsed: false,
+          rightPanelTab: s.agentPanelPlacement === 'right' ? 'agents' : 'runs',
+        })),
+      clearRunDrawerRequest: () => set({ runDrawerRequest: null }),
     }),
     {
       name: 'ai-copilot-ui',
@@ -329,6 +395,7 @@ export const useUIStore = create<UIState>()(
         browserUrlByProject: state.browserUrlByProject,
         pickerBridgeInstalledByProject: state.pickerBridgeInstalledByProject,
         bottomTab: state.bottomTab,
+        agentPanelPlacement: state.agentPanelPlacement,
         rightPanelTab: state.rightPanelTab,
       }),
     },

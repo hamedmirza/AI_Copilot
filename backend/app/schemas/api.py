@@ -163,6 +163,16 @@ class RunResponse(BaseModel):
     approval_reached: bool | None = None
     promote_rolled_back: bool | None = None
     primary_failure_class: str | None = None
+    chat_session_id: str | None = None
+    deliverable_kind: str | None = None
+    expected_targets: list[str] = Field(default_factory=list)
+    expected_validation_family: str | None = None
+    readiness: dict = Field(default_factory=dict)
+    mismatch_classes: list[str] = Field(default_factory=list)
+    approval_override: bool | None = None
+    clarification_question: str | None = None
+    clarification_stage: str | None = None
+    recommended_assumption: str | None = None
     created_at: str
     updated_at: str
 
@@ -194,6 +204,10 @@ class RejectRequest(BaseModel):
 
 class RetryRequest(BaseModel):
     feedback: str = ""
+
+
+class ClarifyRequest(BaseModel):
+    answer: str = Field(min_length=1)
 
 
 class FileWriteRequest(BaseModel):

@@ -4,27 +4,20 @@ import { parsePageElementContext } from '@/lib/pageElementContext'
 import { parseUnknownObject, formatAnswerDuration, formatChatTimestamp, resolveAnswerDurationMs } from './types'
 import { ToolCallCard } from './ToolCallCard'
 import { RunCard } from './RunCard'
-import { RunFollowUpCard } from './RunFollowUpCard'
 import { ThinkingIndicator } from './ThinkingIndicator'
 
 interface MessageBubbleProps {
   message: ChatMessage
   runEventsById: Record<string, RunEvent[]>
-  runActionBusy?: boolean
   thinkingLabel?: string | null
-  onApproveRun: (runId: string) => void | Promise<void>
-  onRejectRun: (runId: string) => void | Promise<void>
-  onRetryRun: (runId: string, feedback?: string) => void | Promise<void>
+  onOpenRunInAgents?: (runId: string) => void
 }
 
 export function MessageBubble({
   message,
   runEventsById,
-  runActionBusy,
   thinkingLabel,
-  onApproveRun,
-  onRejectRun,
-  onRetryRun,
+  onOpenRunInAgents,
 }: MessageBubbleProps) {
   const [now, setNow] = useState(Date.now())
 
@@ -50,22 +43,25 @@ export function MessageBubble({
   const metaType = String(message.metadata?.type || '')
   const isRunCard = metaType === 'run_spawned' && !!runId
   const isRunSummary = metaType === 'run_summary' && !!runId
+  const isRunThread = metaType === 'run_thread' && !!runId
   const runEvents = runId ? (runEventsById[runId] || []) : []
-  const runStatus = String(message.metadata?.run_status || message.metadata?.status || '')
+  const runStatus = String(message.metadata?.run_status || message.metadata?.status || (message.metadata?.clarification_pending ? 'awaiting_clarification' : ''))
   const contextMeta = parseUnknownObject(message.metadata?.context)
   const pageElement = parsePageElementContext(contextMeta?.page_element)
   const elementSelector = pageElement?.selector ?? null
   const elementTag = pageElement?.tag_name ?? null
+  const bubbleClass = isUser
+    ? 'bg-[var(--accent)] border-[var(--accent)] text-white'
+    : isRunThread
+      ? 'bg-[#11161d] border-cyan-500/30'
+      : 'bg-[var(--bg-secondary)] border-[var(--border)]'
+  const roleLabel = isUser ? 'You' : 'Copilot'
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-      <div className={`max-w-[92%] rounded-lg border px-3 py-2 ${
-        isUser
-          ? 'bg-[var(--accent)] border-[var(--accent)] text-white'
-          : 'bg-[var(--bg-secondary)] border-[var(--border)]'
-      }`}>
+      <div className={`max-w-[92%] rounded-lg border px-3 py-2 ${bubbleClass}`}>
         <div className="flex items-center gap-2 mb-1 text-[11px] uppercase tracking-wide opacity-80">
-          <span>{message.role}</span>
+          <span>{roleLabel}</span>
           {message.created_at && <span>{formatChatTimestamp(message.created_at)}</span>}
           {answerDurationLabel && (
             <span className="normal-case tracking-normal">{answerDurationLabel}</span>
@@ -112,35 +108,16 @@ export function MessageBubble({
           </div>
         )}
 
-        {isRunCard && runId && (
+        {(isRunCard || isRunSummary || isRunThread) && runId && (
           <div className={message.content ? 'mt-3' : ''}>
             <RunCard
               runId={runId}
               displayName={runDisplayName}
               events={runEvents}
-              busy={runActionBusy}
-              onApprove={onApproveRun}
-              onReject={onRejectRun}
-              onRetry={onRetryRun}
-            />
-            <RunFollowUpCard
-              runId={runId}
-              runStatus={runStatus}
-              events={runEvents}
-              busy={runActionBusy}
-              onRetry={onRetryRun}
+              status={runStatus || undefined}
+              onOpen={onOpenRunInAgents ? () => onOpenRunInAgents(runId) : undefined}
             />
           </div>
-        )}
-
-        {isRunSummary && runId && !isRunCard && (
-          <RunFollowUpCard
-            runId={runId}
-            runStatus={runStatus}
-            events={runEvents}
-            busy={runActionBusy}
-            onRetry={onRetryRun}
-          />
         )}
       </div>
     </div>

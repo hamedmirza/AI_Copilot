@@ -1,11 +1,29 @@
 import { useEffect, useMemo, useState, type UIEvent } from 'react'
 import type { RunEvent } from '@/types/runs'
+import { getExitCodeHelp, parseExitCodeFromMessage } from '@/lib/exitCodeHelp'
 import {
   filterSignificantRunEvents,
   formatRunEventLine,
   runEventSeverityClass,
 } from '@/lib/runEvents'
 import { Button } from '@/components/ui/primitives'
+
+function RunEventSummary({ event }: { event: RunEvent }) {
+  const message = String(event.message || '').trim()
+  const code = parseExitCodeFromMessage(message)
+  if (code !== null) {
+    const { label, hint } = getExitCodeHelp(code)
+    return (
+      <div className="space-y-0.5">
+        <p className={`text-xs ${runEventSeverityClass(event)}`}>
+          {label} <span className="text-[var(--text-secondary)] font-normal">(exit {code})</span>
+        </p>
+        <p className="text-xs text-[var(--text-secondary)] leading-snug">{hint}</p>
+      </div>
+    )
+  }
+  return <p className={`text-xs ${runEventSeverityClass(event)}`}>{formatRunEventLine(event)}</p>
+}
 
 interface RunLogPanelProps {
   events: RunEvent[]
@@ -43,9 +61,7 @@ export function RunLogPanel({
     return (
       <div className={`space-y-2 ${className}`}>
         {latestSignificant ? (
-          <p className={`text-xs ${runEventSeverityClass(latestSignificant)}`}>
-            {formatRunEventLine(latestSignificant)}
-          </p>
+          <RunEventSummary event={latestSignificant} />
         ) : (
           <p className="text-xs text-[var(--text-secondary)]">{emptyLabel}</p>
         )}

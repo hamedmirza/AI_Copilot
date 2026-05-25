@@ -92,6 +92,7 @@ export function StatusBar() {
   const runLabel =
     runStatus === 'idle' ? 'Idle' :
     runStatus === 'running' ? `Running: ${currentStage || '…'}` :
+    runStatus === 'awaiting_clarification' ? 'Awaiting clarification' :
     runStatus === 'awaiting_approval' ? 'Awaiting approval' :
     runStatus === 'blocked' ? 'Blocked' : runStatus
 

@@ -169,6 +169,29 @@ def run_migrations() -> None:
                 _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN promote_rolled_back BOOLEAN DEFAULT 0")
             if not _column_exists("runs", "primary_failure_class"):
                 _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN primary_failure_class VARCHAR(64)")
+            if not _column_exists("runs", "chat_session_id"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN chat_session_id VARCHAR(36)")
+            if not _column_exists("runs", "deliverable_kind"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN deliverable_kind VARCHAR(32)")
+            if not _column_exists("runs", "expected_targets_json"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN expected_targets_json TEXT DEFAULT '[]'")
+            if not _column_exists("runs", "expected_validation_family"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN expected_validation_family VARCHAR(32)")
+            if not _column_exists("runs", "readiness_json"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN readiness_json TEXT DEFAULT '{}'")
+            if not _column_exists("runs", "mismatch_classes_json"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN mismatch_classes_json TEXT DEFAULT '[]'")
+            if not _column_exists("runs", "approval_override"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN approval_override BOOLEAN DEFAULT 0")
+            if not _column_exists("runs", "clarification_question"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN clarification_question TEXT")
+            if not _column_exists("runs", "clarification_stage"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN clarification_stage VARCHAR(64)")
+            if not _column_exists("runs", "clarification_context_json"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN clarification_context_json TEXT DEFAULT '{}'")
+
+    if not _table_exists("run_thread_entries"):
+        Base.metadata.create_all(bind=engine, tables=[Base.metadata.tables["run_thread_entries"]])
 
     if _table_exists("tasks"):
         with engine.begin() as conn:

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.orm import Session
 
 from app.agents import (
@@ -33,9 +34,31 @@ from app.services.run_engine.event_bus import event_bus
 from app.services.workspace_service import clone_for_run
 from app.core.exceptions import CommandRejectedError, PatchGuardError
 from app.tools.command_runner import run_command, validate_command
-from app.tools.lint_runner import canonical_frontend_required_commands, get_profile_commands, scope_profile_commands
+from app.tools.lint_runner import (
+    canonical_frontend_required_commands,
+    get_profile_commands,
+    normalize_tester_dry_run_commands,
+    scope_profile_commands,
+)
+from app.services.deployment_gates import effective_changed_files, evaluate_deployment_readiness
+from app.services.integration_guard import integration_guard_issues
+from app.services.contract_guard import contract_guard_issues
+from app.services.integration_guard import integration_requires_visual_evidence
+from app.services.visual_evidence_service import execute_visual_checks, clear_visual_evidence_artifacts
+from app.services.workspace_dev_url import build_default_visual_checks
+from app.services.supervisor_service import run_pre_deploy_supervisor
+from app.services.run_truth_service import (
+    expected_targets_for_kind,
+    expected_validation_family,
+    infer_deliverable_kind,
+    persist_run_truth,
+)
+from app.services.run_thread_service import RunThreadService
 
 logger = logging.getLogger(__name__)
+
+CLARIFICATION_GATE_PLANNER_SURFACE = "planner_surface"
+CLARIFICATION_GATE_ARCHITECT_NAVIGATION = "architect_navigation"
 
 _RESUME_STAGE_PRIORITY = {
     PipelineStage.SUPERVISOR.value: 7,
@@ -53,6 +76,7 @@ class OrchestrationService:
         RunStatus.COMPLETED.value,
         RunStatus.FAILED.value,
         RunStatus.CANCELLED.value,
+        RunStatus.AWAITING_CLARIFICATION.value,
         RunStatus.AWAITING_APPROVAL.value,
         RunStatus.BLOCKED.value,
         RunStatus.CHANGES_REQUESTED.value,
@@ -194,15 +218,25 @@ class OrchestrationService:
         try:
             db.add(RunEventModel(**event_payload))
             db.commit()
-            return
         except Exception:
             db.rollback()
-        isolated = SessionLocal()
+            isolated = SessionLocal()
+            try:
+                isolated.add(RunEventModel(**event_payload))
+                isolated.commit()
+            finally:
+                isolated.close()
         try:
-            isolated.add(RunEventModel(**event_payload))
-            isolated.commit()
-        finally:
-            isolated.close()
+            RunThreadService(db).append_entry(
+                run_id,
+                entry_type=event_type,
+                stage=stage or None,
+                severity=severity,
+                message=message,
+                payload=payload or {},
+            )
+        except Exception:
+            logger.debug("Failed to append run thread entry for %s", run_id, exc_info=True)
 
     def _save_artifact(self, db: Session, run_id: str, artifact_type: str, content: dict) -> None:
         artifact_payload = {
@@ -242,6 +276,119 @@ class OrchestrationService:
             finally:
                 isolated.close()
         self._record_event(db, run_id, "run_failed", stage, "error", message)
+        persist_run_truth(db, run_id)
+
+    def _clarification_probe_text(self, run: RunModel, task_description: str) -> str:
+        parts = [task_description or "", run.operator_feedback or ""]
+        ctx = run.clarification_context or {}
+        answer = str(ctx.get("answer") or "").strip()
+        if answer:
+            parts.append(answer)
+        return "\n".join(part for part in parts if part).lower()
+
+    def _request_clarification(
+        self,
+        db: Session,
+        run_id: str,
+        *,
+        stage: str,
+        question: str,
+        recommended_assumption: str,
+        gate_id: str,
+    ) -> None:
+        run = db.get(RunModel, run_id)
+        if not run:
+            return
+        prior = dict(run.clarification_context or {})
+        prior.update(
+            {
+                "question": question,
+                "recommended_assumption": recommended_assumption,
+                "pending_gate": gate_id,
+            }
+        )
+        prior.pop("answer", None)
+        run.status = RunStatus.AWAITING_CLARIFICATION.value
+        run.clarification_question = question
+        run.clarification_stage = stage
+        run.clarification_context_json = json.dumps(prior)
+        db.commit()
+        self._record_event(
+            db,
+            run_id,
+            "run_clarification_requested",
+            stage,
+            "warning",
+            question,
+            {
+                "recommended_assumption": recommended_assumption,
+                "clarification_pending": True,
+            },
+        )
+        self._emit(
+            run_id,
+            "run_clarification_requested",
+            stage,
+            question,
+            {
+                "recommended_assumption": recommended_assumption,
+                "clarification_pending": True,
+            },
+        )
+
+    def _needs_clarification(
+        self, run: RunModel, task_description: str, stage: str
+    ) -> tuple[str, str, str] | None:
+        if run.task_kind != "implementation":
+            return None
+        resolved = set((run.clarification_context or {}).get("resolved_gates") or [])
+        text = self._clarification_probe_text(run, task_description)
+        ui_cues = ("ui", "page", "screen", "view", "dashboard", "kanban", "workflow", "experience")
+        explicit_surface_cues = (
+            "frontend",
+            "backend",
+            "api",
+            "service",
+            "route",
+            "database",
+            "report",
+            "document",
+            "chat",
+            "browser",
+            "activity bar",
+            "workbench",
+            "sidebar",
+            "settings",
+            "navigation",
+            "menu",
+            "route",
+            "tab",
+        )
+        if (
+            stage == PipelineStage.PLANNER.value
+            and CLARIFICATION_GATE_PLANNER_SURFACE not in resolved
+            and run.deliverable_kind == "mixed"
+            and any(token in text for token in ui_cues)
+            and not any(token in text for token in explicit_surface_cues)
+        ):
+            return (
+                "This task is not specific enough to determine whether the requested work should target frontend UI, backend logic, or report-only output. Which surface should this run change?",
+                "Specify the target product surface before implementation continues.",
+                CLARIFICATION_GATE_PLANNER_SURFACE,
+            )
+        if (
+            stage == PipelineStage.ARCHITECT.value
+            and CLARIFICATION_GATE_ARCHITECT_NAVIGATION not in resolved
+            and run.deliverable_kind == "frontend"
+            and any(token in text for token in ("page", "screen", "view", "dashboard", "kanban"))
+            and not any(token in text for token in ("chat", "browser", "activity bar", "workbench", "sidebar"))
+        ):
+            return (
+                "This frontend task requests a new page or surface, but it does not clearly state where it should be wired into the product navigation. Should it live in chat, the workbench center view, or another existing surface?",
+                "Use an existing primary UI surface unless the operator specifies otherwise.",
+                CLARIFICATION_GATE_ARCHITECT_NAVIGATION,
+            )
+        return None
 
     def _pipeline(self, db: Session, run_id: str) -> None:
         run = db.get(RunModel, run_id)
@@ -259,6 +406,7 @@ class OrchestrationService:
         task = run.task
         learner = LearningService(db)
         learner.ensure_run_task_kind(run)
+        RunThreadService(db).ensure_session(run_id, run.chat_session_id)
         context_base = self._build_context_base(run, task.description)
         fs = FileService(workspace, project.protected_files)
 
@@ -282,6 +430,18 @@ class OrchestrationService:
 
         for stage, fn in stages[start_index:]:
             run = db.get(RunModel, run_id)
+            clarification = self._needs_clarification(run, task.description, stage.value)
+            if clarification:
+                question, recommendation, gate_id = clarification
+                self._request_clarification(
+                    db,
+                    run_id,
+                    stage=stage.value,
+                    question=question,
+                    recommended_assumption=recommendation,
+                    gate_id=gate_id,
+                )
+                return
             run.current_stage = stage.value
             db.commit()
             self._record_event(db, run_id, f"{stage.value}_started", stage.value, "info", f"{stage.value} started")
@@ -290,6 +450,9 @@ class OrchestrationService:
                 stage_context = self._stage_context(db, run, stage.value, context_base)
                 result = fn(stage_context)
                 if result is False:
+                    run = db.get(RunModel, run_id)
+                    if run and run.status == RunStatus.AWAITING_CLARIFICATION.value:
+                        return
                     self._finalize_terminal_state(db, run_id)
                     return
             except Exception as exc:
@@ -303,9 +466,13 @@ class OrchestrationService:
                 continue
             self._record_event(db, run_id, f"{stage.value}_complete", stage.value, "info", f"{stage.value} complete")
             self._emit(run_id, f"{stage.value}_complete", stage.value, f"{stage.value} complete")
+            persist_run_truth(db, run_id)
 
         run = db.get(RunModel, run_id)
         if run.status == RunStatus.RUNNING.value:
+            if not self._finalize_deployment_gates(db, run_id, workspace, source):
+                self._finalize_terminal_state(db, run_id)
+                return
             run.status = RunStatus.AWAITING_APPROVAL.value
             run.operator_feedback = None
             db.commit()
@@ -318,6 +485,7 @@ class OrchestrationService:
                 "Run awaiting approval",
             )
             self._emit(run_id, "awaiting_approval", "", "Run awaiting approval")
+            persist_run_truth(db, run_id)
             self._finalize_terminal_state(db, run_id)
 
     def _build_context_base(self, run: RunModel, task_description: str) -> str:
@@ -332,6 +500,11 @@ class OrchestrationService:
             context_base += "\n\nOperator feedback:\n" + run.operator_feedback
         elif run.error_message and run.status == RunStatus.CHANGES_REQUESTED.value:
             context_base += "\n\nOperator feedback:\n" + run.error_message
+        if run.clarification_context:
+            question = str(run.clarification_context.get("question") or "").strip()
+            answer = str(run.clarification_context.get("answer") or "").strip()
+            if question and answer:
+                context_base += f"\n\nClarification resolved:\nQuestion: {question}\nAnswer: {answer}"
         return context_base
 
     def _stage_context(self, db: Session, run: RunModel, stage: str, context_base: str) -> str:
@@ -385,6 +558,7 @@ class OrchestrationService:
         agent = PlannerAgent(provider)
         output = agent.plan(context)
         self._save_artifact(db, run_id, "plan", output.model_dump())
+        persist_run_truth(db, run_id)
         return True
 
     def _stage_architect(self, db: Session, run_id: str, context: str):
@@ -393,6 +567,7 @@ class OrchestrationService:
         agent = ArchitectAgent(provider)
         output = agent.design(context)
         self._save_artifact(db, run_id, "architect", output.model_dump())
+        persist_run_truth(db, run_id)
         return True
 
     def _stage_ui(self, db: Session, run_id: str, context: str):
@@ -404,6 +579,7 @@ class OrchestrationService:
             self._record_event(db, run_id, "ui_designer_skipped", "ui_designer", "info", "UI stage skipped")
             return True
         self._save_artifact(db, run_id, "ui_design", output.model_dump())
+        persist_run_truth(db, run_id)
         return True
 
     def _stage_coder(self, db: Session, run_id: str, context: str, fs: FileService):
@@ -414,26 +590,66 @@ class OrchestrationService:
         project = ProjectService(db).get(run.project_id) if run else None
         source_root = Path(project.source_repo_spec) if project else fs.workspace
         attempt_context = self._build_coder_context(db, run_id, context, fs, source_root)
-        max_attempts = 2
+        max_attempts = 3
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
-            output = agent.code(attempt_context)
+            try:
+                output = agent.code(attempt_context)
+            except (json.JSONDecodeError, PydanticValidationError) as exc:
+                last_exc = exc
+                self._record_event(
+                    db,
+                    run_id,
+                    "coder_schema_rejected",
+                    "coder",
+                    "warning",
+                    str(exc),
+                    {"attempt": attempt},
+                )
+                if attempt >= max_attempts:
+                    raise
+                attempt_context = "\n".join(
+                    [
+                        context,
+                        "",
+                        "Previous coder output was invalid JSON or schema:",
+                        str(exc),
+                        "",
+                        self._build_coder_context(db, run_id, "", fs, source_root),
+                    ]
+                )
+                continue
             changes = [
                 fc if isinstance(fc, dict) else fc.model_dump() for fc in output.file_changes
             ]
             try:
                 applied = fs.apply_coder_changes(changes)
                 self._run_frontend_patch_check(fs.workspace, applied)
+                applied_paths = [str(c.get("path") or "") for c in applied if c.get("path")]
+                self._run_deployment_guards_on_changes(db, run_id, fs.workspace, applied_paths)
             except PatchGuardError as exc:
                 last_exc = exc
                 exc_text = str(exc)
                 is_protected = "protected" in exc_text.lower()
                 is_frontend_tsc = "frontend patch validation failed" in exc_text.lower()
-                block_source = "protected_path" if is_protected else ("frontend_tsc" if is_frontend_tsc else "change_guard")
+                is_deployment_gate = "deployment gate failed" in exc_text.lower()
+                block_source = (
+                    "protected_path"
+                    if is_protected
+                    else (
+                        "frontend_tsc"
+                        if is_frontend_tsc
+                        else ("integration_guard" if is_deployment_gate else "change_guard")
+                    )
+                )
                 block_type = (
                     "protected_path"
                     if is_protected
-                    else ("frontend_tsc" if is_frontend_tsc else "structural_guard")
+                    else (
+                        "frontend_tsc"
+                        if is_frontend_tsc
+                        else ("integration_guard" if is_deployment_gate else "structural_guard")
+                    )
                 )
                 target_stages = ["planner", "architect"] if is_protected else ["coder"]
                 self._record_pipeline_block(
@@ -490,6 +706,7 @@ class OrchestrationService:
             self._resolve_pipeline_blocks(db, run_id, resolved_by_stage="coder", stage="coder")
             self._record_event(db, run_id, "code_patch_applied", "coder", "info", "Patch applied")
             self._emit(run_id, "code_patch_applied", "coder", "Patch applied")
+            persist_run_truth(db, run_id)
             return True
         if last_exc:
             raise last_exc
@@ -510,16 +727,83 @@ class OrchestrationService:
             return None
         return parsed if isinstance(parsed, dict) else None
 
-    def _latest_changed_files(self, db: Session, run_id: str) -> list[str]:
-        coder = self._latest_artifact(db, run_id, "coder") or {}
-        changed_files: list[str] = []
-        for raw_file_change in coder.get("file_changes") or []:
-            if not isinstance(raw_file_change, dict):
-                continue
-            rel_path = str(raw_file_change.get("path") or "").strip()
-            if rel_path:
-                changed_files.append(rel_path)
-        return changed_files
+    def _latest_changed_files(self, db: Session, run_id: str, workspace: Path | None = None) -> list[str]:
+        run = db.get(RunModel, run_id)
+        if not run:
+            return []
+        project = ProjectService(db).get(run.project_id)
+        source_root = Path(project.source_repo_spec)
+        ws = Path(run.workspace_path) if run.workspace_path else (workspace or source_root)
+        return effective_changed_files(db, run_id, ws, source_root)
+
+    def _run_deployment_guards_on_changes(
+        self,
+        db: Session,
+        run_id: str,
+        workspace: Path,
+        changed_paths: list[str],
+    ) -> None:
+        if not changed_paths:
+            return
+        issues = integration_guard_issues(workspace, changed_files=changed_paths) + contract_guard_issues(
+            workspace, changed_paths
+        )
+        if not issues:
+            return
+        message = "; ".join(str(item.get("message") or "") for item in issues[:3])
+        raise PatchGuardError("deployment_gates", f"Deployment gate failed: {message}")
+
+    def _finalize_deployment_gates(self, db: Session, run_id: str, workspace: Path, source_root: Path) -> bool:
+        run = db.get(RunModel, run_id)
+        if not run:
+            return False
+        changed = effective_changed_files(db, run_id, workspace, source_root)
+        pre = run_pre_deploy_supervisor(db, run_id, changed, workspace)
+        if pre and not pre.get("approved", False):
+            gaps = pre.get("plan_gaps") or []
+            run.status = RunStatus.BLOCKED.value
+            run.error_message = f"Pre-deploy supervisor rejected: {len(gaps)} plan gap(s)"
+            db.commit()
+            self._record_event(
+                db,
+                run_id,
+                "pre_deploy_rejected",
+                "supervisor",
+                "error",
+                run.error_message,
+                {"plan_gaps": gaps},
+            )
+            self._emit(run_id, "run_blocked", "supervisor", run.error_message)
+            return False
+
+        readiness = evaluate_deployment_readiness(db, run_id, workspace=workspace)
+        if readiness.get("ready"):
+            self._record_event(
+                db,
+                run_id,
+                "deployment_gates_passed",
+                "tester",
+                "info",
+                "All deployment gates passed",
+                readiness,
+            )
+            return True
+
+        blocking = ", ".join(readiness.get("blocking") or []) or "deployment gates failed"
+        run.status = RunStatus.BLOCKED.value
+        run.error_message = blocking
+        db.commit()
+        self._record_event(
+            db,
+            run_id,
+            "deployment_gates_failed",
+            "tester",
+            "error",
+            blocking,
+            readiness,
+        )
+        self._emit(run_id, "run_blocked", "tester", blocking)
+        return False
 
     def _tester_requires_visual_plan(self, db: Session, run_id: str, changed_files: list[str]) -> bool:
         if any(is_frontend_code_path(path) for path in changed_files):
@@ -733,7 +1017,10 @@ class OrchestrationService:
         node_modules = frontend_dir / "node_modules"
         if not node_modules.exists():
             raise PatchGuardError("frontend/node_modules", "frontend toolchain missing in run workspace")
-        code, stdout, stderr = run_command("npm --prefix frontend exec tsc --noEmit --pretty false", workspace)
+        tsc = frontend_dir / "node_modules" / "typescript" / "lib" / "tsc.js"
+        if not tsc.is_file():
+            raise PatchGuardError("frontend", "typescript compiler missing in run workspace")
+        code, stdout, stderr = run_command(f"node {tsc} -b --noEmit", frontend_dir)
         if code != 0:
             message = (stderr or stdout or "frontend typecheck failed").strip()
             raise PatchGuardError("frontend", f"frontend patch validation failed: {message}")
@@ -885,8 +1172,31 @@ class OrchestrationService:
         blueprint_paths = self._blueprint_paths(architect)
         for scope_issue in scope_issues(blueprint_paths, changed_files, task_kind):
             issues.append(dict(scope_issue))
+        run = db.get(RunModel, run_id)
+        project = ProjectService(db).get(run.project_id) if run else None
+        source_root = Path(project.source_repo_spec) if project else Path(".")
+        workspace = Path(run.workspace_path) if run and run.workspace_path else source_root
+        scoped_changed = self._latest_changed_files(db, run_id, workspace)
+        for issue in integration_guard_issues(workspace, changed_files=scoped_changed):
+            issues.append(
+                {
+                    "severity": issue.get("severity") or "critical",
+                    "file_path": issue.get("path") or "",
+                    "message": str(issue.get("message") or ""),
+                    "source": "integration_guard",
+                }
+            )
+        for issue in contract_guard_issues(workspace, scoped_changed):
+            issues.append(
+                {
+                    "severity": issue.get("severity") or "critical",
+                    "file_path": issue.get("path") or "",
+                    "message": str(issue.get("message") or ""),
+                    "source": "contract_guard",
+                }
+            )
         ui_design = self._latest_artifact(db, run_id, "ui_design")
-        if any(is_frontend_code_path(path) for path in changed_files) and not ui_design:
+        if any(is_frontend_code_path(path) for path in scoped_changed) and not ui_design:
             issues.append(
                 {
                     "severity": "important",
@@ -896,6 +1206,21 @@ class OrchestrationService:
                         "Add a UI design spec or justify the edit as a non-UI tweak in the coder summary."
                     ),
                     "source": "deterministic_guard",
+                }
+            )
+        if (
+            run
+            and run.task_kind == "implementation"
+            and run.deliverable_kind != "report"
+            and scoped_changed
+            and all(path.startswith(".ai-copilot/reports/") or path.endswith((".md", ".txt", ".rst")) for path in scoped_changed)
+        ):
+            issues.append(
+                {
+                    "severity": "critical",
+                    "file_path": scoped_changed[0],
+                    "message": "Implementation task drifted into report-only output instead of changing the requested product surface.",
+                    "source": "intent_guard",
                 }
             )
         return issues
@@ -958,6 +1283,7 @@ class OrchestrationService:
         run.status = RunStatus.CHANGES_REQUESTED.value
         run.error_message = summary
         db.commit()
+        persist_run_truth(db, run_id)
         self._record_event(db, run_id, event_type, "reviewer", "warning", summary, payload)
         self._emit(run_id, event_type, "reviewer", summary, payload)
         self._record_event(db, run_id, "run_changes_requested", "reviewer", "warning", summary, payload)
@@ -1118,6 +1444,7 @@ class OrchestrationService:
                     output.summary,
                     {"attempt": attempt, "issues": review_payload.get("issues", [])},
                 )
+                persist_run_truth(db, run_id)
                 return True
             issue_guidance = "; ".join(
                 str(issue.get("message") or "")
@@ -1262,7 +1589,7 @@ class OrchestrationService:
         task_kind = run.task_kind if run else None
         profiles_json = str(ConfigService(db).get_all().get("validation_profiles_json", "{}"))
         profile = run.task.validation_profile if run and run.task else "python"
-        changed_files = self._latest_changed_files(db, run_id)
+        changed_files = self._latest_changed_files(db, run_id, workspace)
         profile_commands = scope_profile_commands(
             self._profile_commands_for_changed_files(
                 profile,
@@ -1344,7 +1671,11 @@ class OrchestrationService:
                     self._emit(run_id, "visual_checks_skipped", "tester", skip_reason)
             self._save_artifact(db, run_id, "test_plan", output.model_dump())
             llm_commands = [cmd.command for cmd in output.commands]
-            dry_run_commands = [cmd.command for cmd in output.dry_run_steps]
+            dry_run_commands = normalize_tester_dry_run_commands(
+                [cmd.command for cmd in output.dry_run_steps],
+                changed_files,
+                workspace,
+            )
             for check in output.visual_checks:
                 payload = check.model_dump()
                 self._record_event(
@@ -1357,6 +1688,20 @@ class OrchestrationService:
                     payload,
                 )
                 self._emit(run_id, "visual_check_required", "tester", check.description, payload)
+
+        if any(is_frontend_code_path(path) for path in changed_files) and not dry_run_commands:
+            dry_run_commands = normalize_tester_dry_run_commands([], changed_files, workspace)
+        test_plan_for_gate = self._latest_artifact(db, run_id, "test_plan") or {}
+        visual_skip_reason = str(test_plan_for_gate.get("visual_checks_skip_reason") or "").strip()
+        if self._tester_requires_visual_plan(db, run_id, changed_files) and not visual_skip_reason:
+            gate_changed = (
+                changed_files
+                if any(path.startswith("frontend/") for path in changed_files)
+                else ["frontend/src/workbench/builtins.tsx"]
+            )
+            dry_run_commands = normalize_tester_dry_run_commands(
+                dry_run_commands, gate_changed, workspace
+            )
 
         dry_run_passed = self._execute_tester_command_batch(
             db,
@@ -1441,6 +1786,84 @@ class OrchestrationService:
             db.commit()
             self._emit(run_id, "run_blocked", "tester", "Validation failed")
             return False
+
+        test_plan = self._latest_artifact(db, run_id, "test_plan") or {}
+        visual_checks = list(test_plan.get("visual_checks") or [])
+        skip_reason = str(test_plan.get("visual_checks_skip_reason") or "").strip()
+        needs_visual = (
+            bool(visual_checks)
+            or (
+                not skip_reason
+                and (
+                    integration_requires_visual_evidence(changed_files)
+                    or any(is_frontend_code_path(path) for path in changed_files)
+                )
+            )
+        )
+        if needs_visual:
+            run = db.get(RunModel, run_id)
+            project_id = run.project_id if run else ""
+            if not visual_checks and not skip_reason:
+                visual_checks = build_default_visual_checks(workspace, changed_files)
+            if visual_checks:
+                self._emit(
+                    run_id,
+                    "browser_visual_check_started",
+                    "tester",
+                    "Starting IDE browser visual verification",
+                    {"checks": len(visual_checks)},
+                )
+            evidence = execute_visual_checks(
+                db,
+                run_id,
+                workspace,
+                visual_checks,
+                project_id=project_id,
+            )
+            if not evidence.get("passed"):
+                run = db.get(RunModel, run_id)
+                if not run:
+                    return False
+                run.status = RunStatus.BLOCKED.value
+                if evidence.get("browser_client_required"):
+                    run.error_message = "Open AI Copilot IDE with this project loaded to complete visual verification"
+                    self._record_event(
+                        db,
+                        run_id,
+                        "browser_client_required",
+                        "tester",
+                        "warn",
+                        run.error_message,
+                        evidence,
+                    )
+                    self._emit(run_id, "browser_client_required", "tester", run.error_message, evidence)
+                else:
+                    run.error_message = "Visual evidence capture failed"
+                    self._record_event(
+                        db,
+                        run_id,
+                        "visual_evidence_failed",
+                        "tester",
+                        "error",
+                        run.error_message,
+                        evidence,
+                    )
+                    self._emit(run_id, "visual_evidence_failed", "tester", run.error_message, evidence)
+                db.commit()
+                self._emit(run_id, "run_blocked", "tester", run.error_message)
+                return False
+            self._record_event(
+                db,
+                run_id,
+                "visual_evidence_passed",
+                "tester",
+                "info",
+                "Visual evidence captured",
+                evidence,
+            )
+            self._emit(run_id, "browser_visual_check_passed", "tester", "Visual evidence captured", evidence)
+            self._emit(run_id, "visual_evidence_passed", "tester", "Visual evidence captured", evidence)
+        persist_run_truth(db, run_id)
         return True
 
 
@@ -1497,11 +1920,18 @@ def create_task_and_run(db: Session, data: dict):
         current_stage=PipelineStage.PLANNER.value,
         task_kind=task_kind,
         recovery_status="none",
+        chat_session_id=data.get("session_id"),
+        deliverable_kind=infer_deliverable_kind(data["description"], task_kind),
+        expected_targets_json=json.dumps(
+            expected_targets_for_kind(infer_deliverable_kind(data["description"], task_kind))
+        ),
+        expected_validation_family=expected_validation_family(profile, infer_deliverable_kind(data["description"], task_kind)),
     )
     db.add(run)
     db.commit()
     db.refresh(task)
     db.refresh(run)
+    persist_run_truth(db, run.id)
     run_engine.enqueue(run.id)
     return task, run
 

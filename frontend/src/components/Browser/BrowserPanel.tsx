@@ -7,6 +7,8 @@ import {
   type PickerBridgeMessage,
   type PickerElementPayload,
 } from '@/lib/browserPickerMessages'
+import { AGENT_MSG, type AgentAction, type AgentResultPayload } from '@/lib/browserAgentMessages'
+import { registerBrowserAgentExecutor } from '@/lib/browserAgentRegistry'
 import {
   formatElementForAgentTask,
   formatElementForChat,
@@ -73,6 +75,9 @@ export function BrowserPanel() {
   const pageElementSelection = useUIStore((s) => s.pageElementSelection)
   const setPageElementSelection = useUIStore((s) => s.setPageElementSelection)
   const browserBridgeReady = useUIStore((s) => s.browserBridgeReady)
+  const browserAgentMode = useUIStore((s) => s.browserAgentMode)
+  const browserAgentRunId = useUIStore((s) => s.browserAgentRunId)
+  const setBrowserAgentMode = useUIStore((s) => s.setBrowserAgentMode)
   const setBrowserBridgeReady = useUIStore((s) => s.setBrowserBridgeReady)
   const pickerBridgeInstalled = useUIStore((s) =>
     projectId ? Boolean(s.pickerBridgeInstalledByProject[projectId]) : false,
@@ -90,6 +95,10 @@ export function BrowserPanel() {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const handshakeTimerRef = useRef<number | null>(null)
   const lastFrameUrlRef = useRef('')
+  const agentPendingRef = useRef<Map<string, {
+    resolve: (value: AgentResultPayload) => void
+    reject: (reason?: unknown) => void
+  }>>(new Map())
 
   const parentOrigin = typeof window !== 'undefined' ? window.location.origin : ''
   const bridgeScriptUrl = `${parentOrigin}${BRIDGE_SCRIPT_PATH}`
@@ -99,11 +108,11 @@ export function BrowserPanel() {
   )
   const previewSrc = useMemo(() => {
     if (!frameUrl) return ''
-    const shouldProxy = browserPickerActive && projectId && isCrossOriginFrame
+    const shouldProxy = (browserPickerActive || browserAgentMode) && projectId && isCrossOriginFrame
     if (!shouldProxy) return frameUrl
     const params = new URLSearchParams({ url: frameUrl, project_id: projectId, token: getToken() })
     return `/api/browser/preview?${params.toString()}`
-  }, [browserPickerActive, frameUrl, isCrossOriginFrame, projectId])
+  }, [browserAgentMode, browserPickerActive, frameUrl, isCrossOriginFrame, projectId])
 
   useEffect(() => {
     setInputUrl(storedUrl)
@@ -183,7 +192,7 @@ export function BrowserPanel() {
       setPageElementSelection(null)
       lastFrameUrlRef.current = frameUrl
     }
-    if (!browserPickerActive) {
+    if (!browserPickerActive && !browserAgentMode) {
       clearHandshakeTimer()
       setBridgeBanner('none')
       return
@@ -196,9 +205,17 @@ export function BrowserPanel() {
     if (!isCrossOriginFrame) {
       injectBridgeSameOrigin()
     }
+    if (browserAgentMode) {
+      window.setTimeout(() => {
+        setBrowserBridgeReady(true)
+        setBridgeBanner('none')
+      }, 150)
+      return
+    }
     startHandshakeTimer(isCrossOriginFrame)
     window.setTimeout(() => enablePickerInFrame(), 100)
   }, [
+    browserAgentMode,
     browserPickerActive,
     clearHandshakeTimer,
     detectProxiedPreviewFailure,
@@ -211,11 +228,59 @@ export function BrowserPanel() {
     startHandshakeTimer,
   ])
 
+  const runAgentInFrame = useCallback((
+    action: AgentAction,
+    args: Record<string, unknown>,
+    requestId: string,
+  ) => new Promise<AgentResultPayload>((resolve) => {
+    if (browserPickerActive) {
+      setBrowserPickerActive(false)
+      disablePickerInFrame()
+    }
+    injectBridgeSameOrigin()
+    agentPendingRef.current.set(requestId, { resolve, reject: resolve })
+    window.setTimeout(() => {
+      postToIframe(AGENT_MSG.COMMAND, {
+        requestId,
+        action,
+        ...args,
+      })
+    }, 200)
+    window.setTimeout(() => {
+      if (!agentPendingRef.current.has(requestId)) return
+      agentPendingRef.current.delete(requestId)
+      resolve({ requestId, ok: false, error: 'agent command timeout' })
+    }, 45000)
+  }), [
+    browserPickerActive,
+    disablePickerInFrame,
+    injectBridgeSameOrigin,
+    postToIframe,
+    setBrowserPickerActive,
+  ])
+
+  useEffect(() => {
+    registerBrowserAgentExecutor(async (action, args, requestId) => runAgentInFrame(action, args, requestId))
+    return () => registerBrowserAgentExecutor(null)
+  }, [runAgentInFrame])
+
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
       if (!isAllowedPickerOrigin(event.origin)) return
       const data = event.data as PickerBridgeMessage | undefined
       if (!data?.type) return
+
+      if (String(data.type) === AGENT_MSG.RESULT) {
+        const payload = data.payload as unknown as AgentResultPayload
+        const requestId = payload?.requestId
+        if (!requestId) return
+        const pending = agentPendingRef.current.get(requestId)
+        if (pending) {
+          agentPendingRef.current.delete(requestId)
+          pending.resolve(payload || { requestId, ok: false, error: 'empty agent result' })
+        }
+        return
+      }
 
       if (data.type === PICKER_MSG.BRIDGE_READY) {
         clearHandshakeTimer()
@@ -454,7 +519,7 @@ export function BrowserPanel() {
   }, [frameUrl])
 
   useBrowserPickerShortcuts(
-    Boolean(projectId && frameUrl),
+    Boolean(projectId && frameUrl && !browserAgentMode),
     {
       togglePicker,
       addToChat: fixInChat,
@@ -536,7 +601,19 @@ export function BrowserPanel() {
         </p>
       )}
 
-      {!browserPickerActive && isCrossOriginFrame && frameUrl && (
+      {browserAgentMode && (
+        <div className="px-3 py-2 text-xs bg-[var(--accent)]/10 border-b border-[var(--accent)]/30 text-[var(--accent)] shrink-0 flex items-center justify-between gap-2">
+          <span>
+            Agent controlling browser
+            {browserAgentRunId ? ` for run ${browserAgentRunId.slice(0, 8)}…` : ''}
+          </span>
+          <Button variant="secondary" className="text-xs px-2 py-0.5" onClick={() => setBrowserAgentMode(false, null)}>
+            Stop
+          </Button>
+        </div>
+      )}
+
+      {!browserPickerActive && isCrossOriginFrame && frameUrl && !browserAgentMode && (
         <p className="px-3 py-2 text-xs text-[var(--text-secondary)] shrink-0">
           Click crosshair to enable element picker (uses proxy — no script tag needed for localhost apps)
         </p>

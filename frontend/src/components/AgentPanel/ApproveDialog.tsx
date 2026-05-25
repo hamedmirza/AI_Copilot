@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { DiffEditor } from '@monaco-editor/react'
 import { api } from '@/api/client'
 import { showError, showSuccess } from '@/lib/toast'
@@ -38,12 +38,28 @@ interface Props {
   onApproved: () => void
 }
 
+type DeploymentGate = {
+  id: string
+  label: string
+  passed: boolean
+  required: boolean
+  detail: string
+}
+
 export function ApproveDialog({ runId, projectId, artifacts, onClose, onApproved }: Props) {
   const [approving, setApproving] = useState(false)
   const [loadingDiffs, setLoadingDiffs] = useState(true)
   const [diffFiles, setDiffFiles] = useState<PatchDiffFile[]>([])
   const [activePath, setActivePath] = useState<string | null>(null)
+  const [readiness, setReadiness] = useState<{
+    ready: boolean
+    gates: DeploymentGate[]
+    warnings?: string[]
+    visual_evidence?: Record<string, unknown> | null
+  } | null>(null)
+  const [loadingGates, setLoadingGates] = useState(true)
   const summary = buildDiffSummary(artifacts)
+  const canApprove = !loadingGates
 
   useEffect(() => {
     let cancelled = false
@@ -61,7 +77,41 @@ export function ApproveDialog({ runId, projectId, artifacts, onClose, onApproved
     return () => { cancelled = true }
   }, [projectId, artifacts])
 
+  useEffect(() => {
+    let cancelled = false
+    setLoadingGates(true)
+    api.runs.deploymentReadiness(runId)
+      .then((data) => {
+        if (cancelled) return
+        setReadiness({
+          ready: Boolean(data.ready),
+          gates: data.gates ?? [],
+          warnings: data.warnings ?? [],
+          visual_evidence: data.visual_evidence ?? null,
+        })
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setReadiness({ ready: false, gates: [], warnings: [] })
+          showError(e)
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingGates(false)
+      })
+    return () => { cancelled = true }
+  }, [runId])
+
   const active = diffFiles.find((f) => f.path === activePath) ?? diffFiles[0] ?? null
+
+  const visualScreenshotCount = useMemo(() => {
+    const checks = readiness?.visual_evidence?.checks
+    if (!Array.isArray(checks)) return 0
+    return checks.filter((row) => {
+      const item = row as Record<string, unknown>
+      return typeof item.screenshot_path === 'string' && item.screenshot_path.length > 0
+    }).length
+  }, [readiness?.visual_evidence])
 
   const handleApprove = async () => {
     setApproving(true)
@@ -125,9 +175,43 @@ export function ApproveDialog({ runId, projectId, artifacts, onClose, onApproved
           </>
         )}
 
+        <div className="shrink-0 mb-3 border border-[var(--border)] rounded p-3 max-h-32 overflow-auto">
+          <p className="text-xs font-medium mb-2">Deployment gates</p>
+          {loadingGates ? (
+            <p className="text-xs text-[var(--text-secondary)]">Checking readiness…</p>
+          ) : readiness?.gates.length ? (
+            <ul className="text-xs space-y-1">
+              {readiness.gates.filter((g) => g.required).map((g) => (
+                <li key={g.id} className={g.passed ? 'text-[var(--success)]' : 'text-[var(--error)]'}>
+                  {g.passed ? '✓' : '✗'} {g.label}
+                  {!g.passed && g.detail ? ` — ${g.detail}` : ''}
+                  {g.id === 'visual_evidence' && g.passed && visualScreenshotCount > 0
+                    ? ` (${visualScreenshotCount} screenshot${visualScreenshotCount === 1 ? '' : 's'})`
+                    : ''}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-xs text-[var(--text-secondary)]">No gate checklist available.</p>
+          )}
+        </div>
+
+        {!!readiness?.warnings?.length && (
+          <div className="shrink-0 mb-3 border border-[var(--warning)]/40 rounded p-3 bg-[var(--warning)]/8 max-h-32 overflow-auto">
+            <p className="text-xs font-medium mb-2 text-[var(--warning)]">Approval warnings</p>
+            <ul className="text-xs space-y-1 text-[var(--text-primary)]">
+              {readiness.warnings.map((warning) => (
+                <li key={warning}>• {warning}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <div className="flex gap-2 justify-end shrink-0">
           <Button variant="secondary" onClick={onClose} disabled={approving}>Cancel</Button>
-          <Button loading={approving} onClick={handleApprove}>Approve &amp; apply</Button>
+          <Button loading={approving} onClick={handleApprove} disabled={!canApprove || approving}>
+            Approve &amp; apply
+          </Button>
         </div>
       </div>
     </div>

@@ -1,6 +1,17 @@
 """Map common LLM JSON aliases to agent output schemas before Pydantic validation."""
 
+import json
 from typing import Any
+
+
+def loads_agent_json(text: str):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        msg = str(exc).lower()
+        if "control character" in msg or "invalid \\escape" in msg:
+            return json.loads(text, strict=False)
+        raise
 
 
 def normalize_agent_payload(schema_name: str, payload: Any) -> Any:

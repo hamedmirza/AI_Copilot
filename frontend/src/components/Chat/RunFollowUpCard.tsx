@@ -10,7 +10,8 @@ import {
   type RunArtifact,
 } from '@/types/runs'
 import type { RunEvent } from '@/store'
-import { useChatStore } from '@/store'
+import { showError } from '@/lib/toast'
+import { useChatStore, useUIStore } from '@/store'
 
 interface RunFollowUpCardProps {
   runId: string
@@ -18,9 +19,11 @@ interface RunFollowUpCardProps {
   runStatus?: string
   busy?: boolean
   onRetry: (runId: string, feedback?: string) => void | Promise<void>
+  onOpenRunConversation?: (runId: string) => void
 }
 
 const ACTIONABLE_STATUSES = new Set([
+  'awaiting_clarification',
   'awaiting_approval',
   'changes_requested',
   'blocked',
@@ -28,7 +31,7 @@ const ACTIONABLE_STATUSES = new Set([
   'completed',
 ])
 
-export function RunFollowUpCard({ runId, events, runStatus, busy, onRetry }: RunFollowUpCardProps) {
+export function RunFollowUpCard({ runId, events, runStatus, busy, onRetry, onOpenRunConversation }: RunFollowUpCardProps) {
   const setPendingRunId = useChatStore((s) => s.setPendingRunId)
   const setComposerPrefill = useChatStore((s) => s.setComposerPrefill)
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([])
@@ -57,6 +60,19 @@ export function RunFollowUpCard({ runId, events, runStatus, busy, onRetry }: Run
   )
 
   const topSuggestions = useMemo(() => (review?.suggestions || []).slice(0, 3), [review])
+  const needsBrowserClient = useMemo(
+    () => events.some((event) => String(event.type || '') === 'browser_client_required'),
+    [events],
+  )
+
+  const continueVisual = useCallback(async () => {
+    try {
+      useUIStore.getState().setActiveCenterView('browser')
+      await api.runs.continueVisual(runId)
+    } catch (error) {
+      showError(error)
+    }
+  }, [runId])
 
   const discussInChat = useCallback((text: string) => {
     const prompt = `Please address run ${runId}:\n\n${text}`
@@ -108,6 +124,20 @@ export function RunFollowUpCard({ runId, events, runStatus, busy, onRetry }: Run
       )}
 
       <div className="flex flex-wrap gap-2">
+        {status === 'blocked' && needsBrowserClient && (
+          <>
+            <Button variant="secondary" className="text-xs" disabled={busy} onClick={() => void continueVisual()}>
+              Continue visual verification
+            </Button>
+            <Button
+              variant="ghost"
+              className="text-xs"
+              onClick={() => useUIStore.getState().setActiveCenterView('browser')}
+            >
+              Open browser
+            </Button>
+          </>
+        )}
         {topSuggestions[0] && (
           <Button
             variant="secondary"
@@ -129,6 +159,23 @@ export function RunFollowUpCard({ runId, events, runStatus, busy, onRetry }: Run
 
       {!isRetryableStatus(status) && status === 'awaiting_approval' && (
         <p className="text-[11px] text-[var(--text-secondary)]">Approve or reject from the run card above.</p>
+      )}
+      {status === 'awaiting_clarification' && (
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-[11px] text-[var(--text-secondary)]">
+            Answer in chat below or open the run conversation drawer.
+          </p>
+          {onOpenRunConversation && (
+            <Button
+              variant="secondary"
+              className="text-xs h-7"
+              disabled={busy}
+              onClick={() => onOpenRunConversation(runId)}
+            >
+              Open run conversation
+            </Button>
+          )}
+        </div>
       )}
     </div>
   )

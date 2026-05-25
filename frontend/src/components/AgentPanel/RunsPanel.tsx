@@ -1,22 +1,51 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '@/api/client'
 import { useRunDetail } from '@/hooks/useRunDetail'
-import { useProjectStore, useRunStore } from '@/store'
+import { useProjectStore, useRunStore, useUIStore } from '@/store'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { showError } from '@/lib/toast'
-import { Button, EmptyState, Skeleton } from '@/components/ui/primitives'
-import type { RunSummary } from '@/types/runs'
-import { RunHistoryList } from './RunHistoryList'
+import { EmptyState, Skeleton } from '@/components/ui/primitives'
+import {
+  formatRunRelativeTime,
+  hasRecoveryMetadata,
+  runDisplayLabel,
+  runStatusBadgeClass,
+  runStatusLabel,
+  type RunSummary,
+} from '@/types/runs'
 import { RunDetailDrawer } from './RunDetailDrawer'
+
+type StatusFilter = 'all' | 'running' | 'done' | 'failed'
+
+function matchesFilter(status: string, filter: StatusFilter): boolean {
+  if (filter === 'all') return true
+  if (filter === 'running') {
+    return ['pending', 'running', 'awaiting_clarification', 'awaiting_approval'].includes(status)
+  }
+  if (filter === 'done') return status === 'completed'
+  if (filter === 'failed') {
+    return ['failed', 'blocked', 'changes_requested', 'cancelled'].includes(status)
+  }
+  return true
+}
+
+const FILTER_OPTIONS: { id: StatusFilter; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'running', label: 'Running' },
+  { id: 'done', label: 'Done' },
+  { id: 'failed', label: 'Failed' },
+]
 
 export function RunsPanel() {
   const projectId = useProjectStore((s) => s.currentProjectId)
-  const { currentRunId, runs, setRuns } = useRunStore()
+  const { currentRunId, runs, setRuns, setCurrentRun } = useRunStore()
   const { hydrateRun } = useRunDetail()
   const [loadingRuns, setLoadingRuns] = useState(false)
-  const [drawerOpen, setDrawerOpen] = useState(false)
-  const [drawerRunId, setDrawerRunId] = useState<string | null>(null)
-  const [drawerMode, setDrawerMode] = useState<'detail' | 'list'>('detail')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
+  const runDrawerRequest = useUIStore((s) => s.runDrawerRequest)
+  const clearRunDrawerRequest = useUIStore((s) => s.clearRunDrawerRequest)
+  const rightPanelTab = useUIStore((s) => s.rightPanelTab)
 
   const runSummaries: RunSummary[] = useMemo(() => runs.map((r) => ({
     id: String(r.id),
@@ -31,11 +60,15 @@ export function RunsPanel() {
     created_at: String(r.created_at || ''),
   })), [runs])
 
-  const currentRun = runSummaries.find((run) => run.id === currentRunId) || runSummaries[0] || null
+  const filteredRuns = useMemo(
+    () => runSummaries.filter((run) => matchesFilter(run.status, statusFilter)),
+    [runSummaries, statusFilter],
+  )
 
   const loadRuns = useCallback(async () => {
     if (!projectId) {
       setRuns([])
+      setSelectedRunId(null)
       return
     }
     setLoadingRuns(true)
@@ -51,6 +84,21 @@ export function RunsPanel() {
 
   useEffect(() => { void loadRuns() }, [loadRuns])
 
+  useEffect(() => {
+    if (!selectedRunId && filteredRuns.length > 0) {
+      const preferred = currentRunId && filteredRuns.some((r) => r.id === currentRunId)
+        ? currentRunId
+        : filteredRuns[0].id
+      setSelectedRunId(preferred)
+    }
+  }, [currentRunId, filteredRuns, selectedRunId])
+
+  useEffect(() => {
+    if (selectedRunId && !filteredRuns.some((r) => r.id === selectedRunId)) {
+      setSelectedRunId(filteredRuns[0]?.id ?? null)
+    }
+  }, [filteredRuns, selectedRunId])
+
   useWebSocket('/api/ws/events', useCallback((data: unknown) => {
     const ev = data as Record<string, unknown>
     const type = String(ev.type || '')
@@ -61,69 +109,91 @@ export function RunsPanel() {
   }, [loadRuns, projectId]), Boolean(projectId))
 
   const selectRun = useCallback(async (runId: string) => {
+    setSelectedRunId(runId)
+    setCurrentRun(runId)
     await hydrateRun(runId, true)
-  }, [hydrateRun])
+  }, [hydrateRun, setCurrentRun])
 
-  const openDrawer = (runId: string, mode: 'detail' | 'list' = 'detail') => {
-    setDrawerRunId(runId)
-    setDrawerMode(mode)
-    setDrawerOpen(true)
-  }
+  useEffect(() => {
+    if (!runDrawerRequest || rightPanelTab !== 'runs') return
+    void selectRun(runDrawerRequest.runId)
+    clearRunDrawerRequest()
+  }, [runDrawerRequest, rightPanelTab, clearRunDrawerRequest, selectRun])
 
   if (!projectId) {
     return <EmptyState title="No project" description="Select a project to inspect run history" />
   }
 
   return (
-    <div className="h-full flex flex-col p-3 overflow-hidden">
-      <div className="rounded border border-[var(--border)] px-3 py-2 shrink-0">
-        <p className="text-xs text-[var(--text-secondary)] mb-1 uppercase tracking-wide">Current run</p>
-        {currentRun ? (
-          <div className="space-y-2">
-            <div>
-              <p className="text-sm font-medium truncate">{currentRun.display_name || currentRun.id}</p>
-              <p className="text-xs text-[var(--text-secondary)]">
-                {currentRun.status}
-                {currentRun.current_stage ? ` · ${currentRun.current_stage}` : ''}
-                {currentRun.failure_class ? ` · ${currentRun.failure_class}` : ''}
-              </p>
-            </div>
-            <Button variant="ghost" className="text-xs h-7 px-2" onClick={() => openDrawer(currentRun.id)}>
-              Open run details
-            </Button>
-          </div>
-        ) : (
-          <p className="text-xs text-[var(--text-secondary)]">No runs yet.</p>
-        )}
+    <div className="h-full flex min-h-0 overflow-hidden">
+      <div className="w-[40%] min-w-0 flex flex-col border-r border-[var(--border)] p-2">
+        <div className="flex flex-wrap gap-1 shrink-0 mb-2">
+          {FILTER_OPTIONS.map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              className={`text-[10px] px-2 py-1 rounded-full border transition-colors ${
+                statusFilter === opt.id
+                  ? 'border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]'
+                  : 'border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              }`}
+              onClick={() => setStatusFilter(opt.id)}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex-1 min-h-0 overflow-auto space-y-1">
+          {loadingRuns ? (
+            <Skeleton className="h-16 w-full" />
+          ) : filteredRuns.length === 0 ? (
+            <p className="text-xs text-[var(--text-secondary)] p-2">No runs match this filter.</p>
+          ) : (
+            filteredRuns.map((run) => {
+              const selected = selectedRunId === run.id
+              return (
+                <button
+                  key={run.id}
+                  type="button"
+                  className={`w-full text-left px-2 py-2 rounded border text-xs transition-colors ${
+                    selected
+                      ? 'border-[var(--accent)] bg-[var(--accent)]/10'
+                      : 'border-transparent hover:bg-[var(--bg-tertiary)]'
+                  }`}
+                  onClick={() => void selectRun(run.id)}
+                >
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={`px-1.5 py-0.5 rounded uppercase text-[10px] ${runStatusBadgeClass(run.status)}`}>
+                      {runStatusLabel(run.status)}
+                    </span>
+                    {hasRecoveryMetadata(run) && (
+                      <span className="text-[10px] text-[var(--text-secondary)] shrink-0">(R)</span>
+                    )}
+                    <span className="flex-1 min-w-0 truncate font-medium">{runDisplayLabel(run)}</span>
+                  </div>
+                  <div className="mt-0.5 text-[10px] text-[var(--text-secondary)] flex gap-2">
+                    <span>{formatRunRelativeTime(run.created_at)}</span>
+                    {run.current_stage && <span className="truncate">{run.current_stage}</span>}
+                  </div>
+                </button>
+              )
+            })
+          )}
+        </div>
       </div>
 
-      <div className="border-t border-[var(--border)] pt-2 mt-3 shrink-0">
-        <p className="text-xs text-[var(--text-secondary)] mb-1">Run History</p>
-        {loadingRuns ? (
-          <Skeleton className="h-20 w-full" />
-        ) : (
-          <RunHistoryList
-            runs={runSummaries}
-            currentRunId={currentRunId}
-            onSelect={(id) => void selectRun(id)}
-            onOpenDetails={(id) => openDrawer(id)}
-            onViewAll={() => openDrawer(runSummaries[0]?.id || currentRunId || '', 'list')}
-          />
-        )}
+      <div className="w-[60%] min-w-0 flex flex-col">
+        <RunDetailDrawer
+          open={!!selectedRunId}
+          runId={selectedRunId}
+          runs={runSummaries}
+          displayMode="inline"
+          initialTab="pipeline"
+          onClose={() => setSelectedRunId(null)}
+          onRunChange={(id) => void selectRun(id)}
+        />
       </div>
-
-      <RunDetailDrawer
-        open={drawerOpen}
-        runId={drawerRunId}
-        runs={runSummaries}
-        mode={drawerMode}
-        onClose={() => setDrawerOpen(false)}
-        onRunChange={(id) => {
-          setDrawerRunId(id)
-          setDrawerMode('detail')
-          void selectRun(id)
-        }}
-      />
     </div>
   )
 }

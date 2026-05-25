@@ -4,8 +4,12 @@ import { api } from '@/api/client'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { ActivityBar } from '@/components/ActivityBar/ActivityBar'
 import { EditorPanel } from '@/components/Editor/EditorPanel'
+import { AgentPanel } from '@/components/AgentPanel/AgentPanel'
+import { AgentPanelLayoutToggle } from '@/components/AgentPanel/AgentPanelLayoutToggle'
 import { RunsPanel } from '@/components/AgentPanel/RunsPanel'
 import { ChatPanel } from '@/components/Chat/ChatPanel'
+import { ChatWebSocketBridge } from '@/components/Chat/ChatWebSocketBridge'
+import { resetChatStreamRefs } from '@/lib/chatStreamRefs'
 import { GitPanel } from '@/components/GitPanel/GitPanel'
 import { TerminalPanel } from '@/components/Terminal/TerminalPanel'
 import { LogViewer } from '@/components/LogViewer/LogViewer'
@@ -17,14 +21,73 @@ import { useAppStore, useChatStore, useEditorStore, useProjectStore, useRunStore
 import { Button, EmptyState } from '@/components/ui/primitives'
 import { dispatchBrowserRefresh } from '@/lib/browserRefresh'
 import { showError } from '@/lib/toast'
-import { getContribution } from '@/workbench/registry'
+import { isRightPanelTabMounted, rightPanelPanelClass, type RightPanelTab } from '@/lib/rightPanelLayout'
+import { getContribution, getContributions } from '@/workbench/registry'
+import { useBrowserAgentDriver } from '@/hooks/useBrowserAgentDriver'
 
 function SidebarContent() {
   const panel = useUIStore((s) => s.activePanel)
-  const contrib = getContribution('sidebar', panel)
+  const agentPanelPlacement = useUIStore((s) => s.agentPanelPlacement)
+  const effectivePanel = panel === 'agents' && agentPanelPlacement === 'right' ? 'explorer' : panel
+  const contrib = getContribution('sidebar', effectivePanel)
   if (!contrib) return null
   const Component = contrib.Component
   return <Component />
+}
+
+function CenterContent() {
+  const activeCenterView = useUIStore((s) => s.activeCenterView)
+  const panelWrap = (active: boolean) =>
+    active ? 'flex h-full min-h-0 flex-col flex-1' : 'hidden'
+
+  return (
+    <div className="relative h-full min-h-0 flex flex-col flex-1">
+      <div className={panelWrap(activeCenterView === 'editor')}>
+        <EditorPanel />
+      </div>
+      {getContributions('center').map((contrib) => {
+        const Component = contrib.Component
+        return (
+          <div
+            key={contrib.id}
+            className={panelWrap(activeCenterView === contrib.id)}
+            aria-hidden={activeCenterView !== contrib.id}
+          >
+            <Component />
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/** Keep panels mounted so chat WebSocket and in-flight streams survive tab switches. */
+function RightPanelContent({
+  tab,
+  tabs,
+}: {
+  tab: RightPanelTab
+  tabs: readonly RightPanelTab[]
+}) {
+  return (
+    <>
+      {isRightPanelTabMounted('chat', tabs) && (
+        <div className={rightPanelPanelClass(tab === 'chat')} aria-hidden={tab !== 'chat'}>
+          <ChatPanel />
+        </div>
+      )}
+      {isRightPanelTabMounted('agents', tabs) && (
+        <div className={rightPanelPanelClass(tab === 'agents')} aria-hidden={tab !== 'agents'}>
+          <AgentPanel />
+        </div>
+      )}
+      {isRightPanelTabMounted('runs', tabs) && (
+        <div className={rightPanelPanelClass(tab === 'runs')} aria-hidden={tab !== 'runs'}>
+          <RunsPanel />
+        </div>
+      )}
+    </>
+  )
 }
 
 function ResizeHandle({ onDrag }: { onDrag: (delta: number) => void }) {
@@ -50,11 +113,22 @@ export default function App() {
   const {
     sidebarWidth, sidebarCollapsed, rightPanelWidth, bottomPanelHeight,
     rightPanelCollapsed, bottomPanelCollapsed, bottomTab,
-    rightPanelTab, activeCenterView,
+    rightPanelTab, agentPanelPlacement,
     setSidebarWidth, setRightPanelWidth, setBottomPanelHeight,
     activePanel,
   } = useUIStore()
+
+  const rightPanelTabs = agentPanelPlacement === 'right'
+    ? (['chat', 'agents', 'runs'] as const)
+    : (['chat', 'runs'] as const)
+  const effectiveRightPanelTab =
+    rightPanelTab === 'agents' && agentPanelPlacement !== 'right'
+      ? 'chat'
+      : (rightPanelTabs as readonly string[]).includes(rightPanelTab)
+        ? rightPanelTab
+        : 'chat'
   const { projects, currentProjectId, setProjects, setCurrentProject } = useProjectStore()
+  useBrowserAgentDriver(currentProjectId)
   const { setSettings } = useSettingsStore()
   const {
     setBackendOnline,
@@ -68,8 +142,6 @@ export default function App() {
 
   const sidebarContrib = getContribution('sidebar', activePanel)
   const panelTitle = sidebarContrib?.title ?? 'Explorer'
-  const browserContrib = getContribution('center', 'browser')
-  const BrowserComponent = browserContrib?.Component
 
   useEffect(() => {
     let cancelled = false
@@ -141,7 +213,8 @@ export default function App() {
       setWsConnections(ev.connections)
     }
     const runId = String(ev.run_id || '')
-    if (type === 'awaiting_approval') setRunStatus('awaiting_approval', String(ev.stage || ''))
+    if (type === 'run_clarification_requested') setRunStatus('awaiting_clarification', String(ev.stage || ''))
+    else if (type === 'awaiting_approval') setRunStatus('awaiting_approval', String(ev.stage || ''))
     else if (type === 'run_blocked') setRunStatus('blocked', String(ev.stage || ''))
     else if (type === 'run_failed') setRunStatus('failed', String(ev.stage || ''))
     else if (type === 'run_completed') setRunStatus('completed', String(ev.stage || ''))
@@ -160,7 +233,9 @@ export default function App() {
       window.setTimeout(() => bumpTreeRefresh(), 3000)
     }
     if (type === 'run_completed' && useUIStore.getState().activeCenterView === 'browser') {
-      dispatchBrowserRefresh()
+      if (!useUIStore.getState().browserAgentMode) {
+        dispatchBrowserRefresh()
+      }
     }
   }, [addRunEvent, bumpTreeRefresh, currentRunId, setRunStatus, setWsConnections, spawnedRunIds, trackedRunEvents]), true)
 
@@ -186,6 +261,7 @@ export default function App() {
     useEditorStore.getState().clearWorkspace()
     useRunStore.getState().resetRunForProjectSwitch()
     useChatStore.getState().resetChatForProjectSwitch()
+    resetChatStreamRefs()
     useUIStore.getState().resetBrowserPickerForProjectSwitch()
     startTransition(() => {
       setCurrentProject(id)
@@ -196,6 +272,7 @@ export default function App() {
 
   return (
     <div className="h-full flex flex-col">
+      <ChatWebSocketBridge />
       <Toaster theme="dark" position="bottom-right" richColors />
       <OnboardingWizard />
       <SettingsPanel />
@@ -275,11 +352,7 @@ export default function App() {
 
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="flex-1 overflow-hidden">
-            {activeCenterView === 'browser' && BrowserComponent ? (
-              <BrowserComponent />
-            ) : (
-              <EditorPanel />
-            )}
+            <CenterContent />
           </div>
 
           {!bottomPanelCollapsed && (
@@ -329,21 +402,24 @@ export default function App() {
           <>
             <ResizeHandle onDrag={(d) => setRightPanelWidth(Math.max(200, rightPanelWidth - d))} />
             <div style={{ width: rightPanelWidth }} className="shrink-0 border-l border-[var(--border)] overflow-hidden flex flex-col">
-              <div className="flex border-b border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">
-                {(['chat', 'runs'] as const).map((tab) => (
-                  <button
-                    key={tab}
-                    className={`px-3 py-2 text-xs uppercase tracking-wide ${
-                      rightPanelTab === tab ? 'border-b border-[var(--accent)] text-white' : 'text-[var(--text-secondary)]'
-                    }`}
-                    onClick={() => useUIStore.getState().setRightPanelTab(tab)}
-                  >
-                    {tab}
-                  </button>
-                ))}
+              <div className="flex items-center border-b border-[var(--border)] bg-[var(--bg-secondary)] shrink-0">
+                <div className="flex flex-1 min-w-0">
+                  {rightPanelTabs.map((tab) => (
+                    <button
+                      key={tab}
+                      className={`px-3 py-2 text-xs uppercase tracking-wide shrink-0 ${
+                        effectiveRightPanelTab === tab ? 'border-b border-[var(--accent)] text-white' : 'text-[var(--text-secondary)]'
+                      }`}
+                      onClick={() => useUIStore.getState().setRightPanelTab(tab)}
+                    >
+                      {tab}
+                    </button>
+                  ))}
+                </div>
+                <AgentPanelLayoutToggle compact />
               </div>
               <div className="flex-1 overflow-hidden">
-                {rightPanelTab === 'chat' ? <ChatPanel /> : <RunsPanel />}
+                <RightPanelContent tab={effectiveRightPanelTab} tabs={rightPanelTabs} />
               </div>
             </div>
           </>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { X } from 'lucide-react'
-import type { ChatMode, PageElementSelection, TreeItem } from '@/store'
+import { Square, X } from 'lucide-react'
+import { useUIStore, type ChatMode, type PageElementSelection, type TreeItem } from '@/store'
 import { Button } from '@/components/ui/primitives'
 import { showError } from '@/lib/toast'
 import { ModeSelector } from './ModeSelector'
@@ -20,13 +20,16 @@ interface ChatComposerProps {
   treeItems: TreeItem[]
   disabled?: boolean
   submitting?: boolean
+  busy?: boolean
+  stopping?: boolean
+  onStop?: () => void
   pendingRunId?: string | null
+  linkedRunStatus?: string | null
   pageElement?: PageElementSelection | null
   onClearPageElement?: () => void
   onChange: (value: string) => void
   onModeChange: (mode: ChatMode) => void
   onCommand: (command: ComposerCommand) => void | Promise<void>
-  onSendAndRetry?: (content: string, runId: string) => void | Promise<void>
 }
 
 export function ChatComposer({
@@ -35,13 +38,16 @@ export function ChatComposer({
   treeItems,
   disabled,
   submitting,
+  busy,
+  stopping,
+  onStop,
   pendingRunId,
+  linkedRunStatus,
   pageElement,
   onClearPageElement,
   onChange,
   onModeChange,
   onCommand,
-  onSendAndRetry,
 }: ChatComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [mentionQuery, setMentionQuery] = useState('')
@@ -72,7 +78,7 @@ export function ChatComposer({
 
   const executeCommand = async () => {
     const trimmed = value.trim()
-    if (!trimmed || disabled) return
+    if (!trimmed || disabled || busy) return
 
     if (!trimmed.startsWith('/')) {
       await onCommand({ type: 'send', content: trimmed })
@@ -175,7 +181,7 @@ export function ChatComposer({
           onChange={(event) => onChange(event.target.value)}
           disabled={disabled}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
+            if (event.key === 'Enter' && !event.shiftKey && !busy) {
               event.preventDefault()
               void executeCommand()
             }
@@ -203,30 +209,39 @@ export function ChatComposer({
         )}
       </div>
 
-      {pendingRunId && (
+      {pendingRunId && linkedRunStatus === 'awaiting_clarification' && (
         <p className="text-[11px] text-[var(--warning)]">
-          Linked to run {pendingRunId.slice(0, 8)}… — send a message or retry the pipeline with your note.
+          {`Awaiting your input on Run #${pendingRunId.slice(0, 8)} — `}
+          <button
+            type="button"
+            className="text-[var(--accent)] hover:underline"
+            onClick={() => {
+              useUIStore.getState().setRightPanelTab('agents')
+              useUIStore.getState().requestOpenRunDrawer(pendingRunId, 'conversation')
+            }}
+          >
+            Open in Agents
+          </button>
         </p>
       )}
 
       <div className="flex justify-end gap-2">
-        {pendingRunId && onSendAndRetry && (
+        {busy && onStop ? (
           <Button
-            variant="secondary"
-            onClick={() => {
-              const trimmed = value.trim()
-              if (!trimmed || disabled) return
-              void onSendAndRetry(trimmed, pendingRunId)
-            }}
-            loading={submitting}
-            disabled={disabled || !value.trim()}
+            variant="danger"
+            onClick={() => onStop()}
+            loading={stopping}
+            disabled={stopping}
+            title="Stop the agent (cancel in-flight tools and generation)"
           >
-            Send and retry
+            <Square className="h-3.5 w-3.5 mr-1.5 fill-current" />
+            Stop
+          </Button>
+        ) : (
+          <Button onClick={() => void executeCommand()} loading={submitting} disabled={disabled}>
+            Send
           </Button>
         )}
-        <Button onClick={() => void executeCommand()} loading={submitting} disabled={disabled}>
-          Send
-        </Button>
       </div>
     </div>
   )

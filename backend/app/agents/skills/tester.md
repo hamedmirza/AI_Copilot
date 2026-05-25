@@ -27,14 +27,14 @@ Own **dry-run** command execution and **visual verification planning** before de
 - Map each dry-run step to a plan acceptance criterion.
 - Orchestration **executes** `dry_run_steps` before profile/LLM validation commands; failures block the run.
 
-## Visual verification (plan only — not auto-executed)
+## Visual verification (IDE browser — orchestration executes)
 
-- Orchestration does **not** run browser preview or MCP checks automatically. Tester records a **manual verification plan**.
 - When frontend files changed or UI Designer ran, provide `visual_checks[]` **or** a non-empty `visual_checks_skip_reason`.
-- Use loopback dev-server URLs (`http://127.0.0.1:5177`, `http://127.0.0.1:8500`) aligned with `./scripts/server.sh`.
-- Each check: `url`, `description`, `expected` (observable outcome for operator/MCP follow-up).
-- Emit `visual_check_required` events for each check; operators or agents perform browser verification separately.
-- Never mark visual verification as passed in `summary` without evidence from a completed manual/MCP check.
+- Orchestration **executes** each check via the **IDE Browser panel** (project dev server URL — resolved from workspace `package.json`, **not** Copilot shell port 5177).
+- Each check: `url`, `description`, `expected` (observable text/outcome), optional `steps[]` (`click`, `type`, `wait`, `screenshot`).
+- PNG evidence is saved under `.ai-copilot/runs/{run_id}/evidence/` and stored in a `visual_evidence` artifact; failed capture blocks `awaiting_approval`.
+- If the IDE is closed or the project is not loaded, the run emits `browser_client_required` — operator uses **Continue visual verification** (not a full retry).
+- Never mark visual verification as passed in `summary` without orchestration `visual_evidence_passed` / artifact proof.
 
 ## Allowed executables
 
@@ -69,18 +69,18 @@ Own **dry-run** command execution and **visual verification planning** before de
 
 - Deferring dry-run to Supervisor or post-deploy stages.
 - Omitting both `visual_checks` and `visual_checks_skip_reason` when UI files changed.
-- Claiming automated browser verification when only a plan was recorded.
+- Claiming automated browser verification when only a plan was recorded (without `visual_evidence` artifact).
 - Marking `passed` true without addressing validation profile requirements.
 
 ## Integrity rules (mandatory)
 
 - `passed` is predictive only — orchestration exit codes are authoritative for command execution.
-- Visual checks are plans until manual/MCP evidence exists — do not fabricate pass results.
+- Visual checks are **executed by orchestration** via IDE browser — do not fabricate pass results in `summary`.
 - Propose only whitelisted, non-chained commands scoped to changed files.
 - Map each extra command to a specific acceptance criterion gap.
 
 ## Pipeline handoff
 
 - **Receives:** reviewer approval, changed files, UI spec, validation profile, acceptance criteria.
-- **Produces:** executed `dry_run_steps[]`, visual plan (`visual_checks[]` or skip reason), optional extra `commands[]`.
+- **Produces:** executed `dry_run_steps[]`, visual plan (`visual_checks[]` or skip reason) plus orchestration `visual_evidence`, optional extra `commands[]`.
 - **Satisfies downstream by:** confirming the workspace is safe to deploy; Supervisor runs only after promotion.

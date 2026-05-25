@@ -320,3 +320,68 @@ def test_pipeline_bridge_appends_run_completion_summary(client, tmp_path: Path):
     assert summaries
     assert "Pipeline run completed." in summaries[-1]["content"]
     assert "Last stage: tester." in summaries[-1]["content"]
+
+
+def test_chat_cancel_mid_stream(client, tmp_path: Path):
+    import threading
+
+    from app.providers.base import ChatStreamChunk
+    from app.providers.fake import FakeProvider
+    from app.providers.registry import ProviderRegistry
+    from app.services.chat_orchestrator import chat_orchestrator
+
+    stream_chunks = ["part", "ial", " stream"]
+    first_chunk_sent = threading.Event()
+
+    def slow_stream(self, messages, tools=None, max_tokens=None):
+        for index, piece in enumerate(stream_chunks):
+            if index > 0:
+                time.sleep(0.05)
+            yield ChatStreamChunk(delta=piece)
+            if index == 0:
+                first_chunk_sent.set()
+        yield ChatStreamChunk(done=True, finish_reason="stop")
+
+    registry = ProviderRegistry.get()
+    assert registry.fake_provider is not None
+    registry.fake_provider.invoke_chat_stream = slow_stream.__get__(
+        registry.fake_provider,
+        FakeProvider,
+    )
+
+    project_id = _create_project(client, tmp_path, "chat-cancel-project")
+    created = client.post(
+        "/api/chat/sessions",
+        json={"project_id": project_id, "title": "Cancel Chat", "mode": "general"},
+        headers=HEADERS,
+    )
+    assert created.status_code == 200
+    session_id = created.json()["id"]
+
+    posted = client.post(
+        f"/api/chat/sessions/{session_id}/messages",
+        json={"content": "Start streaming"},
+        headers=HEADERS,
+    )
+    assert posted.status_code == 200
+
+    assert first_chunk_sent.wait(timeout=2.0)
+
+    cancelled = client.post(f"/api/chat/sessions/{session_id}/cancel", headers=HEADERS)
+    assert cancelled.status_code == 200
+    assert cancelled.json()["ok"] is True
+    assert cancelled.json()["cancelled"] is True
+
+    chat_orchestrator.wait_for_idle(timeout=10.0)
+
+    history = client.get(f"/api/chat/sessions/{session_id}/messages", headers=HEADERS)
+    assert history.status_code == 200
+    assistant_messages = [item for item in history.json() if item["role"] == "assistant"]
+    assert assistant_messages
+    last_assistant = assistant_messages[-1]
+    assert last_assistant["metadata"].get("cancelled") is True
+    assert last_assistant["content"].startswith("part")
+
+    idle_cancel = client.post(f"/api/chat/sessions/{session_id}/cancel", headers=HEADERS)
+    assert idle_cancel.status_code == 200
+    assert idle_cancel.json()["cancelled"] is False

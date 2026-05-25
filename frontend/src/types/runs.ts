@@ -3,6 +3,7 @@ import { parseApiDateTime } from '@/lib/datetime'
 export type RunStatus =
   | 'pending'
   | 'running'
+  | 'awaiting_clarification'
   | 'awaiting_approval'
   | 'changes_requested'
   | 'blocked'
@@ -61,8 +62,31 @@ export interface RunDetail {
   approval_reached?: boolean | null
   promote_rolled_back?: boolean | null
   primary_failure_class?: string | null
+  chat_session_id?: string | null
+  deliverable_kind?: string | null
+  expected_targets?: string[]
+  expected_validation_family?: string | null
+  readiness?: Record<string, unknown>
+  mismatch_classes?: string[]
+  approval_override?: boolean | null
+  clarification_question?: string | null
+  clarification_stage?: string | null
+  recommended_assumption?: string | null
   created_at: string
   updated_at: string
+}
+
+export interface RunThreadEntry {
+  id: number
+  run_id: string
+  session_id?: string | null
+  role: string
+  entry_type: string
+  stage?: string | null
+  severity?: string
+  message: string
+  payload?: Record<string, unknown>
+  created_at: string
 }
 
 export interface FailureSummaryRun {
@@ -258,6 +282,7 @@ const STATUS_COLORS: Record<string, string> = {
   running: 'bg-[var(--accent)]/20 text-[var(--accent)]',
   pending: 'bg-gray-500/20 text-gray-300',
   awaiting_approval: 'bg-[var(--warning)]/20 text-[var(--warning)]',
+  awaiting_clarification: 'bg-[var(--warning)]/20 text-[var(--warning)]',
   changes_requested: 'bg-[var(--warning)]/20 text-[var(--warning)]',
   blocked: 'bg-[var(--error)]/20 text-[var(--error)]',
   failed: 'bg-[var(--error)]/20 text-[var(--error)]',

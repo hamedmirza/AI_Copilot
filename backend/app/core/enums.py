@@ -11,6 +11,7 @@ class ProviderStatus(StrEnum):
 class RunStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
+    AWAITING_CLARIFICATION = "awaiting_clarification"
     AWAITING_APPROVAL = "awaiting_approval"
     CHANGES_REQUESTED = "changes_requested"
     BLOCKED = "blocked"

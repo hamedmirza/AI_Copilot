@@ -11,8 +11,8 @@ Downstream agents reject with **fix instructions**; upstream agents read downstr
 | **UI Designer** | component spec (`layout_description`, `components[]`) | Reviewer checks frontend edits when UI work is present |
 | **Coder** | surgical patches (`line_changes` preferred) | Reviewer + structural guards + frontend `tsc` |
 | **Reviewer** | approve/reject with file + criterion citations | Must cite blueprint/criteria; no vague blocks |
-| **Tester** | `dry_run_steps[]` (executed), `visual_checks[]` or skip reason (plan only), extra `commands[]` | Dry-run + profile command exit codes win; visual plan required for UI |
-| **Supervisor** | post-deploy `plan_gaps[]` + `doc_updates[]` | **Post-deploy only** — runs in `approve_run_sync`, not `_pipeline` |
+| **Tester** | `dry_run_steps[]` (canonical frontend cmds), executed `visual_evidence`, extra `commands[]` | Dry-run + build pass; visual capture required for UI |
+| **Supervisor** | pre-deploy gate + post-deploy `plan_gaps[]` | Pre-deploy blocks approval; post-deploy runs in `approve_run_sync` |
 
 ## Collaboration rules
 
@@ -21,8 +21,9 @@ Downstream agents reject with **fix instructions**; upstream agents read downstr
 3. **UI Designer → Coder/Reviewer:** frontend TSX edits should align with UI spec when UI stage ran.
 4. **Coder → Reviewer:** reviewer receives before/after snapshots and diff; rejects with actionable fixes.
 5. **Reviewer → Coder retry:** coder applies reviewer/guard guidance exactly on retry — do not re-litigate scope.
-6. **Tester:** executes dry-run commands; records visual verification **plan** (not auto-browser); required command failures block the run.
-7. **Supervisor:** post-deploy only (after operator approve/promote) — reconciles plan vs promoted paths and writes doc updates.
+6. **Tester:** canonical frontend dry-run (`tsc.js` + `npm --prefix frontend run build`); captures `visual_evidence`; integration/contract gates must pass.
+7. **Pre-deploy supervisor:** compares plan vs workspace; blocks if `approved: false` or critical gaps.
+8. **Post-deploy supervisor:** after operator approve/promote — doc reconciliation only.
 
 ## Handoff quality bar
 

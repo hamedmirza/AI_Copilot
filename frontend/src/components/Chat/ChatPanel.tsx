@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Brain, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { api } from '@/api/client'
-import { useWebSocket } from '@/hooks/useWebSocket'
+import {
+  assistantMessageIdRef,
+  generationStoppedRef,
+} from '@/lib/chatStreamRefs'
+import {
+  ensureStreamingAssistant,
+  finalizeStreamingMessage,
+  refreshCurrentSessionSummary,
+} from '@/lib/chatStreaming'
 import { applyModelsResponse } from '@/lib/lmstudioModels'
 import {
   elementContextPayload,
@@ -9,6 +17,7 @@ import {
   inferValidationProfile,
 } from '@/lib/pageElementContext'
 import { showError, showSuccess } from '@/lib/toast'
+import { ConfirmModal } from '@/components/ui/ConfirmModal'
 import { Button, EmptyState } from '@/components/ui/primitives'
 import {
   useChatStore,
@@ -25,11 +34,9 @@ import { ChatHistory } from './ChatHistory'
 import { MessageList } from './MessageList'
 import { ModelSelector } from './ModelSelector'
 import {
-  buildAnswerTimingMetadata,
   formatRelativeChatTime,
   normalizeChatMode,
   normalizeModelSelectionMode,
-  toChatToolCall,
   toChatMessage,
   resolveEffectiveNothink,
   toChatSession,
@@ -113,12 +120,9 @@ export function ChatPanel() {
   const setModelSelectionMode = useChatStore((state) => state.setModelSelectionMode)
   const setSelectedModel = useChatStore((state) => state.setSelectedModel)
   const setPendingToolCalls = useChatStore((state) => state.setPendingToolCalls)
-  const upsertPendingToolCall = useChatStore((state) => state.upsertPendingToolCall)
-  const finishPendingToolCall = useChatStore((state) => state.finishPendingToolCall)
   const addSpawnedRunId = useChatStore((state) => state.addSpawnedRunId)
   const setSpawnedRunIds = useChatStore((state) => state.setSpawnedRunIds)
   const setStreamingContent = useChatStore((state) => state.setStreamingContent)
-  const appendStreamingContent = useChatStore((state) => state.appendStreamingContent)
   const clearStreamingContent = useChatStore((state) => state.clearStreamingContent)
   const setAssistantStatus = useChatStore((state) => state.setAssistantStatus)
   const addRunEvent = useChatStore((state) => state.addRunEvent)
@@ -130,13 +134,13 @@ export function ChatPanel() {
   const resetChatState = useChatStore((state) => state.resetChatState)
   const pageElementSelection = useUIStore((state) => state.pageElementSelection)
   const setPageElementSelection = useUIStore((state) => state.setPageElementSelection)
-
   const [loadingSessions, setLoadingSessions] = useState(false)
+  const [linkedRunStatus, setLinkedRunStatus] = useState<string | null>(null)
   const [loadingMessages, setLoadingMessages] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [deletingSession, setDeletingSession] = useState(false)
-  const [runActionBusy, setRunActionBusy] = useState(false)
   const [composerValue, setComposerValue] = useState('')
+  const [deleteConfirmSessionId, setDeleteConfirmSessionId] = useState<string | null>(null)
 
   useEffect(() => {
     if (composerPrefill) {
@@ -144,8 +148,35 @@ export function ChatPanel() {
       setComposerPrefill('')
     }
   }, [composerPrefill, setComposerPrefill])
+
+  useEffect(() => {
+    if (!pendingRunId) {
+      setLinkedRunStatus(null)
+      return
+    }
+    let cancelled = false
+    void api.runs.get(pendingRunId)
+      .then((run) => {
+        if (!cancelled) setLinkedRunStatus(String((run as { status?: string }).status || ''))
+      })
+      .catch(() => {
+        if (!cancelled) setLinkedRunStatus(null)
+      })
+    return () => { cancelled = true }
+  }, [pendingRunId])
+
   const [searchResults, setSearchResults] = useState<typeof sessions | null>(null)
-  const assistantMessageIdRef = useRef<string | null>(null)
+  const [stopping, setStopping] = useState(false)
+  const previousSessionIdRef = useRef<string | null>(null)
+
+  const agentWorking = useMemo(() => {
+    if (submitting || streaming) return true
+    if (assistantStatus) return true
+    if (pendingToolCalls.some((tool) => tool.status === 'pending')) return true
+    return messages.some((message) => message.role === 'assistant' && message.pending)
+  }, [assistantStatus, messages, pendingToolCalls, streaming, submitting])
+
+  const composerDisabled = agentWorking || loadingSessions
 
   const currentSession = useMemo(
     () => sessions.find((session) => session.id === currentSessionId) || null,
@@ -177,43 +208,6 @@ export function ChatPanel() {
       showError(error)
     }
   }, [currentSessionId, setModeLocally, upsertSession])
-
-  const finalizeStreamingMessage = useCallback((override?: Partial<ChatMessage>) => {
-    const assistantId = assistantMessageIdRef.current
-    const toolCalls = useChatStore.getState().pendingToolCalls
-    const content = useChatStore.getState().streamingContent
-    if (assistantId) {
-      updateMessage(assistantId, (message) => ({
-        ...message,
-        content: override?.content ?? content ?? message.content,
-        metadata: buildAnswerTimingMetadata(message.metadata, override?.metadata),
-        tool_calls: toolCalls.length > 0 ? toolCalls : message.tool_calls,
-        pending: false,
-        error: override?.error,
-      }))
-    }
-    setStreaming(false)
-    setPendingToolCalls([])
-    clearStreamingContent()
-    setAssistantStatus(null)
-    assistantMessageIdRef.current = null
-  }, [clearStreamingContent, setAssistantStatus, setPendingToolCalls, setStreaming, updateMessage])
-
-  const ensureStreamingAssistant = useCallback(() => {
-    if (assistantMessageIdRef.current) return assistantMessageIdRef.current
-    const messageId = `assistant-${crypto.randomUUID()}`
-    const answerStartedAt = new Date().toISOString()
-    assistantMessageIdRef.current = messageId
-    appendMessage({
-      id: messageId,
-      role: 'assistant',
-      content: '',
-      pending: true,
-      session_id: currentSessionId || undefined,
-      metadata: { answer_started_at: answerStartedAt },
-    })
-    return messageId
-  }, [appendMessage, currentSessionId])
 
   const createSession = useCallback(async (
     mode: ChatMode = activeMode,
@@ -301,17 +295,6 @@ export function ChatPanel() {
     setSessions,
   ])
 
-  const refreshCurrentSessionSummary = useCallback(async (sessionId?: string | null) => {
-    const targetSessionId = sessionId ?? useChatStore.getState().currentSessionId
-    if (!targetSessionId) return
-    try {
-      const updated = await api.chat.sessions.get(targetSessionId)
-      upsertSession(toChatSession(updated))
-    } catch {
-      // Keep the current chat usable even if a background summary refresh fails.
-    }
-  }, [upsertSession])
-
   const loadMessages = useCallback(async (sessionId: string) => {
     setLoadingMessages(true)
     try {
@@ -381,6 +364,17 @@ export function ChatPanel() {
       window.clearTimeout(timeoutId)
     }
   }, [historySearchQuery, projectId, sessions, setSearchResults])
+
+  useEffect(() => {
+    const prevId = previousSessionIdRef.current
+    if (prevId && prevId !== currentSessionId) {
+      const state = useChatStore.getState()
+      if (state.streaming || submitting) {
+        void api.chat.sessions.cancel(prevId).catch(() => {})
+      }
+    }
+    previousSessionIdRef.current = currentSessionId
+  }, [currentSessionId, submitting])
 
   useEffect(() => {
     if (!currentSessionId) return
@@ -502,6 +496,7 @@ export function ChatPanel() {
 
     appendMessage(userMessage)
     setComposerValue('')
+    generationStoppedRef.current = false
     setSubmitting(true)
     setPendingToolCalls([])
     setStreaming(true)
@@ -571,8 +566,6 @@ export function ChatPanel() {
     clearRunEvents,
     createSession,
     currentSessionId,
-    ensureStreamingAssistant,
-    finalizeStreamingMessage,
     modelSelectionMode,
     projectId,
     selectedModel,
@@ -587,6 +580,25 @@ export function ChatPanel() {
     upsertSession,
     updateMessage,
   ])
+
+  const handleStop = useCallback(async () => {
+    if (!currentSessionId) return
+    generationStoppedRef.current = true
+    setStopping(true)
+    try {
+      const result = await api.chat.sessions.cancel(currentSessionId)
+      if (!result.cancelled) {
+        finalizeStreamingMessage()
+        generationStoppedRef.current = false
+      }
+    } catch (error) {
+      finalizeStreamingMessage()
+      generationStoppedRef.current = false
+      showError(error)
+    } finally {
+      setStopping(false)
+    }
+  }, [currentSessionId])
 
   const handleCommand = useCallback(async (command: ComposerCommand) => {
     if (command.type === 'send') {
@@ -702,205 +714,18 @@ export function ChatPanel() {
     treeItems,
   ])
 
-  const onChatEvent = useCallback((payload: unknown) => {
-    const envelope = payload as Record<string, unknown>
-    const type = String(envelope.type || '')
-    const event = (((envelope.payload as Record<string, unknown> | undefined) || envelope)) as Record<string, unknown>
-
-    if (type === 'info') {
-      const status = String(event.message || event.status || '').trim()
-      if (status) {
-        setAssistantStatus(status)
-      }
-      return
-    }
-
-    if (type === 'meta') {
-      const provider = String(event.provider || '').trim()
-      const model = String(event.model || '').trim()
-      const mode = String(event.mode || '').trim()
-      const assistantId = ensureStreamingAssistant()
-      updateMessage(assistantId, (message) => ({
-        ...message,
-        metadata: {
-          ...(message.metadata || {}),
-          provider: provider || message.metadata?.provider,
-          model: model || message.metadata?.model,
-          mode: mode || message.metadata?.mode,
-        },
-      }))
-      return
-    }
-
-    if (type === 'status') {
-      const status = String(event.message || event.status || event.label || '').trim()
-      if (status) {
-        setAssistantStatus(status)
-      }
-      return
-    }
-
-    if (type === 'token') {
-      if (event.reset) {
-        clearStreamingContent()
-      }
-      const chunk = String(event.token || event.delta || event.text || event.content || '')
-      const assistantId = ensureStreamingAssistant()
-      setStreaming(true)
-      setAssistantStatus(null)
-      appendStreamingContent(chunk)
-      updateMessage(assistantId, (message) => ({
-        ...message,
-        content: `${message.content}${chunk}`,
-      }))
-      return
-    }
-
-    if (type === 'tool_start') {
-      setAssistantStatus('Running tools…')
-      upsertPendingToolCall(toChatToolCall({
-        id: event.tool_call_id ?? event.call_id ?? event.id,
-        name: event.name ?? event.tool_name ?? event.tool,
-        args: event.args ?? event.arguments ?? event.input ?? {},
-        status: 'pending',
-        started_at: new Date().toISOString(),
-      }))
-      return
-    }
-
-    if (type === 'tool_end') {
-      const toolId = String(event.tool_call_id || event.call_id || event.id || '')
-      if (!toolId) return
-      const toolError = event.error
-        ? String(event.error)
-        : event.ok === false
-          ? String(event.result ?? event.output ?? 'Tool failed')
-          : undefined
-      finishPendingToolCall(toolId, {
-        status: toolError ? 'error' : 'completed',
-        result: event.result ?? event.output,
-        error: toolError,
-        completedAt: new Date().toISOString(),
-      })
-      return
-    }
-
-    if (type === 'run_spawned') {
-      const runId = String(event.run_id || '')
-      if (!runId) return
-      addSpawnedRunId(runId)
-      clearRunEvents(runId)
-      const alreadyRendered = useChatStore.getState().messages.some((message) => (
-        message.metadata?.type === 'run_spawned' && String(message.metadata?.run_id || '') === runId
-      ))
-      if (alreadyRendered) return
-      if (event.message && typeof event.message === 'object') {
-        appendMessage(toChatMessage(event.message as Record<string, unknown>))
-        return
-      }
-      appendMessage({
-        id: `assistant-run-${runId}`,
-        role: 'assistant',
-        content: String(event.message_text || event.message || 'Spawned pipeline task'),
-        metadata: {
-          type: 'run_spawned',
-          run_id: runId,
-          task_id: event.task_id,
-          display_name: event.display_name ? String(event.display_name) : undefined,
-        },
-        created_at: new Date().toISOString(),
-      })
-      return
-    }
-
-    if (type === 'run_event') {
-      const nested = event.event && typeof event.event === 'object'
-        ? event.event as Record<string, unknown>
-        : event
-      const runId = String(event.run_id || nested.run_id || '')
-      if (!runId) return
-      addSpawnedRunId(runId)
-      if (event.message && typeof event.message === 'object') {
-        const summary = toChatMessage(event.message as Record<string, unknown>)
-        const existing = useChatStore.getState().messages.some((message) => message.id === summary.id)
-        if (!existing) {
-          appendMessage(summary)
-        }
-      }
-      addRunEvent(runId, {
-        ...nested,
-        run_id: runId,
-        type: String(nested.type || nested.event_type || ''),
-        stage: nested.stage ? String(nested.stage) : null,
-        severity: nested.severity ? String(nested.severity) : undefined,
-        message: nested.message ? String(nested.message) : '',
-      })
-      return
-    }
-
-    if (type === 'run_summary') {
-      if (event.message && typeof event.message === 'object') {
-        const summary = toChatMessage(event.message as Record<string, unknown>)
-        const existing = useChatStore.getState().messages.some((message) => message.id === summary.id)
-        if (!existing) {
-          appendMessage(summary)
-        }
-      }
-      void refreshCurrentSessionSummary()
-      return
-    }
-
-    if (type === 'error') {
-      const message = String(event.message || 'Chat stream failed')
-      finalizeStreamingMessage({ content: message, error: message })
-      return
-    }
-
-    if (type === 'done') {
-      if (event.message && typeof event.message === 'object' && assistantMessageIdRef.current) {
-        const parsed = toChatMessage(event.message as Record<string, unknown>)
-        updateMessage(assistantMessageIdRef.current, (message) => ({
-          ...parsed,
-          id: assistantMessageIdRef.current || parsed.id,
-          pending: false,
-          metadata: buildAnswerTimingMetadata(message.metadata, parsed.metadata),
-        }))
-        finalizeStreamingMessage(parsed)
-        void refreshCurrentSessionSummary()
-        return
-      }
-      finalizeStreamingMessage()
-      void refreshCurrentSessionSummary()
-    }
-  }, [
-    addRunEvent,
-    addSpawnedRunId,
-    appendMessage,
-    appendStreamingContent,
-    clearRunEvents,
-    clearStreamingContent,
-    ensureStreamingAssistant,
-    finalizeStreamingMessage,
-    finishPendingToolCall,
-    setAssistantStatus,
-    setStreaming,
-    updateMessage,
-    upsertPendingToolCall,
-    refreshCurrentSessionSummary,
-  ])
-
-  useWebSocket(
-    currentSessionId ? `/api/ws/chat/${currentSessionId}` : '',
-    onChatEvent,
-    !!currentSessionId
-  )
-
   const handleSelectSession = useCallback((sessionId: string) => {
     setCurrentSessionId(sessionId)
   }, [setCurrentSessionId])
 
-  const handleDeleteSession = useCallback(async (sessionId: string) => {
-    if (!confirm('Delete this chat session?')) return
+  const handleDeleteSession = useCallback((sessionId: string) => {
+    setDeleteConfirmSessionId(sessionId)
+  }, [])
+
+  const confirmDeleteSession = useCallback(async () => {
+    const sessionId = deleteConfirmSessionId
+    if (!sessionId) return
+    setDeleteConfirmSessionId(null)
     setDeletingSession(true)
     try {
       await api.chat.sessions.delete(sessionId)
@@ -916,85 +741,7 @@ export function ChatPanel() {
     } finally {
       setDeletingSession(false)
     }
-  }, [activeMode, createSession, removeSession, setCurrentSessionId])
-
-  const handleApproveRun = useCallback(async (runId: string) => {
-    setRunActionBusy(true)
-    try {
-      addRunEvent(runId, {
-        type: 'approval_started',
-        severity: 'info',
-        message: 'Approval submitted',
-        run_id: runId,
-      })
-      await api.runs.approve(runId)
-      addRunEvent(runId, {
-        type: 'run_completed',
-        severity: 'info',
-        message: 'Run approved and promoted',
-        run_id: runId,
-      })
-      showSuccess('Run approved')
-    } catch (error) {
-      showError(error)
-    } finally {
-      setRunActionBusy(false)
-    }
-  }, [addRunEvent])
-
-  const handleRejectRun = useCallback(async (runId: string) => {
-    const reason = prompt('Reason for rejection?')
-    if (!reason) return
-    setRunActionBusy(true)
-    try {
-      await api.runs.reject(runId, reason)
-      showSuccess('Run rejected')
-    } catch (error) {
-      showError(error)
-    } finally {
-      setRunActionBusy(false)
-    }
-  }, [])
-
-  const handleRetryRun = useCallback(async (runId: string, feedback?: string) => {
-    setRunActionBusy(true)
-    try {
-      await api.runs.retry(runId, feedback ? { feedback } : undefined)
-      showSuccess('Run retried')
-    } catch (error) {
-      showError(error)
-    } finally {
-      setRunActionBusy(false)
-    }
-  }, [])
-
-  const handleSendAndRetry = useCallback(async (content: string, runId: string) => {
-    if (!currentSessionId) return
-    setSubmitting(true)
-    try {
-      const userMessage = await api.chat.messages.send(currentSessionId, {
-        content,
-        mode: activeMode,
-        model_override: modelSelectionMode === 'manual' ? selectedModel : undefined,
-      }) as Record<string, unknown>
-      appendMessage(toChatMessage(userMessage))
-      setComposerValue('')
-      await api.runs.retry(runId, { feedback: content })
-      setPendingRunId(null)
-      showSuccess('Message sent and pipeline retry started')
-    } catch (error) {
-      showError(error)
-    } finally {
-      setSubmitting(false)
-    }
-  }, [
-    activeMode,
-    appendMessage,
-    currentSessionId,
-    modelSelectionMode,
-    selectedModel,
-    setPendingRunId,
-  ])
+  }, [activeMode, createSession, deleteConfirmSessionId, removeSession, setCurrentSessionId])
 
   useEffect(() => {
     if (!spawnedRunIds.length) return
@@ -1049,7 +796,7 @@ export function ChatPanel() {
             models={availableModels}
             catalog={modelCatalog}
             resourcesPressure={lmstudioResources?.pressure ?? null}
-            disabled={loadingSessions || submitting}
+            disabled={composerDisabled}
             onSelectionModeChange={(mode) => void handleModelSelectionModeChange(mode)}
             onModelChange={(model) => void handleManualModelChange(model)}
           />
@@ -1059,7 +806,7 @@ export function ChatPanel() {
               title={effectiveNothink ? 'Thinking: off (fast)' : 'Thinking: on'}
               aria-label={effectiveNothink ? 'Thinking off' : 'Thinking on'}
               aria-pressed={!effectiveNothink}
-              disabled={loadingSessions || submitting}
+              disabled={composerDisabled}
               onClick={() => void handleNothinkToggle()}
               className={`shrink-0 rounded border px-2 py-1.5 transition-colors ${
                 effectiveNothink
@@ -1106,28 +853,37 @@ export function ChatPanel() {
             thinkingLabel={assistantStatus || (streaming ? 'Thinking…' : null)}
             pendingToolCalls={pendingToolCalls}
             runEventsById={runEventsById}
-            runActionBusy={runActionBusy}
-            onApproveRun={handleApproveRun}
-            onRejectRun={handleRejectRun}
-            onRetryRun={handleRetryRun}
           />
 
           <ChatComposer
             value={composerValue}
             mode={activeMode}
             treeItems={treeItems}
-            disabled={submitting || loadingSessions}
+            disabled={composerDisabled}
             submitting={submitting}
+            busy={agentWorking}
+            stopping={stopping}
+            onStop={() => void handleStop()}
             pendingRunId={pendingRunId}
+            linkedRunStatus={linkedRunStatus}
             pageElement={pageElementSelection}
             onClearPageElement={() => setPageElementSelection(null)}
             onChange={setComposerValue}
             onModeChange={(mode) => void persistModeChange(mode)}
             onCommand={handleCommand}
-            onSendAndRetry={handleSendAndRetry}
           />
         </div>
       </div>
+
+      <ConfirmModal
+        open={deleteConfirmSessionId != null}
+        title="Delete chat session?"
+        description="This permanently removes the conversation history for this session."
+        confirmLabel="Delete"
+        variant="destructive"
+        onConfirm={() => void confirmDeleteSession()}
+        onCancel={() => setDeleteConfirmSessionId(null)}
+      />
     </div>
   )
 }

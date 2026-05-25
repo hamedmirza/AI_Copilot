@@ -17,6 +17,10 @@ Produce surgical file patches that satisfy the plan and architect blueprint with
 4. Set `requires_operator_approval` true for risky ops (migrations, auth, deletes, broad refactors).
 5. Summarize what changed and why in `summary`.
 
+## UI integration
+
+When adding `frontend/src/pages/` or `frontend/src/routes/`, wire the surface into `frontend/src/workbench/builtins.tsx` (preferred) or `App.tsx` — orphan pages fail the integration guard.
+
 ## Output contract
 
 - Fields: `summary`, `file_changes[]`, `requires_operator_approval`.

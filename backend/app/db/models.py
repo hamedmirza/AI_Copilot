@@ -99,6 +99,16 @@ class RunModel(Base):
     approval_reached: Mapped[bool] = mapped_column(Boolean, default=False)
     promote_rolled_back: Mapped[bool] = mapped_column(Boolean, default=False)
     primary_failure_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    chat_session_id: Mapped[str | None] = mapped_column(ForeignKey("chat_sessions.id"), nullable=True, index=True)
+    deliverable_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    expected_targets_json: Mapped[str] = mapped_column(Text, default="[]")
+    expected_validation_family: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    readiness_json: Mapped[str] = mapped_column(Text, default="{}")
+    mismatch_classes_json: Mapped[str] = mapped_column(Text, default="[]")
+    approval_override: Mapped[bool] = mapped_column(Boolean, default=False)
+    clarification_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    clarification_stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    clarification_context_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UtcDateTime(), default=utc_now, onupdate=utc_now
@@ -115,6 +125,42 @@ class RunModel(Base):
     improvement_exposures: Mapped[list["ImprovementExposureModel"]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
+    chat_session: Mapped["ChatSessionModel | None"] = relationship("ChatSessionModel", foreign_keys=[chat_session_id])
+    thread_entries: Mapped[list["RunThreadEntryModel"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="RunThreadEntryModel.created_at"
+    )
+
+    @property
+    def expected_targets(self) -> list[str]:
+        try:
+            parsed = json.loads(self.expected_targets_json)
+        except json.JSONDecodeError:
+            return []
+        return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+    @property
+    def readiness(self) -> dict[str, Any]:
+        try:
+            parsed = json.loads(self.readiness_json)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @property
+    def mismatch_classes(self) -> list[str]:
+        try:
+            parsed = json.loads(self.mismatch_classes_json)
+        except json.JSONDecodeError:
+            return []
+        return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+    @property
+    def clarification_context(self) -> dict[str, Any]:
+        try:
+            parsed = json.loads(self.clarification_context_json)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
 
 
 class RunEventModel(Base):
@@ -334,6 +380,32 @@ class ChatMessageModel(Base):
     def message_metadata(self) -> dict[str, Any]:
         try:
             parsed = json.loads(self.metadata_json)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+
+class RunThreadEntryModel(Base):
+    __tablename__ = "run_thread_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    session_id: Mapped[str | None] = mapped_column(ForeignKey("chat_sessions.id"), nullable=True, index=True)
+    role: Mapped[str] = mapped_column(String(32), default="assistant")
+    entry_type: Mapped[str] = mapped_column(String(64), index=True)
+    stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    severity: Mapped[str] = mapped_column(String(16), default="info")
+    message: Mapped[str] = mapped_column(Text, default="")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
+
+    run: Mapped[RunModel] = relationship(back_populates="thread_entries")
+    session: Mapped["ChatSessionModel | None"] = relationship("ChatSessionModel")
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        try:
+            parsed = json.loads(self.payload_json)
         except json.JSONDecodeError:
             return {}
         return parsed if isinstance(parsed, dict) else {}

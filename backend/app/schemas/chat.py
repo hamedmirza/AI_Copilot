@@ -60,6 +60,11 @@ class ChatMessageEnqueueResponse(BaseModel):
     user_message: ChatMessageResponse | None = None
 
 
+class ChatCancelResponse(BaseModel):
+    ok: bool = True
+    cancelled: bool
+
+
 class ChatSpawnTaskRequest(BaseModel):
     description: str = Field(min_length=1)
     validation_profile: str | None = None
@@ -70,6 +75,7 @@ class ChatSpawnTaskResponse(BaseModel):
     run_id: str
     task_id: str
     message_id: str | None = None
+    chat_session_id: str | None = None
 
 
 class MCPServerCreate(BaseModel):

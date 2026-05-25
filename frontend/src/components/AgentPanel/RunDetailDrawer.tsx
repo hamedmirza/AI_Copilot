@@ -2,14 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { X } from 'lucide-react'
 import { api } from '@/api/client'
 import { useRunDetail } from '@/hooks/useRunDetail'
-import { stageStatusFromEvents } from '@/lib/runEvents'
+import { useWebSocket } from '@/hooks/useWebSocket'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button } from '@/components/ui/primitives'
-import { STAGES } from '@/components/Chat/types'
+import { PipelineTimeline } from './PipelineTimeline'
 import {
-  canRollbackPromote,
-  canRollbackWorkspace,
-  isResumableStatus,
   isRetryableStatus,
   latestReviewArtifact,
   type GlobalSkillRecord,
@@ -20,13 +17,24 @@ import {
   runStatusLabel,
   type RunSummary,
 } from '@/types/runs'
-import { useProjectStore, useRunStore } from '@/store'
+import { useChatStore, useProjectStore, useRunStore, useUIStore } from '@/store'
 import { ArtifactViewer } from './ArtifactViewer'
 import { ApproveDialog } from './ApproveDialog'
 import { ReviewArtifactPanel } from './ReviewArtifactPanel'
 import { RunLogPanel } from '@/components/shared/RunLogPanel'
+import { RunConversationPanel } from './RunConversationPanel'
+import { RunComposer } from './RunComposer'
+import { VisualEvidencePanel, type VisualEvidencePayload } from './VisualEvidencePanel'
 
 type DrawerMode = 'detail' | 'list'
+type DrawerTab = 'conversation' | 'pipeline'
+
+function defaultDrawerTab(status: string): DrawerTab {
+  if (status === 'awaiting_clarification' || status === 'awaiting_approval') {
+    return 'conversation'
+  }
+  return 'pipeline'
+}
 
 interface RunDetailDrawerProps {
   open: boolean
@@ -35,6 +43,8 @@ interface RunDetailDrawerProps {
   projectLessons?: LessonRecord[]
   globalSkills?: GlobalSkillRecord[]
   mode?: DrawerMode
+  displayMode?: 'drawer' | 'inline'
+  initialTab?: DrawerTab
   onClose: () => void
   onRunChange?: (runId: string) => void
 }
@@ -46,17 +56,36 @@ export function RunDetailDrawer({
   projectLessons = [],
   globalSkills = [],
   mode = 'detail',
+  displayMode = 'drawer',
+  initialTab,
   onClose,
   onRunChange,
 }: RunDetailDrawerProps) {
+  const inline = displayMode === 'inline'
   const projectId = useProjectStore((s) => s.currentProjectId)
   const setRunStatus = useRunStore((s) => s.setRunStatus)
-  const { detail, events, artifacts, loading, hydrateRun } = useRunDetail()
+  const setCurrentSessionId = useChatStore((s) => s.setCurrentSessionId)
+  const setRightPanelTab = useUIStore((s) => s.setRightPanelTab)
+  const {
+    detail,
+    events,
+    artifacts,
+    thread,
+    threadLoading,
+    loading,
+    hydrateRun,
+    refreshThread,
+  } = useRunDetail()
   const [listOnly, setListOnly] = useState(mode === 'list')
+  const [activeTab, setActiveTab] = useState<DrawerTab>('pipeline')
   const [showApprove, setShowApprove] = useState(false)
   const [busy, setBusy] = useState(false)
   const [confirmRollback, setConfirmRollback] = useState<'workspace' | 'promote' | null>(null)
   const [postmortem, setPostmortem] = useState<PostmortemRecord | null>(null)
+  const [deploymentGates, setDeploymentGates] = useState<
+    Array<{ id: string; label: string; passed: boolean; required: boolean; detail: string }>
+  >([])
+  const [visualEvidence, setVisualEvidence] = useState<VisualEvidencePayload | null>(null)
 
   useEffect(() => {
     setListOnly(mode === 'list')
@@ -68,6 +97,11 @@ export function RunDetailDrawer({
   }, [open, runId, listOnly, hydrateRun])
 
   useEffect(() => {
+    if (!open || !runId) return
+    setActiveTab(initialTab ?? (detail ? defaultDrawerTab(detail.status) : 'pipeline'))
+  }, [open, runId, initialTab])
+
+  useEffect(() => {
     if (!open || !runId || listOnly) return
     setPostmortem(null)
     void api.runs.postmortem(runId)
@@ -75,7 +109,110 @@ export function RunDetailDrawer({
       .catch(() => setPostmortem(null))
   }, [listOnly, open, runId])
 
+  useEffect(() => {
+    if (!open || !runId || listOnly) return
+    void api.runs.deploymentReadiness(runId)
+      .then((data) => {
+        setDeploymentGates(data.gates ?? [])
+        setVisualEvidence((data.visual_evidence as VisualEvidencePayload | null) ?? null)
+      })
+      .catch(() => {
+        setDeploymentGates([])
+        setVisualEvidence(null)
+      })
+  }, [listOnly, open, runId, detail?.status])
+
+  const onRunWsEvent = useCallback((data: unknown) => {
+    const ev = data as Record<string, unknown>
+    const type = String(ev.type || '')
+    if (type === 'run_clarification_requested') {
+      setRunStatus('awaiting_clarification', String(ev.stage || ''))
+    } else if (type === 'awaiting_approval') {
+      setRunStatus('awaiting_approval', String(ev.stage || ''))
+    } else if (type === 'run_blocked') {
+      setRunStatus('blocked', String(ev.stage || ''))
+    } else if (type === 'run_failed') {
+      setRunStatus('failed', String(ev.stage || ''))
+    } else if (type === 'run_completed') {
+      setRunStatus('completed', String(ev.stage || ''))
+    } else if (type === 'run_changes_requested') {
+      setRunStatus('changes_requested', String(ev.stage || ''))
+    } else if (type.endsWith('_started')) {
+      setRunStatus('running', type.replace('_started', ''))
+    }
+    if (runId) void refreshThread(runId)
+    if (runId && (type.includes('complete') || type === 'awaiting_approval' || type === 'run_clarification_requested')) {
+      void hydrateRun(runId, false)
+    }
+  }, [hydrateRun, refreshThread, runId, setRunStatus])
+
+  useWebSocket(
+    runId && open && !listOnly ? `/api/ws/runs/${runId}` : '',
+    onRunWsEvent,
+    Boolean(runId && open && !listOnly),
+  )
+
   const reviewArtifact = useMemo(() => latestReviewArtifact(artifacts), [artifacts])
+  const readinessWarnings = useMemo(() => {
+    const readiness = detail?.readiness
+    if (!readiness || typeof readiness !== 'object') return []
+    const warnings = (readiness as Record<string, unknown>).warnings
+    return Array.isArray(warnings) ? warnings.map((item) => String(item)) : []
+  }, [detail?.readiness])
+
+  const handleContinueVisual = useCallback(async () => {
+    if (!runId) return
+    setBusy(true)
+    try {
+      useUIStore.getState().setActiveCenterView('browser')
+      await api.runs.continueVisual(runId)
+      showSuccess('Visual verification resumed')
+      await hydrateRun(runId, true)
+      const data = await api.runs.deploymentReadiness(runId)
+      setDeploymentGates(data.gates ?? [])
+      setVisualEvidence((data.visual_evidence as VisualEvidencePayload | null) ?? null)
+    } catch (e) {
+      showError(e)
+    } finally {
+      setBusy(false)
+    }
+  }, [hydrateRun, runId])
+
+  const visualEvidenceFromArtifacts = useMemo(() => {
+    const row = artifacts.find((a) => a.artifact_type === 'visual_evidence')
+    return row ? (row.content as VisualEvidencePayload) : null
+  }, [artifacts])
+
+  const resolvedVisualEvidence = visualEvidence ?? visualEvidenceFromArtifacts
+
+  const needsBrowserClient = useMemo(
+    () =>
+      events.some((event) => String(event.type || '') === 'browser_client_required')
+      || Boolean(resolvedVisualEvidence?.browser_client_required),
+    [events, resolvedVisualEvidence?.browser_client_required],
+  )
+
+  const clarificationWarnings = useMemo(
+    () => readinessWarnings.filter((w) => !w.toLowerCase().includes('clarification')),
+    [readinessWarnings],
+  )
+
+  const handleClarify = useCallback(async (answer: string) => {
+    if (!runId) return
+    setBusy(true)
+    try {
+      await api.runs.clarify(runId, answer)
+      setRunStatus('running')
+      showSuccess('Clarification sent — pipeline resuming')
+      await hydrateRun(runId, true)
+      await refreshThread(runId)
+      setActiveTab('conversation')
+    } catch (e) {
+      showError(e)
+    } finally {
+      setBusy(false)
+    }
+  }, [hydrateRun, refreshThread, runId, setRunStatus])
 
   const handleRetry = useCallback(async (feedback = '') => {
     if (!runId) return
@@ -85,12 +222,13 @@ export function RunDetailDrawer({
       setRunStatus('running')
       showSuccess('Pipeline retry started')
       await hydrateRun(runId, true)
+      await refreshThread(runId)
     } catch (e) {
       showError(e)
     } finally {
       setBusy(false)
     }
-  }, [hydrateRun, runId, setRunStatus])
+  }, [hydrateRun, refreshThread, runId, setRunStatus])
 
   const handleResume = useCallback(async () => {
     if (!runId) return
@@ -106,6 +244,16 @@ export function RunDetailDrawer({
       setBusy(false)
     }
   }, [hydrateRun, runId, setRunStatus])
+
+  const handleOpenChat = useCallback(() => {
+    if (!detail?.chat_session_id) {
+      showError('No chat session linked to this run yet.')
+      return
+    }
+    setCurrentSessionId(detail.chat_session_id)
+    setRightPanelTab('chat')
+    showSuccess('Opened linked chat session')
+  }, [detail?.chat_session_id, setCurrentSessionId, setRightPanelTab])
 
   const handleRollbackWorkspace = useCallback(async () => {
     if (!runId) return
@@ -143,11 +291,28 @@ export function RunDetailDrawer({
     showSuccess('Run ID copied')
   }
 
-  if (!open) return null
+  if (!open) {
+    if (inline) {
+      return (
+        <div className="h-full flex items-center justify-center p-4 text-sm text-[var(--text-secondary)]">
+          Select a run to view details
+        </div>
+      )
+    }
+    return null
+  }
 
-  if (listOnly) {
+  const shellClass = inline
+    ? 'h-full flex flex-col min-h-0'
+    : 'fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4'
+
+  const panelClass = inline
+    ? 'h-full flex flex-col min-h-0'
+    : 'bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg w-[min(960px,95vw)] h-[min(820px,92vh)] flex flex-col'
+
+  if (listOnly && !inline) {
     return (
-      <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+      <div className={shellClass}>
         <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg w-[min(640px,95vw)] max-h-[85vh] flex flex-col">
           <div className="flex items-center justify-between p-4 border-b border-[var(--border)]">
             <h2 className="text-lg font-medium">All runs</h2>
@@ -185,12 +350,11 @@ export function RunDetailDrawer({
 
   const status = detail?.status || 'pending'
   const snapshotCount = detail?.promote_snapshot?.paths?.length || 0
+  const awaitingClarification = status === 'awaiting_clarification'
 
-  return (
+  const detailBody = (
     <>
-      <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-        <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg w-[min(960px,95vw)] h-[min(820px,92vh)] flex flex-col">
-          <div className="flex items-start justify-between gap-3 p-4 border-b border-[var(--border)] shrink-0">
+          <div className={`flex items-start justify-between gap-3 shrink-0 ${inline ? 'p-3 border-b border-[var(--border)]' : 'p-4 border-b border-[var(--border)]'}`}>
             <div className="min-w-0">
               <h2 className="text-lg font-medium truncate" title={detail ? runDisplayLabel({ id: runId || '', display_name: detail.display_name }) : undefined}>
                 {detail ? runDisplayLabel({ id: runId || '', display_name: detail.display_name }) : 'Run details'}
@@ -221,156 +385,251 @@ export function RunDetailDrawer({
                   {detail.recovery_status ? ` · Recovery: ${detail.recovery_status}` : ''}
                 </p>
               )}
+              {detail?.approval_override && (
+                <p className="text-xs text-[var(--warning)] mt-1">Approved with readiness warnings.</p>
+              )}
             </div>
-            <button type="button" className="p-1 hover:bg-[var(--bg-tertiary)] rounded shrink-0" onClick={onClose}>
-              <X size={18} />
+            {!inline && (
+              <button type="button" className="p-1 hover:bg-[var(--bg-tertiary)] rounded shrink-0" onClick={onClose}>
+                <X size={18} />
+              </button>
+            )}
+          </div>
+
+          <div className={`flex gap-1 pt-2 border-b border-[var(--border)] shrink-0 ${inline ? 'px-3' : 'px-4'}`}>
+            <button
+              type="button"
+              className={`text-xs px-3 py-1.5 rounded-t border-b-2 -mb-px ${
+                activeTab === 'conversation'
+                  ? 'border-[var(--accent)] text-[var(--text-primary)]'
+                  : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              }`}
+              onClick={() => setActiveTab('conversation')}
+            >
+              Conversation
             </button>
+            <button
+              type="button"
+              className={`text-xs px-3 py-1.5 rounded-t border-b-2 -mb-px ${
+                activeTab === 'pipeline'
+                  ? 'border-[var(--accent)] text-[var(--text-primary)]'
+                  : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              }`}
+              onClick={() => setActiveTab('pipeline')}
+            >
+              Pipeline
+            </button>
+            {awaitingClarification && activeTab === 'pipeline' && (
+              <button
+                type="button"
+                className="ml-auto text-xs text-[var(--warning)] hover:underline"
+                onClick={() => setActiveTab('conversation')}
+              >
+                Answer clarification →
+              </button>
+            )}
           </div>
 
           {loading && !detail ? (
-            <p className="p-4 text-sm text-[var(--text-secondary)]">Loading run…</p>
+            <p className={`text-sm text-[var(--text-secondary)] ${inline ? 'p-3' : 'p-4'}`}>Loading run…</p>
           ) : (
-            <div className="flex-1 min-h-0 overflow-auto p-4 space-y-4">
-              <div className="flex gap-1 flex-wrap">
-                {STAGES.map((stage) => {
-                  const st = stageStatusFromEvents(events, stage)
-                  return (
-                    <div key={stage} className="flex items-center gap-1 text-xs px-2 py-1 bg-[var(--bg-tertiary)] rounded">
-                      <span className={`w-2 h-2 rounded-full ${
-                        st === 'done' ? 'bg-[var(--success)]' :
-                        st === 'running' ? 'bg-[var(--accent)] animate-pulse' :
-                        st === 'failed' ? 'bg-[var(--error)]' : 'bg-gray-500'
-                      }`} />
-                      {stage}
-                    </div>
-                  )
-                })}
-              </div>
-
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  disabled={status !== 'awaiting_approval' || busy}
-                  onClick={() => setShowApprove(true)}
-                >
-                  Approve
-                </Button>
-                <Button
-                  variant="secondary"
-                  disabled={!isRetryableStatus(status) || busy}
-                  onClick={() => void handleRetry()}
-                >
-                  Retry pipeline
-                </Button>
-                {isResumableStatus(status) && (
-                  <Button
-                    variant="secondary"
-                    disabled={busy}
-                    onClick={() => void handleResume()}
-                    title="Re-queue a stuck pending or running run"
-                  >
-                    Resume run
-                  </Button>
-                )}
-                {canRollbackWorkspace(status) && (
-                  <Button
-                    variant="secondary"
-                    disabled={busy}
-                    onClick={() => setConfirmRollback('workspace')}
-                  >
-                    Discard workspace changes
-                  </Button>
-                )}
-                {canRollbackPromote(status, detail?.promote_snapshot) && (
-                  <Button
-                    variant="danger"
-                    disabled={busy}
-                    onClick={() => setConfirmRollback('promote')}
-                  >
-                    Undo promotion
-                  </Button>
-                )}
-              </div>
-
-              {reviewArtifact && (
-                <div className="border border-[var(--border)] rounded p-3">
-                  <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">Review</p>
-                  <ReviewArtifactPanel
-                    artifact={reviewArtifact}
-                    runId={runId}
-                    artifacts={artifacts}
-                    busy={busy}
-                    retryDisabled={!isRetryableStatus(status)}
-                    onRetryWithFeedback={handleRetry}
+            <div className="flex-1 min-h-0 flex flex-col">
+              <div className={`flex-1 min-h-0 overflow-auto ${inline ? 'p-3' : 'p-4'}`}>
+                {activeTab === 'conversation' ? (
+                  <RunConversationPanel
+                    detail={detail}
+                    thread={thread}
+                    loading={threadLoading || loading}
                   />
-                </div>
-              )}
+                ) : (
+                  <div className="space-y-4">
+                    <PipelineTimeline events={events} />
 
-              <RunLogPanel events={events} />
+                    <button
+                      type="button"
+                      className="text-xs text-[var(--accent)] hover:underline"
+                      onClick={() => {
+                        if (runId) {
+                          useUIStore.getState().setRightPanelTab('agents')
+                          useUIStore.getState().requestOpenRunDrawer(runId, 'conversation')
+                        }
+                      }}
+                    >
+                      Open in Agents for pipeline actions →
+                    </button>
 
-              {(postmortem || projectLessons.length > 0 || globalSkills.length > 0) && (
-                <div className="grid gap-3 lg:grid-cols-3">
-                  <div className="border border-[var(--border)] rounded p-3">
-                    <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">Postmortem</p>
-                    {postmortem ? (
-                      <div className="space-y-2 text-xs">
-                        <p className="font-medium">{postmortem.content.root_cause_summary}</p>
-                        <p className="text-[var(--text-secondary)]">{postmortem.content.fix_recommendation}</p>
-                        <p className="text-[var(--text-secondary)]">
-                          Symptom: {postmortem.content.operator_visible_symptom}
-                        </p>
+                    {reviewArtifact && (
+                      <div className="border border-[var(--border)] rounded p-3">
+                        <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">Review</p>
+                        <ReviewArtifactPanel
+                          artifact={reviewArtifact}
+                          runId={runId}
+                          artifacts={artifacts}
+                          busy={busy}
+                          retryDisabled={!isRetryableStatus(status)}
+                          onRetryWithFeedback={handleRetry}
+                        />
                       </div>
-                    ) : (
-                      <p className="text-xs text-[var(--text-secondary)]">No postmortem for this run.</p>
                     )}
-                  </div>
 
-                  <div className="border border-[var(--border)] rounded p-3">
-                    <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">Project Lessons</p>
-                    <div className="space-y-2 text-xs">
-                      {projectLessons.length === 0 ? (
-                        <p className="text-[var(--text-secondary)]">No project lessons available.</p>
-                      ) : (
-                        projectLessons.slice(0, 3).map((lesson) => (
-                          <div key={lesson.id}>
-                            <p className="font-medium">{lesson.title}</p>
-                            <p className="text-[var(--text-secondary)]">{lesson.content.guidance || lesson.content.summary}</p>
+                    {(detail?.deliverable_kind || clarificationWarnings.length > 0 || (detail?.expected_targets?.length || 0) > 0) && (
+                      <div className="border border-[var(--border)] rounded p-3 space-y-3">
+                        <p className="text-xs text-[var(--text-secondary)] uppercase tracking-wide">Run intent and readiness</p>
+                        <div className="grid gap-3 md:grid-cols-3 text-xs">
+                          <div>
+                            <p className="text-[var(--text-secondary)] mb-1">Requested intent</p>
+                            <p>{detail?.deliverable_kind || 'unknown'}</p>
                           </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
+                          <div>
+                            <p className="text-[var(--text-secondary)] mb-1">Expected targets</p>
+                            <p>{detail?.expected_targets?.join(', ') || 'none'}</p>
+                          </div>
+                          <div>
+                            <p className="text-[var(--text-secondary)] mb-1">Validation family</p>
+                            <p>{detail?.expected_validation_family || 'unknown'}</p>
+                          </div>
+                        </div>
+                        {!!clarificationWarnings.length && (
+                          <div className="border border-[var(--warning)]/40 rounded p-3 bg-[var(--warning)]/8">
+                            <p className="text-xs text-[var(--warning)] mb-2">Warnings</p>
+                            <ul className="text-xs space-y-1">
+                              {clarificationWarnings.map((warning) => (
+                                <li key={warning}>• {warning}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {awaitingClarification && (
+                          <p className="text-xs text-[var(--text-secondary)]">
+                            Clarification is required — switch to the{' '}
+                            <button type="button" className="text-[var(--accent)] hover:underline" onClick={() => setActiveTab('conversation')}>
+                              Conversation
+                            </button>
+                            {' '}tab to answer.
+                          </p>
+                        )}
+                      </div>
+                    )}
 
-                  <div className="border border-[var(--border)] rounded p-3">
-                    <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">Global Skills</p>
-                    <div className="space-y-2 text-xs">
-                      {globalSkills.length === 0 ? (
-                        <p className="text-[var(--text-secondary)]">No global skills available.</p>
-                      ) : (
-                        globalSkills.slice(0, 3).map((skill) => (
-                          <div key={skill.id}>
-                            <p className="font-medium">{skill.name}</p>
-                            <p className="text-[var(--text-secondary)]">{skill.summary}</p>
+                    {(resolvedVisualEvidence || needsBrowserClient || deploymentGates.some((g) => g.id === 'visual_evidence' && g.required)) && runId && (
+                      <div className="border border-[var(--border)] rounded p-3">
+                        <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">
+                          Visual testing
+                        </p>
+                        <VisualEvidencePanel
+                          runId={runId}
+                          evidence={resolvedVisualEvidence}
+                          showActions={needsBrowserClient}
+                          onContinueVisual={handleContinueVisual}
+                          continueBusy={busy}
+                        />
+                      </div>
+                    )}
+
+                    {deploymentGates.length > 0 && (
+                      <div className="border border-[var(--border)] rounded p-3">
+                        <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">
+                          Deployment gates
+                        </p>
+                        <ul className="text-xs space-y-1">
+                          {deploymentGates.filter((g) => g.required).map((g) => (
+                            <li key={g.id} className={g.passed ? 'text-[var(--success)]' : 'text-[var(--error)]'}>
+                              {g.passed ? '✓' : '✗'} {g.label}
+                              {!g.passed && g.detail ? ` — ${g.detail}` : ''}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    <RunLogPanel events={events} />
+
+                    {(postmortem || projectLessons.length > 0 || globalSkills.length > 0) && (
+                      <div className="grid gap-3 lg:grid-cols-3">
+                        <div className="border border-[var(--border)] rounded p-3">
+                          <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">Postmortem</p>
+                          {postmortem ? (
+                            <div className="space-y-2 text-xs">
+                              <p className="font-medium">{postmortem.content.root_cause_summary}</p>
+                              <p className="text-[var(--text-secondary)]">{postmortem.content.fix_recommendation}</p>
+                              <p className="text-[var(--text-secondary)]">
+                                Symptom: {postmortem.content.operator_visible_symptom}
+                              </p>
+                            </div>
+                          ) : (
+                            <p className="text-xs text-[var(--text-secondary)]">No postmortem for this run.</p>
+                          )}
+                        </div>
+
+                        <div className="border border-[var(--border)] rounded p-3">
+                          <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">Project Lessons</p>
+                          <div className="space-y-2 text-xs">
+                            {projectLessons.length === 0 ? (
+                              <p className="text-[var(--text-secondary)]">No project lessons available.</p>
+                            ) : (
+                              projectLessons.slice(0, 3).map((lesson) => (
+                                <div key={lesson.id}>
+                                  <p className="font-medium">{lesson.title}</p>
+                                  <p className="text-[var(--text-secondary)]">{lesson.content.guidance || lesson.content.summary}</p>
+                                </div>
+                              ))
+                            )}
                           </div>
-                        ))
-                      )}
-                    </div>
+                        </div>
+
+                        <div className="border border-[var(--border)] rounded p-3">
+                          <p className="text-xs text-[var(--text-secondary)] mb-2 uppercase tracking-wide">Global Skills</p>
+                          <div className="space-y-2 text-xs">
+                            {globalSkills.length === 0 ? (
+                              <p className="text-[var(--text-secondary)]">No global skills available.</p>
+                            ) : (
+                              globalSkills.slice(0, 3).map((skill) => (
+                                <div key={skill.id}>
+                                  <p className="font-medium">{skill.name}</p>
+                                  <p className="text-[var(--text-secondary)]">{skill.summary}</p>
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <ArtifactViewer
+                      artifacts={artifacts}
+                      loading={loading}
+                      runId={runId}
+                      onRetryWithFeedback={handleRetry}
+                      retryBusy={busy}
+                    />
                   </div>
-                </div>
+                )}
+              </div>
+
+              {runId && !inline && (
+                <RunComposer
+                  status={status}
+                  busy={busy}
+                  onClarify={handleClarify}
+                  onRetry={handleRetry}
+                  onOpenChat={detail?.chat_session_id ? handleOpenChat : undefined}
+                  onApprove={() => setShowApprove(true)}
+                />
               )}
-
-              <ArtifactViewer
-                artifacts={artifacts}
-                loading={loading}
-                runId={runId}
-                onRetryWithFeedback={handleRetry}
-                retryBusy={busy}
-              />
             </div>
           )}
+    </>
+  )
+
+  return (
+    <>
+      <div className={shellClass}>
+        <div className={panelClass}>
+          {detailBody}
         </div>
       </div>
 
-      {showApprove && runId && projectId && (
+      {showApprove && runId && projectId && !inline && (
         <ApproveDialog
           runId={runId}
           projectId={projectId}

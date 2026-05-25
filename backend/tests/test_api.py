@@ -344,6 +344,7 @@ def test_awaiting_approval_event_is_persisted(client, tmp_path):
         service._stage_coder = lambda db_arg, run_id, ctx, fs: {"summary": "ok"}  # type: ignore[method-assign]
         service._stage_reviewer_loop = lambda db_arg, run_id, ctx, fs, workspace, source: True  # type: ignore[method-assign]
         service._stage_tester = lambda db_arg, run_id, ctx, workspace: True  # type: ignore[method-assign]
+        service._finalize_deployment_gates = lambda db_arg, run_id_arg, workspace_arg, source_arg: True  # type: ignore[method-assign]
 
         service._pipeline(db, run.id)
         db.refresh(run)
@@ -354,6 +355,144 @@ def test_awaiting_approval_event_is_persisted(client, tmp_path):
         db.close()
 
     assert any(str(event["event_type"]) == "awaiting_approval" for event in events)
+
+
+def test_run_thread_endpoint_returns_persisted_entries(client, tmp_path):
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.run_thread_service import RunThreadService
+
+    project_root = tmp_path / "thread_project"
+    project_root.mkdir()
+    (project_root / "main.py").write_text("print('thread')\n")
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="Thread Project",
+            source_repo_spec=str(project_root),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(project_id=project.id, description="Track run thread", validation_profile="python")
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status="running",
+            current_stage="planner",
+            workspace_path=str(project_root),
+        )
+        db.add(run)
+        db.flush()
+        run_id = run.id
+        db.commit()
+
+        thread_service = RunThreadService(db)
+        session_id = thread_service.ensure_session(run_id)
+        thread_service.append_entry(
+            run_id,
+            entry_type="planner_started",
+            stage="planner",
+            severity="info",
+            message="Planner started",
+            payload={"step": "planner"},
+        )
+    finally:
+        db.close()
+
+    response = client.get(f"/api/runs/{run_id}/thread", headers=HEADERS)
+    assert response.status_code == 200
+    body = response.json()
+    assert body
+    assert body[-1]["entry_type"] == "planner_started"
+    assert body[-1]["message"] == "Planner started"
+    assert body[-1]["session_id"] == session_id
+
+
+def test_clarify_run_resumes_pipeline_and_records_answer(client, tmp_path, monkeypatch):
+    import json as _json
+
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.chat_orchestrator import chat_orchestrator
+    from app.services.orchestration_service import run_engine
+    from app.services.run_thread_service import RunThreadService
+
+    run_engine.wait_for_idle()
+    chat_orchestrator.wait_for_idle()
+
+    project_root = tmp_path / "clarify_project"
+    project_root.mkdir()
+    (project_root / "main.py").write_text("print('clarify')\n")
+
+    captured: list[str] = []
+    monkeypatch.setattr(run_engine, "enqueue", lambda run_id: captured.append(run_id))
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="Clarify Project",
+            source_repo_spec=str(project_root),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(project_id=project.id, description="Implement kanban page", validation_profile="python")
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status="awaiting_clarification",
+            current_stage="architect",
+            clarification_question="Where should the page be wired?",
+            clarification_stage="architect",
+            clarification_context_json=_json.dumps({"question": "Where should the page be wired?"}),
+            workspace_path=str(project_root),
+        )
+        db.add(run)
+        db.flush()
+        run_id = run.id
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.post(
+        f"/api/runs/{run_id}/clarify",
+        json={"answer": "Wire it into the main chat surface."},
+        headers=HEADERS,
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "running"
+    assert response.json()["current_stage"] == "architect"
+    assert captured == [run_id]
+
+    db = SessionLocal()
+    try:
+        run = db.get(RunModel, run_id)
+        assert run is not None
+        assert run.status == "running"
+        assert run.clarification_question is None
+        assert run.clarification_stage is None
+        assert "Clarification answer: Wire it into the main chat surface." in (run.operator_feedback or "")
+        assert run.clarification_context["answer"] == "Wire it into the main chat surface."
+        assert "architect_navigation" in (run.clarification_context.get("resolved_gates") or [])
+
+        entries = RunThreadService(db).list_entries(run_id)
+    finally:
+        db.close()
+
+    assert any(entry["entry_type"] == "clarification_answered" for entry in entries)
+
+    thread_response = client.get(f"/api/runs/{run_id}/thread", headers=HEADERS)
+    assert thread_response.status_code == 200
+    thread_entries = thread_response.json()
+    assert any(entry["entry_type"] == "clarification_answered" for entry in thread_entries)
 
 
 def test_worker_count_update_reconfigures_run_engine(client):
@@ -1022,6 +1161,11 @@ def test_tester_enforces_frontend_build_for_frontend_changes(client, tmp_path, m
             "run_command",
             lambda command, workspace_path: (executed.append(command) or (0, "ok", "")),
         )
+        monkeypatch.setattr(
+            orchestration_module,
+            "execute_visual_checks",
+            lambda *args, **kwargs: {"passed": True, "checks": []},
+        )
 
         service = OrchestrationService()
         assert service._stage_tester(db, run.id, "Validate frontend change", workspace) is True
@@ -1078,6 +1222,9 @@ def test_stage_coder_retries_after_guard_rejection(client, tmp_path, monkeypatch
     tsc_shim = workspace / "frontend/node_modules/.bin/tsc"
     tsc_shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     tsc_shim.chmod(0o755)
+    tsc_lib = workspace / "frontend/node_modules/typescript/lib"
+    tsc_lib.mkdir(parents=True)
+    (tsc_lib / "tsc.js").write_text("// stub\n", encoding="utf-8")
     target.write_text(
         "\n".join(
             [
@@ -2356,7 +2503,7 @@ def test_approve_snapshot_and_rollback_promote(client, tmp_path):
     import json as _json
 
     from app.core.enums import RunStatus
-    from app.db.models import ArtifactModel, ProjectModel, RunModel, TaskModel
+    from app.db.models import ArtifactModel, ProjectModel, RunEventModel, RunModel, TaskModel
     from app.db.session import SessionLocal
     from app.services.snapshot_service import SNAPSHOTS_ROOT
     from app.services.workspace_service import runs_root
@@ -2400,6 +2547,30 @@ def test_approve_snapshot_and_rollback_promote(client, tmp_path):
                         "requires_operator_approval": False,
                     }
                 ),
+            )
+        )
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="test_plan",
+                content_json=_json.dumps({"passed": True, "summary": "ok", "dry_run_steps": []}),
+            )
+        )
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="pre_deploy_supervisor",
+                content_json=_json.dumps({"approved": True, "summary": "ok", "plan_gaps": []}),
+            )
+        )
+        db.add(
+            RunEventModel(
+                run_id=run.id,
+                event_type="dry_run_result",
+                stage="tester",
+                severity="info",
+                message="exit=0",
+                payload_json="{}",
             )
         )
         db.commit()
@@ -2521,6 +2692,30 @@ def test_approve_runs_supervisor_and_writes_docs(client, tmp_path):
                 ),
             )
         )
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="test_plan",
+                content_json=_json.dumps({"passed": True, "summary": "ok", "dry_run_steps": []}),
+            )
+        )
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="pre_deploy_supervisor",
+                content_json=_json.dumps({"approved": True, "summary": "ok", "plan_gaps": []}),
+            )
+        )
+        db.add(
+            RunEventModel(
+                run_id=run.id,
+                event_type="dry_run_result",
+                stage="tester",
+                severity="info",
+                message="exit=0",
+                payload_json="{}",
+            )
+        )
         db.commit()
         run_id = run.id
     finally:
@@ -2550,6 +2745,103 @@ def test_approve_runs_supervisor_and_writes_docs(client, tmp_path):
         assert events
     finally:
         db.close()
+
+
+def test_approve_run_returns_warnings_for_report_substitution(client, tmp_path):
+    import json as _json
+
+    from app.core.enums import RunStatus
+    from app.db.models import ArtifactModel, ProjectModel, RunEventModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.workspace_service import runs_root
+
+    source = tmp_path / "warning_source"
+    source.mkdir()
+    (source / "main.py").write_text("original\n")
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="Warning Approval",
+            source_repo_spec=str(source),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Create a nice and professional Kanban page.",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status=RunStatus.AWAITING_APPROVAL.value,
+            task_kind="implementation",
+        )
+        db.add(run)
+        db.flush()
+        run_id = run.id
+        workspace = runs_root() / run.id
+        (workspace / ".ai-copilot" / "reports").mkdir(parents=True, exist_ok=True)
+        (workspace / ".ai-copilot" / "reports" / "kanban-implementation.md").write_text("# Report only\n")
+        run.workspace_path = str(workspace)
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="coder",
+                content_json=_json.dumps(
+                    {
+                        "summary": "Wrote report only",
+                        "file_changes": [{"path": ".ai-copilot/reports/kanban-implementation.md", "line_changes": []}],
+                        "requires_operator_approval": False,
+                    }
+                ),
+            )
+        )
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="test_plan",
+                content_json=_json.dumps({"passed": True, "summary": "ok", "dry_run_steps": []}),
+            )
+        )
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="pre_deploy_supervisor",
+                content_json=_json.dumps({"approved": True, "summary": "ok", "plan_gaps": []}),
+            )
+        )
+        db.add(
+            RunEventModel(
+                run_id=run.id,
+                event_type="dry_run_result",
+                stage="tester",
+                severity="info",
+                message="exit=0",
+                payload_json="{}",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.post(f"/api/runs/{run_id}/approve", json={"comment": "override"}, headers=HEADERS)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["approval_override"] is True
+    assert any("report or documentation" in item.lower() for item in body["warnings"])
+
+    run_body = client.get(f"/api/runs/{run_id}", headers=HEADERS).json()
+    assert run_body["approval_override"] is True
+    assert "report_substitution" in (run_body.get("mismatch_classes") or [])
+
+    thread = client.get(f"/api/runs/{run_id}/thread", headers=HEADERS).json()
+    assert any(entry["entry_type"] == "approval_warning" for entry in thread)
 
 
 def test_read_run_workspace_file(client, tmp_path):
@@ -2614,3 +2906,73 @@ def test_read_run_workspace_file(client, tmp_path):
         headers=HEADERS,
     )
     assert missing.status_code == 404
+
+
+def test_deployment_readiness_endpoint(client, tmp_path):
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.core.enums import RunStatus
+
+    root = tmp_path / "deploy_ready"
+    root.mkdir()
+    (root / "app.py").write_text("x=1\n", encoding="utf-8")
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="Deploy",
+            source_repo_spec=str(root),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(project_id=project.id, description="t", validation_profile="python")
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status=RunStatus.AWAITING_APPROVAL.value,
+            workspace_path=str(root),
+        )
+        db.add(run)
+        db.commit()
+        run_id = run.id
+    finally:
+        db.close()
+
+    resp = client.get(f"/api/runs/{run_id}/deployment-readiness", headers=HEADERS)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "gates" in body
+    assert "ready" in body
+
+
+def test_project_tasks_and_metrics_stubs(client, tmp_path):
+    from app.db.models import ProjectModel
+    from app.db.session import SessionLocal
+
+    root = tmp_path / "kanban_api"
+    root.mkdir()
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="Kanban API",
+            source_repo_spec=str(root),
+            validation_profile="react",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.commit()
+        pid = project.id
+    finally:
+        db.close()
+
+    tasks = client.get(f"/api/projects/{pid}/tasks", headers=HEADERS)
+    assert tasks.status_code == 200
+    assert isinstance(tasks.json(), list)
+    assert len(tasks.json()) >= 1
+
+    metrics = client.get(f"/api/projects/{pid}/metrics", headers=HEADERS)
+    assert metrics.status_code == 200
+    assert "successRate" in metrics.json()

@@ -16,6 +16,7 @@ Produce a modular, file-level blueprint that matches task complexity: clear boun
 1. Ingest planner output, task description, `task_kind`, and repository structure hints.
 2. Name modules/layers affected (backend services, API routes, frontend components).
 3. Emit `file_changes[]` with `path`, `action` (`create`/`modify`/`delete`), and `rationale`.
+4. When adding `frontend/src/pages/` or routes, include `frontend/src/workbench/builtins.tsx` (or `App.tsx`) in `file_changes` for shell wiring.
 4. List external `dependencies` (packages, env vars, migrations) separately from code files.
 5. Keep overview concise; put detail in per-file rationale.
 6. Respect operator feedback as authoritative over prior assumptions.

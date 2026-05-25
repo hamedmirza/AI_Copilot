@@ -13,7 +13,25 @@
     ELEMENT_SELECTED: 'COPILOT_PICKER_ELEMENT_SELECTED',
     QUICK_ADD: 'COPILOT_PICKER_QUICK_ADD',
     PICKER_CANCELLED: 'COPILOT_PICKER_CANCELLED',
+    AGENT_COMMAND: 'COPILOT_AGENT_COMMAND',
+    AGENT_RESULT: 'COPILOT_AGENT_RESULT',
+    AGENT_NAVIGATE: 'COPILOT_AGENT_NAVIGATE',
   }
+  var MAX_SELECTOR_LEN = 512
+  var consoleErrors = []
+
+  function recordConsoleError(message) {
+    if (!message) return
+    consoleErrors.push(String(message).slice(0, 500))
+    if (consoleErrors.length > 20) consoleErrors.shift()
+  }
+
+  window.addEventListener('error', function (event) {
+    recordConsoleError(event.message || 'window error')
+  })
+  window.addEventListener('unhandledrejection', function (event) {
+    recordConsoleError(String(event.reason || 'unhandled rejection'))
+  })
   var STABLE_DATA_ATTRIBUTES = ['data-testid', 'data-test', 'data-qa', 'data-cy']
   var OVERLAY_Z_INDEX = '2147483647'
 
@@ -345,9 +363,178 @@
     postToParent(MSG.PICKER_CANCELLED, { url: window.location.href })
   }
 
+  function validateSelector(selector) {
+    if (!selector || typeof selector !== 'string') return null
+    var trimmed = selector.trim()
+    if (!trimmed || trimmed.length > MAX_SELECTOR_LEN) return null
+    return trimmed
+  }
+
+  function queryElement(selector) {
+    var safe = validateSelector(selector)
+    if (!safe) return null
+    try {
+      return document.querySelector(safe)
+    } catch (_error) {
+      return null
+    }
+  }
+
+  function visibleText(root) {
+    var node = root || document.body
+    if (!node) return ''
+    return trimText(node.innerText || node.textContent || '', 12000)
+  }
+
+  function agentReply(requestId, ok, result, error) {
+    postToParent(MSG.AGENT_RESULT, {
+      requestId: requestId,
+      ok: ok,
+      result: result || {},
+      error: error || undefined,
+    })
+  }
+
+  function captureScreenshot(selector) {
+    var target = selector ? queryElement(selector) : document.documentElement
+    if (!target) return null
+    var rect = target.getBoundingClientRect()
+    var width = Math.max(1, Math.round(rect.width || window.innerWidth))
+    var height = Math.max(1, Math.round(rect.height || window.innerHeight))
+    var canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    var ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, width, height)
+    try {
+      return canvas.toDataURL('image/png')
+    } catch (_error) {
+      return null
+    }
+  }
+
+  function waitForCondition(selector, text, timeoutMs, requestId) {
+    var deadline = Date.now() + Math.max(500, timeoutMs || 8000)
+    function poll() {
+      if (selector) {
+        var element = queryElement(selector)
+        if (element) {
+          agentReply(requestId, true, { found: true, selector: selector })
+          return
+        }
+      }
+      if (text) {
+        var body = visibleText(document.body)
+        if (body.toLowerCase().indexOf(String(text).toLowerCase()) !== -1) {
+          agentReply(requestId, true, { found: true, text: text })
+          return
+        }
+      }
+      if (Date.now() >= deadline) {
+        agentReply(requestId, false, {}, 'wait_for timeout')
+        return
+      }
+      window.setTimeout(poll, 200)
+    }
+    poll()
+  }
+
+  function handleAgentCommand(payload) {
+    var requestId = payload && payload.requestId
+    var action = payload && payload.action
+    if (!requestId || !action) {
+      return
+    }
+    if (action === 'snapshot') {
+      var snapRoot = payload.selector ? queryElement(payload.selector) : document.body
+      if (payload.selector && !snapRoot) {
+        agentReply(requestId, false, {}, 'selector not found')
+        return
+      }
+      agentReply(requestId, true, {
+        url: sourceUrl(),
+        title: document.title || '',
+        visibleText: visibleText(snapRoot),
+        selector: payload.selector || undefined,
+      })
+      return
+    }
+    if (action === 'click') {
+      var clickTarget = queryElement(payload.selector)
+      if (!clickTarget) {
+        agentReply(requestId, false, {}, 'selector not found')
+        return
+      }
+      clickTarget.scrollIntoView({ block: 'center', inline: 'nearest' })
+      clickTarget.click()
+      agentReply(requestId, true, { clicked: true, selector: payload.selector })
+      return
+    }
+    if (action === 'type') {
+      var typeTarget = queryElement(payload.selector)
+      if (!typeTarget) {
+        agentReply(requestId, false, {}, 'selector not found')
+        return
+      }
+      typeTarget.scrollIntoView({ block: 'center', inline: 'nearest' })
+      if (payload.clear) {
+        typeTarget.value = ''
+      }
+      var textValue = String(payload.text || '')
+      if ('value' in typeTarget) {
+        typeTarget.value = textValue
+        typeTarget.dispatchEvent(new Event('input', { bubbles: true }))
+        typeTarget.dispatchEvent(new Event('change', { bubbles: true }))
+      } else {
+        typeTarget.textContent = textValue
+      }
+      agentReply(requestId, true, { typed: true, selector: payload.selector })
+      return
+    }
+    if (action === 'scroll_into_view') {
+      var scrollTarget = queryElement(payload.selector)
+      if (!scrollTarget) {
+        agentReply(requestId, false, {}, 'selector not found')
+        return
+      }
+      scrollTarget.scrollIntoView({ block: 'center', inline: 'nearest' })
+      agentReply(requestId, true, { scrolled: true, selector: payload.selector })
+      return
+    }
+    if (action === 'wait_for') {
+      waitForCondition(payload.selector, payload.text, payload.timeoutMs, requestId)
+      return
+    }
+    if (action === 'screenshot') {
+      var shot = captureScreenshot(payload.selector)
+      if (!shot) {
+        agentReply(requestId, false, {}, 'screenshot failed')
+        return
+      }
+      agentReply(requestId, true, { dataUrl: shot, selector: payload.selector || undefined })
+      return
+    }
+    if (action === 'get_console_errors') {
+      agentReply(requestId, true, { errors: consoleErrors.slice() })
+      return
+    }
+    agentReply(requestId, false, {}, 'unknown action')
+  }
+
   function handleMessage(event) {
     var message = event.data
     if (!message || typeof message.type !== 'string') {
+      return
+    }
+
+    if (message.type === MSG.AGENT_COMMAND) {
+      if (!state.parentOrigin || safeOrigin(event.origin) !== state.parentOrigin) {
+        var eventOrigin = safeOrigin(event.origin)
+        if (eventOrigin) state.parentOrigin = eventOrigin
+      }
+      handleAgentCommand(message.payload || {})
       return
     }
 

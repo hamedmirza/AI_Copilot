@@ -97,10 +97,18 @@ class TestCommand(BaseModel):
     description: str = Field(min_length=1)
 
 
+class VisualCheckStep(BaseModel):
+    action: str = Field(min_length=1)
+    selector: str | None = None
+    value: str | None = None
+    timeout_ms: int = Field(default=8000, ge=500, le=60000)
+
+
 class VisualCheck(BaseModel):
     url: str = Field(min_length=1)
     description: str = Field(min_length=1)
-    expected: str = Field(min_length=1)
+    expected: str = ""
+    steps: list[VisualCheckStep] = Field(default_factory=list)
 
 
 class TesterOutput(BaseModel):

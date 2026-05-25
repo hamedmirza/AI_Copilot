@@ -8,6 +8,7 @@ from app.core.exceptions import NotFoundError
 from app.db.session import get_db
 from app.mcp.client_manager import MCPClientManager
 from app.schemas.chat import (
+    ChatCancelResponse,
     ChatMessageCreate,
     ChatMessageEnqueueResponse,
     ChatMessageResponse,
@@ -172,6 +173,17 @@ def list_chat_messages(
         raise HTTPException(404, str(exc)) from exc
 
 
+@router.post("/chat/sessions/{session_id}/cancel", response_model=ChatCancelResponse)
+def cancel_chat_session(session_id: str, db: Session = Depends(get_db)):
+    service = ChatService(db)
+    try:
+        service.get_session(session_id)
+    except NotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    was_active = chat_orchestrator.cancel(session_id)
+    return ChatCancelResponse(cancelled=was_active)
+
+
 @router.post("/chat/sessions/{session_id}/messages", response_model=ChatMessageEnqueueResponse)
 def create_chat_message(session_id: str, body: ChatMessageCreate, db: Session = Depends(get_db)):
     service = ChatService(db)
@@ -225,7 +237,7 @@ def spawn_chat_task(session_id: str, body: ChatSpawnTaskRequest, db: Session = D
                 **result,
             },
         )
-        return ChatSpawnTaskResponse(**result, message_id=assistant_message.id)
+        return ChatSpawnTaskResponse(**result, message_id=assistant_message.id, chat_session_id=session_id)
     except NotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
 

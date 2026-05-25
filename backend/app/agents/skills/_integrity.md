@@ -28,6 +28,10 @@ Edit **project source paths only** (the run workspace clone). Never modify unrel
 
 Browser picker and `page_element` context are **targeting hints only**. Locate and read the real source file via search/read tools before editing.
 
+## Pipeline visual testing
+
+Tester `visual_checks[]` are **executed automatically** by orchestration through the IDE Browser panel (project dev server). Chat agents may also drive the same browser via `browser_*` tools when verifying UI interactively. Do not claim visual pass without tool/orchestration evidence.
+
 ## Task kind addendum
 
 | `task_kind` | Scope |

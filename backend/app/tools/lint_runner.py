@@ -57,6 +57,23 @@ def scope_profile_commands(commands: list[str], changed_files: list[str]) -> lis
     return scoped
 
 
+def canonical_frontend_dry_run_commands(workspace: Path | None = None) -> list[str]:
+    _ = workspace
+    # Run from repo/workspace root; npm --prefix frontend runs tsc via vite build.
+    return ["npm --prefix frontend run build"]
+
+
+def normalize_tester_dry_run_commands(
+    llm_commands: list[str],
+    changed_files: list[str],
+    workspace: Path | None = None,
+) -> list[str]:
+    _ = llm_commands
+    if not any(path.startswith("frontend/") for path in changed_files):
+        return llm_commands
+    return canonical_frontend_dry_run_commands(workspace)
+
+
 def canonical_frontend_required_commands(profile_commands: list[str], changed_files: list[str]) -> list[str]:
     commands = ["npm --prefix frontend run build"]
     wants_lint = "npm --prefix frontend run lint" in profile_commands

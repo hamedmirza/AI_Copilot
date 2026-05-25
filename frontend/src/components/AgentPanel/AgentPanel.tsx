@@ -1,20 +1,32 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { ChevronDown, ChevronRight } from 'lucide-react'
 import { api } from '@/api/client'
 import { useRunDetail } from '@/hooks/useRunDetail'
 import { formatElementForAgentTask } from '@/lib/pageElementContext'
+import { normalizeRunEvents } from '@/lib/runEvents'
 import { useEditorStore, useProjectStore, useRunStore, useUIStore } from '@/store'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button, EmptyState, Skeleton } from '@/components/ui/primitives'
-import type { FailureSummaryResponse, GlobalSkillRecord, ImprovementRecord, LessonRecord, RunSummary } from '@/types/runs'
+import { RejectReasonDialog } from '@/components/ui/RejectReasonDialog'
+import type { FailureSummaryResponse, GlobalSkillRecord, ImprovementRecord, LessonRecord } from '@/types/runs'
 import { isRetryableStatus } from '@/types/runs'
+import { AgentPanelLayoutToggle } from './AgentPanelLayoutToggle'
 import { ApproveDialog } from './ApproveDialog'
 import { ArtifactViewer } from './ArtifactViewer'
-import { RunDetailDrawer } from './RunDetailDrawer'
-import { RunLogPanel } from '@/components/shared/RunLogPanel'
-import { normalizeRunEvents } from '@/lib/runEvents'
+import { PipelineTimeline } from './PipelineTimeline'
+import { RunActionBar } from './RunActionBar'
+import { RunComposer } from './RunComposer'
+import { RunConversationPanel } from './RunConversationPanel'
+import { RunStatusChip } from './RunStatusChip'
 
-const STAGES = ['planner', 'architect', 'ui_designer', 'coder', 'reviewer', 'tester', 'supervisor']
+const ACTIVE_RUN_STATUSES = new Set([
+  'pending',
+  'running',
+  'awaiting_clarification',
+  'awaiting_approval',
+  'blocked',
+])
 
 function improvementEvidenceLine(improvement: ImprovementRecord): string {
   const baselineSize = Number(improvement.baseline_metrics?.sample_size ?? 0)
@@ -29,51 +41,47 @@ function improvementEvidenceLine(improvement: ImprovementRecord): string {
   return `Baseline ${improvement.baseline_metrics?.success_rate ?? 0}% → Trial ${improvement.trial_metrics?.success_rate ?? 0}% (${delta >= 0 ? '+' : ''}${delta}%)`
 }
 
+type AgentTab = 'conversation' | 'artifacts' | 'learn'
+
 export function AgentPanel() {
   const projectId = useProjectStore((s) => s.currentProjectId)
   const pageElementSelection = useUIStore((s) => s.pageElementSelection)
   const setPageElementSelection = useUIStore((s) => s.setPageElementSelection)
-  const { currentRunId, runStatus, events, runs, setCurrentRun, setRunStatus, addEvent, setRuns } = useRunStore()
-  const { artifacts, loading: detailLoading, hydrateRun } = useRunDetail()
+  const runDrawerRequest = useUIStore((s) => s.runDrawerRequest)
+  const clearRunDrawerRequest = useUIStore((s) => s.clearRunDrawerRequest)
+  const rightPanelTab = useUIStore((s) => s.rightPanelTab)
+  const { currentRunId, runStatus, events, setCurrentRun, setRunStatus, addEvent, setRuns } = useRunStore()
+  const {
+    detail,
+    artifacts,
+    thread,
+    threadLoading,
+    loading: detailLoading,
+    hydrateRun,
+    refreshThread,
+  } = useRunDetail()
   const [description, setDescription] = useState('')
   const [validationProfile, setValidationProfile] = useState('python')
   const [submitting, setSubmitting] = useState(false)
   const [descError, setDescError] = useState('')
-  const [rejectReason, setRejectReason] = useState('')
+  const [newRunExpanded, setNewRunExpanded] = useState(true)
   const [showReject, setShowReject] = useState(false)
   const [showApprove, setShowApprove] = useState(false)
-  const [rejectError, setRejectError] = useState('')
+  const [actionBusy, setActionBusy] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [artifactsLoading, setArtifactsLoading] = useState(false)
-  const [retryBusy, setRetryBusy] = useState(false)
-  const [drawerOpen, setDrawerOpen] = useState(false)
-  const [drawerRunId, setDrawerRunId] = useState<string | null>(null)
-  const [drawerMode, setDrawerMode] = useState<'detail' | 'list'>('detail')
+  const [activeTab, setActiveTab] = useState<AgentTab>('conversation')
   const [failureSummary, setFailureSummary] = useState<FailureSummaryResponse | null>(null)
   const [projectLessons, setProjectLessons] = useState<LessonRecord[]>([])
   const [globalSkills, setGlobalSkills] = useState<GlobalSkillRecord[]>([])
   const [improvements, setImprovements] = useState<ImprovementRecord[]>([])
   const [learningBusy, setLearningBusy] = useState(false)
-  const logRef = useRef<HTMLDivElement>(null)
-  const [autoScroll, setAutoScroll] = useState(true)
-  const [logExpanded, setLogExpanded] = useState(false)
+
   const normalizedEvents = useMemo(
     () => normalizeRunEvents(events as Array<Record<string, unknown>>),
     [events],
   )
 
-  const runSummaries: RunSummary[] = runs.map((r) => ({
-    id: String(r.id),
-    display_name: r.display_name != null ? String(r.display_name) : undefined,
-    status: String(r.status),
-    current_stage: r.current_stage != null ? String(r.current_stage) : null,
-    task_id: r.task_id != null ? String(r.task_id) : undefined,
-    task_kind: r.task_kind != null ? String(r.task_kind) : null,
-    failure_class: r.failure_class != null ? String(r.failure_class) : null,
-    recovery_status: r.recovery_status != null ? String(r.recovery_status) : null,
-    error_message: r.error_message != null ? String(r.error_message) : null,
-    created_at: String(r.created_at || ''),
-  }))
+  const runActive = ACTIVE_RUN_STATUSES.has(runStatus)
 
   const loadRuns = useCallback(async () => {
     if (!projectId) {
@@ -132,27 +140,35 @@ export function AgentPanel() {
     }
   }, [projectId])
 
-  useEffect(() => { loadRuns() }, [loadRuns])
+  useEffect(() => { void loadRuns() }, [loadRuns])
   useEffect(() => { void loadLearning() }, [loadLearning])
 
   useEffect(() => {
     if (!currentRunId) return
-    setArtifactsLoading(true)
-    hydrateRun(currentRunId, false)
-      .finally(() => setArtifactsLoading(false))
+    void hydrateRun(currentRunId, false)
   }, [currentRunId, hydrateRun])
 
   useEffect(() => {
-    if (events.some((e) => e.type?.toString().includes('_complete'))) {
-      if (currentRunId) void hydrateRun(currentRunId, false)
+    if (runActive) setNewRunExpanded(false)
+  }, [runActive])
+
+  useEffect(() => {
+    if (!runDrawerRequest || rightPanelTab !== 'agents') return
+    void hydrateRun(runDrawerRequest.runId, true)
+    if (runDrawerRequest.tab === 'pipeline') {
+      setActiveTab('artifacts')
+    } else {
+      setActiveTab('conversation')
     }
-  }, [events, currentRunId, hydrateRun])
+    clearRunDrawerRequest()
+  }, [runDrawerRequest, rightPanelTab, clearRunDrawerRequest, hydrateRun])
 
   const bumpTreeRefresh = useEditorStore((s) => s.bumpTreeRefresh)
 
   const applyRunEvent = useCallback((ev: Record<string, unknown>) => {
     const type = String(ev.type || '')
-    if (type === 'awaiting_approval') setRunStatus('awaiting_approval', String(ev.stage || ''))
+    if (type === 'run_clarification_requested') setRunStatus('awaiting_clarification', String(ev.stage || ''))
+    else if (type === 'awaiting_approval') setRunStatus('awaiting_approval', String(ev.stage || ''))
     else if (type === 'run_blocked') setRunStatus('blocked', String(ev.stage || ''))
     else if (type === 'run_failed') setRunStatus('failed', String(ev.stage || ''))
     else if (type === 'run_completed') setRunStatus('completed', String(ev.stage || ''))
@@ -178,48 +194,94 @@ export function AgentPanel() {
     addEvent(ev)
     applyRunEvent(ev)
     if (ev.type?.toString().includes('complete') || ev.type === 'awaiting_approval') {
-      loadRuns()
+      void loadRuns()
     }
-  }, [addEvent, applyRunEvent, loadRuns])
+    if (currentRunId) void refreshThread(currentRunId)
+  }, [addEvent, applyRunEvent, loadRuns, refreshThread, currentRunId])
 
   useWebSocket(
     currentRunId ? `/api/ws/runs/${currentRunId}` : '',
     onRunEvent,
-    !!currentRunId
+    !!currentRunId,
   )
-
-  useEffect(() => {
-    if (!logExpanded || !autoScroll || !logRef.current) return
-    const scrollEl = logRef.current.querySelector('[data-run-log-scroll]') as HTMLElement | null
-    if (!scrollEl) return
-    scrollEl.scrollTop = scrollEl.scrollHeight
-  }, [normalizedEvents, autoScroll, logExpanded])
-
-  const selectRun = useCallback(async (runId: string) => {
-    await hydrateRun(runId, true)
-  }, [hydrateRun])
-
-  const openDrawer = (runId: string, mode: 'detail' | 'list' = 'detail') => {
-    setDrawerRunId(runId)
-    setDrawerMode(mode)
-    setDrawerOpen(true)
-  }
 
   const handleRetryWithFeedback = useCallback(async (feedback: string) => {
     if (!currentRunId) return
-    setRetryBusy(true)
+    setActionBusy(true)
     try {
       await api.runs.retry(currentRunId, feedback ? { feedback } : undefined)
       setRunStatus('running')
       showSuccess('Retrying pipeline')
       await hydrateRun(currentRunId, true)
+      await refreshThread(currentRunId)
       await loadLearning()
     } catch (e) {
       showError(e)
     } finally {
-      setRetryBusy(false)
+      setActionBusy(false)
     }
-  }, [currentRunId, hydrateRun, loadLearning, setRunStatus])
+  }, [currentRunId, hydrateRun, loadLearning, refreshThread, setRunStatus])
+
+  const handleClarify = useCallback(async (answer: string) => {
+    if (!currentRunId) return
+    setActionBusy(true)
+    try {
+      await api.runs.clarify(currentRunId, answer)
+      setRunStatus('running')
+      showSuccess('Clarification sent')
+      await hydrateRun(currentRunId, true)
+      await refreshThread(currentRunId)
+    } catch (e) {
+      showError(e)
+    } finally {
+      setActionBusy(false)
+    }
+  }, [currentRunId, hydrateRun, refreshThread, setRunStatus])
+
+  const handleContinueVisual = useCallback(async () => {
+    if (!currentRunId) return
+    setActionBusy(true)
+    try {
+      useUIStore.getState().setActiveCenterView('browser')
+      await api.runs.continueVisual(currentRunId)
+      showSuccess('Visual verification resumed')
+      await hydrateRun(currentRunId, true)
+    } catch (e) {
+      showError(e)
+    } finally {
+      setActionBusy(false)
+    }
+  }, [currentRunId, hydrateRun])
+
+  const handleResume = useCallback(async () => {
+    if (!currentRunId) return
+    setActionBusy(true)
+    try {
+      await api.runs.resume(currentRunId)
+      setRunStatus('running')
+      showSuccess('Run re-queued')
+      await hydrateRun(currentRunId, true)
+    } catch (e) {
+      showError(e)
+    } finally {
+      setActionBusy(false)
+    }
+  }, [currentRunId, hydrateRun, setRunStatus])
+
+  const handleReject = useCallback(async (reason: string) => {
+    if (!currentRunId) return
+    setActionBusy(true)
+    try {
+      await api.runs.reject(currentRunId, reason)
+      showSuccess('Run rejected')
+      setShowReject(false)
+      await hydrateRun(currentRunId, true)
+    } catch (e) {
+      showError(e)
+    } finally {
+      setActionBusy(false)
+    }
+  }, [currentRunId, hydrateRun])
 
   const handlePromoteLesson = useCallback(async (lessonId: number) => {
     setLearningBusy(true)
@@ -269,6 +331,7 @@ export function AgentPanel() {
       const run = result.run
       setCurrentRun(run.id)
       setRunStatus(run.status)
+      setActiveTab('conversation')
       await hydrateRun(run.id, true)
       showSuccess('Task submitted')
       await loadRuns()
@@ -279,268 +342,272 @@ export function AgentPanel() {
     }
   }
 
-  const stageStatus = (stage: string) => {
-    const started = events.some((e) => e.type === `${stage}_started`)
-    const complete = events.some((e) => e.type === `${stage}_complete`)
-    const failed = events.some((e) => e.type === `${stage}_failed`)
-    if (failed) return 'failed'
-    if (complete) return 'done'
-    if (started) return 'running'
-    return 'pending'
-  }
-
   if (!projectId) {
     return <EmptyState title="No project" description="Select a project to run agent tasks" />
   }
 
+  const displayName = detail?.display_name
+
   return (
-    <div className="h-full flex flex-col p-3 overflow-hidden">
-      <div className="mb-3">
-        {pageElementSelection && (
-          <div className="mb-2 flex items-center gap-2 text-xs px-2 py-1.5 rounded border border-[var(--accent)]/40 bg-[var(--accent)]/10">
-            <span className="text-[var(--accent)] truncate flex-1" title={pageElementSelection.selector}>
-              Attached: {pageElementSelection.tagName} · {pageElementSelection.selector}
-            </span>
-            <button
-              type="button"
-              className="text-[var(--text-secondary)] hover:text-white shrink-0"
-              onClick={() => setPageElementSelection(null)}
-            >
-              Remove
-            </button>
-          </div>
-        )}
-        <textarea
-          className="w-full h-20 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded p-2 text-sm resize-none"
-          placeholder="Describe your task (min 10 chars)..."
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-        />
-        {descError && <p className="text-[var(--error)] text-xs mt-1">{descError}</p>}
-        <div className="flex gap-2 mt-2 items-center">
-          <select
-            className="bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-sm"
-            value={validationProfile}
-            onChange={(e) => setValidationProfile(e.target.value)}
-          >
-            <option value="python">Python</option>
-            <option value="react">React</option>
-            <option value="fullstack">Fullstack</option>
-            <option value="node">Node</option>
-            <option value="custom">Custom</option>
-          </select>
-          <Button
-            loading={submitting}
-            disabled={runStatus === 'running'}
-            title={runStatus === 'running' ? 'A run is already in progress' : undefined}
-            onClick={submitTask}
-          >
-            New Task
-          </Button>
+    <div className="h-full flex flex-col overflow-hidden p-3">
+      <div className="flex items-center justify-between gap-2 shrink-0 mb-2">
+        <p className="text-xs uppercase tracking-wide text-[var(--text-secondary)]">Pipeline</p>
+        <AgentPanelLayoutToggle compact />
+      </div>
+
+      {currentRunId ? (
+        <div className="shrink-0 space-y-2 mb-2">
+          <RunStatusChip
+            runId={currentRunId}
+            displayName={displayName}
+            status={runStatus}
+            events={events}
+            showViewLink={false}
+          />
+          <PipelineTimeline events={normalizedEvents} compact />
+          <RunActionBar
+            status={runStatus}
+            busy={actionBusy}
+            events={events}
+            promoteSnapshot={detail?.promote_snapshot ?? null}
+            onApprove={() => setShowApprove(true)}
+            onReject={() => setShowReject(true)}
+            onRetry={() => void handleRetryWithFeedback('')}
+            onResume={() => void handleResume()}
+            onContinueVisual={() => void handleContinueVisual()}
+          />
         </div>
-      </div>
-
-      <div className="flex gap-1 mb-2 flex-wrap">
-        {STAGES.map((s) => {
-          const st = stageStatus(s)
-          return (
-            <div key={s} className="flex items-center gap-1 text-xs px-2 py-1 bg-[var(--bg-tertiary)] rounded">
-              <span className={`w-2 h-2 rounded-full ${
-                st === 'done' ? 'bg-[var(--success)]' :
-                st === 'running' ? 'bg-[var(--accent)] animate-pulse' :
-                st === 'failed' ? 'bg-[var(--error)]' : 'bg-gray-500'
-              }`} />
-              {s}
-            </div>
-          )
-        })}
-      </div>
-
-      <div className="flex gap-2 mb-2 flex-wrap">
-        <Button
-          disabled={runStatus !== 'awaiting_approval'}
-          onClick={() => setShowApprove(true)}
-        >
-          Approve
-        </Button>
-        <Button variant="danger" disabled={runStatus !== 'awaiting_approval'} onClick={() => setShowReject(true)}>
-          Reject
-        </Button>
-        <Button
-          variant="secondary"
-          disabled={!isRetryableStatus(runStatus)}
-          onClick={() => void handleRetryWithFeedback('')}
-        >
-          Retry
-        </Button>
-        {currentRunId && (
-          <Button variant="ghost" className="text-xs" onClick={() => openDrawer(currentRunId)}>
-            View details
-          </Button>
-        )}
-      </div>
-
-      <div className={logExpanded ? 'flex-1 min-h-0 flex flex-col mb-2' : 'mb-2 shrink-0'}>
-        {events.length === 0 && !loading ? (
-          <EmptyState title="No runs yet" description="Submit a task to the Agent panel to get started" />
-        ) : (
-          <div ref={logRef} className={logExpanded ? 'flex-1 min-h-0 flex flex-col' : undefined}>
-            <RunLogPanel
-              events={normalizedEvents}
-              fullHeight={logExpanded}
-              onExpandedChange={setLogExpanded}
-              onLogScroll={logExpanded ? (e) => {
-                const el = e.currentTarget
-                const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-                setAutoScroll(atBottom)
-              } : undefined}
-              emptyLabel={runStatus === 'running' ? 'Pipeline running…' : 'Waiting for updates…'}
-            />
-          </div>
-        )}
-      </div>
-      {logExpanded && !autoScroll && (
-        <Button variant="ghost" className="text-xs mb-2" onClick={() => setAutoScroll(true)}>
-          ↓ Jump to bottom
-        </Button>
+      ) : (
+        <p className="text-xs text-[var(--text-secondary)] shrink-0 mb-2">No active run — start a task below.</p>
       )}
 
-      <div className={logExpanded ? 'shrink-0 overflow-auto max-h-48' : 'flex-1 min-h-0 overflow-auto'}>
-        <ArtifactViewer
-          artifacts={artifacts}
-          loading={artifactsLoading || detailLoading}
-          runId={currentRunId}
-          onRetryWithFeedback={handleRetryWithFeedback}
-          retryBusy={retryBusy}
-          retryDisabled={!isRetryableStatus(runStatus)}
-        />
+      <div className="shrink-0 border border-[var(--border)] rounded mb-2 overflow-hidden">
+        <button
+          type="button"
+          className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]"
+          onClick={() => setNewRunExpanded((v) => !v)}
+        >
+          {newRunExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          <span className="font-medium text-[var(--text-primary)]">New run</span>
+          {runActive && <span className="ml-auto text-[10px]">collapsed while run active</span>}
+        </button>
+        {newRunExpanded && (
+          <div className="px-2 pb-2 border-t border-[var(--border)]">
+            {pageElementSelection && (
+              <div className="mb-2 mt-2 flex items-center gap-2 text-xs px-2 py-1.5 rounded border border-[var(--accent)]/40 bg-[var(--accent)]/10">
+                <span className="text-[var(--accent)] truncate flex-1" title={pageElementSelection.selector}>
+                  Attached: {pageElementSelection.tagName} · {pageElementSelection.selector}
+                </span>
+                <button
+                  type="button"
+                  className="text-[var(--text-secondary)] hover:text-white shrink-0"
+                  onClick={() => setPageElementSelection(null)}
+                >
+                  Remove
+                </button>
+              </div>
+            )}
+            <textarea
+              className="w-full h-20 mt-2 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded p-2 text-sm resize-none"
+              placeholder="Describe your task (min 10 chars)..."
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+            {descError && <p className="text-[var(--error)] text-xs mt-1">{descError}</p>}
+            <div className="flex gap-2 mt-2 items-center">
+              <select
+                className="bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-sm"
+                value={validationProfile}
+                onChange={(e) => setValidationProfile(e.target.value)}
+              >
+                <option value="python">Python</option>
+                <option value="react">React</option>
+                <option value="fullstack">Fullstack</option>
+                <option value="node">Node</option>
+                <option value="custom">Custom</option>
+              </select>
+              <Button
+                loading={submitting}
+                disabled={runStatus === 'running'}
+                title={runStatus === 'running' ? 'A run is already in progress' : undefined}
+                onClick={submitTask}
+              >
+                New Task
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
-      <div className="border-t border-[var(--border)] pt-2 mt-2 shrink-0 space-y-3">
-        <div>
-          <p className="text-xs text-[var(--text-secondary)] mb-1">Failed Run Recovery</p>
-          {learningBusy && !failureSummary ? (
-            <Skeleton className="h-14 w-full" />
-          ) : !failureSummary || failureSummary.total_runs === 0 ? (
-            <p className="text-xs text-[var(--text-secondary)]">No failed-run recovery backlog for this project.</p>
-          ) : (
-            <div className="space-y-1 max-h-24 overflow-auto">
-              {Object.entries(failureSummary.groups).map(([failureClass, group]) => (
-                <div key={failureClass} className="rounded border border-[var(--border)] px-2 py-1.5 text-xs">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium">{failureClass.replaceAll('_', ' ')}</span>
-                    <span className="text-[var(--text-secondary)]">{group.actionable}/{group.count} actionable</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+      <div className="flex gap-1 border-b border-[var(--border)] shrink-0 mb-2">
+        {(['conversation', 'artifacts', 'learn'] as const).map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            className={`text-xs px-3 py-1.5 rounded-t border-b-2 -mb-px capitalize ${
+              activeTab === tab
+                ? 'border-[var(--accent)] text-[var(--text-primary)]'
+                : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+            }`}
+            onClick={() => setActiveTab(tab)}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
 
-        <div>
-          <p className="text-xs text-[var(--text-secondary)] mb-1">Improvements</p>
-          {improvements.length === 0 ? (
-            <p className="text-xs text-[var(--text-secondary)]">No structured improvements yet.</p>
+      <div className="flex-1 min-h-0 overflow-auto">
+        {activeTab === 'conversation' && (
+          currentRunId ? (
+            <RunConversationPanel
+              detail={detail}
+              thread={thread}
+              loading={threadLoading || detailLoading || loading}
+            />
           ) : (
-            <div className="space-y-1 max-h-36 overflow-auto">
-              {improvements.slice(0, 5).map((improvement) => {
-                return (
-                  <div key={improvement.id} className="rounded border border-[var(--border)] px-2 py-1.5 text-xs">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
+            <EmptyState title="No runs yet" description="Submit a task to start the pipeline" />
+          )
+        )}
+
+        {activeTab === 'artifacts' && (
+          currentRunId ? (
+            <ArtifactViewer
+              artifacts={artifacts}
+              loading={detailLoading}
+              runId={currentRunId}
+              onRetryWithFeedback={handleRetryWithFeedback}
+              retryBusy={actionBusy}
+              retryDisabled={!isRetryableStatus(runStatus)}
+            />
+          ) : (
+            <EmptyState title="No artifacts" description="Artifacts appear after a run starts" />
+          )
+        )}
+
+        {activeTab === 'learn' && (
+          <div className="space-y-3 text-xs">
+            <div>
+              <p className="text-[var(--text-secondary)] mb-1 uppercase tracking-wide">Failed Run Recovery</p>
+              {learningBusy && !failureSummary ? (
+                <Skeleton className="h-14 w-full" />
+              ) : !failureSummary || failureSummary.total_runs === 0 ? (
+                <p className="text-[var(--text-secondary)]">No failed-run recovery backlog for this project.</p>
+              ) : (
+                <div className="space-y-1 max-h-32 overflow-auto">
+                  {Object.entries(failureSummary.groups).map(([failureClass, group]) => (
+                    <div key={failureClass} className="rounded border border-[var(--border)] px-2 py-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium">{failureClass.replaceAll('_', ' ')}</span>
+                        <span className="text-[var(--text-secondary)]">{group.actionable}/{group.count} actionable</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <p className="text-[var(--text-secondary)] mb-1 uppercase tracking-wide">Improvements</p>
+              {improvements.length === 0 ? (
+                <p className="text-[var(--text-secondary)]">No structured improvements yet.</p>
+              ) : (
+                <div className="space-y-1 max-h-40 overflow-auto">
+                  {improvements.slice(0, 8).map((improvement) => (
+                    <div key={improvement.id} className="rounded border border-[var(--border)] px-2 py-1.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
                           <p className="font-medium truncate">{improvement.display_title || improvement.title}</p>
-                          <span className="rounded bg-[var(--bg-tertiary)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
-                            {improvement.status}
-                          </span>
-                          <span className="text-[var(--text-secondary)]">{improvement.exposure_count ?? 0} exposures</span>
+                          <p className="text-[var(--text-secondary)] mt-0.5 line-clamp-2">
+                            {improvement.content.summary || improvement.content.guidance || improvement.hypothesis}
+                          </p>
+                          <p className="text-[var(--text-secondary)] mt-0.5">{improvementEvidenceLine(improvement)}</p>
                         </div>
-                        <p className="text-[var(--text-secondary)] mt-0.5 line-clamp-2">
-                          {improvement.content.summary || improvement.content.guidance || improvement.hypothesis}
-                        </p>
-                        <p className="text-[var(--text-secondary)] mt-0.5">
-                          {improvementEvidenceLine(improvement)}
-                        </p>
-                      </div>
-                      <div className="flex gap-1 shrink-0">
-                        {improvement.status !== 'approved' && (
-                          <Button
-                            variant="ghost"
-                            className="h-6 px-2 text-[10px]"
-                            disabled={learningBusy}
-                            onClick={() => void handleImprovementOverride(improvement.id, 'approved', 'global')}
-                          >
-                            Approve
-                          </Button>
-                        )}
-                        {improvement.status !== 'deprecated' && (
-                          <Button
-                            variant="ghost"
-                            className="h-6 px-2 text-[10px]"
-                            disabled={learningBusy}
-                            onClick={() => void handleImprovementOverride(improvement.id, 'deprecated')}
-                          >
-                            Deprecate
-                          </Button>
-                        )}
+                        <div className="flex gap-1 shrink-0">
+                          {improvement.status !== 'approved' && (
+                            <Button
+                              variant="ghost"
+                              className="h-6 px-2 text-[10px]"
+                              disabled={learningBusy}
+                              onClick={() => void handleImprovementOverride(improvement.id, 'approved', 'global')}
+                            >
+                              Approve
+                            </Button>
+                          )}
+                          {improvement.status !== 'deprecated' && (
+                            <Button
+                              variant="ghost"
+                              className="h-6 px-2 text-[10px]"
+                              disabled={learningBusy}
+                              onClick={() => void handleImprovementOverride(improvement.id, 'deprecated')}
+                            >
+                              Deprecate
+                            </Button>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )
-              })}
+                  ))}
+                </div>
+              )}
             </div>
-          )}
-        </div>
 
-        <div>
-          <p className="text-xs text-[var(--text-secondary)] mb-1">Project Lessons</p>
-          {projectLessons.length === 0 ? (
-            <p className="text-xs text-[var(--text-secondary)]">No project lessons yet.</p>
-          ) : (
-            <div className="space-y-1 max-h-32 overflow-auto">
-              {projectLessons.slice(0, 4).map((lesson) => (
-                <div key={lesson.id} className="rounded border border-[var(--border)] px-2 py-1.5 text-xs">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="font-medium truncate">{lesson.title}</p>
-                      <p className="text-[var(--text-secondary)] mt-0.5 line-clamp-2">
-                        {lesson.content.summary || lesson.content.guidance || 'No summary'}
-                      </p>
+            <div>
+              <p className="text-[var(--text-secondary)] mb-1 uppercase tracking-wide">Project Lessons</p>
+              {projectLessons.length === 0 ? (
+                <p className="text-[var(--text-secondary)]">No project lessons yet.</p>
+              ) : (
+                <div className="space-y-1 max-h-32 overflow-auto">
+                  {projectLessons.slice(0, 6).map((lesson) => (
+                    <div key={lesson.id} className="rounded border border-[var(--border)] px-2 py-1.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="font-medium truncate">{lesson.title}</p>
+                          <p className="text-[var(--text-secondary)] mt-0.5 line-clamp-2">
+                            {lesson.content.summary || lesson.content.guidance || 'No summary'}
+                          </p>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          className="h-6 px-2 text-[10px]"
+                          disabled={learningBusy}
+                          onClick={() => void handlePromoteLesson(lesson.id)}
+                        >
+                          Promote
+                        </Button>
+                      </div>
                     </div>
-                    <Button
-                      variant="ghost"
-                      className="h-6 px-2 text-[10px]"
-                      disabled={learningBusy}
-                      onClick={() => void handlePromoteLesson(lesson.id)}
-                    >
-                      Promote
-                    </Button>
-                  </div>
+                  ))}
                 </div>
-              ))}
+              )}
             </div>
-          )}
-        </div>
 
-        <div>
-          <p className="text-xs text-[var(--text-secondary)] mb-1">Global Skills</p>
-          {globalSkills.length === 0 ? (
-            <p className="text-xs text-[var(--text-secondary)]">No global skills promoted yet.</p>
-          ) : (
-            <div className="space-y-1 max-h-32 overflow-auto">
-              {globalSkills.slice(0, 4).map((skill) => (
-                <div key={skill.id} className="rounded border border-[var(--border)] px-2 py-1.5 text-xs">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium truncate">{skill.name}</span>
-                    <span className="text-[var(--text-secondary)] shrink-0">{skill.times_helpful}/{skill.times_applied}</span>
-                  </div>
-                  <p className="text-[var(--text-secondary)] mt-0.5 line-clamp-2">{skill.summary}</p>
+            <div>
+              <p className="text-[var(--text-secondary)] mb-1 uppercase tracking-wide">Global Skills</p>
+              {globalSkills.length === 0 ? (
+                <p className="text-[var(--text-secondary)]">No global skills promoted yet.</p>
+              ) : (
+                <div className="space-y-1 max-h-32 overflow-auto">
+                  {globalSkills.slice(0, 6).map((skill) => (
+                    <div key={skill.id} className="rounded border border-[var(--border)] px-2 py-1.5">
+                      <p className="font-medium truncate">{skill.name}</p>
+                      <p className="text-[var(--text-secondary)] mt-0.5 line-clamp-2">{skill.summary}</p>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
+
+      {currentRunId && (
+        <RunComposer
+          status={runStatus}
+          busy={actionBusy}
+          onClarify={handleClarify}
+          onRetry={handleRetryWithFeedback}
+        />
+      )}
 
       {showApprove && currentRunId && projectId && (
         <ApproveDialog
@@ -552,46 +619,12 @@ export function AgentPanel() {
         />
       )}
 
-      {showReject && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[var(--bg-secondary)] p-4 rounded border border-[var(--border)] w-96">
-            <textarea
-              className="w-full h-24 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded p-2 text-sm"
-              placeholder="Rejection reason (required)"
-              value={rejectReason}
-              onChange={(e) => setRejectReason(e.target.value)}
-            />
-            {rejectError && <p className="text-[var(--error)] text-xs">{rejectError}</p>}
-            <div className="flex gap-2 justify-end mt-2">
-              <Button variant="secondary" onClick={() => setShowReject(false)}>Cancel</Button>
-              <Button onClick={async () => {
-                if (!rejectReason.trim()) { setRejectError('Rejection reason required'); return }
-                if (!currentRunId) return
-                try {
-                  await api.runs.reject(currentRunId, rejectReason)
-                  showSuccess('Run rejected')
-                  setShowReject(false)
-                  await hydrateRun(currentRunId, true)
-                } catch (e) { showError(e) }
-              }}>Submit</Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <RunDetailDrawer
-        open={drawerOpen}
-        runId={drawerRunId}
-        runs={runSummaries}
-        mode={drawerMode}
-        onClose={() => setDrawerOpen(false)}
-        onRunChange={(id) => {
-          setDrawerRunId(id)
-          setDrawerMode('detail')
-          void selectRun(id)
-        }}
-        projectLessons={projectLessons}
-        globalSkills={globalSkills}
+      <RejectReasonDialog
+        open={showReject}
+        title="Reject run"
+        placeholder="Reason for rejection (required)"
+        onSubmit={(reason) => void handleReject(reason)}
+        onCancel={() => setShowReject(false)}
       />
     </div>
   )

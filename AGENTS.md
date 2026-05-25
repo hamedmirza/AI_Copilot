@@ -76,11 +76,15 @@ To verify Browse on a real desktop:
 
 In development, React Strict Mode double-mounts components. You may see benign console warnings such as *"WebSocket is closed before the connection is established"* when WS hooks unmount/remount. Production builds are unaffected; reconnect logic handles transient closes.
 
+## Stub workbench data
+
+Kanban and Reporting panels use stub HTTP APIs until persistent storage exists. See [docs/KANBAN_STUB_DATA.md](docs/KANBAN_STUB_DATA.md).
+
 ## Verification workflow
 
 Before claiming a task complete, follow:
 
-1. [docs/VERIFICATION_RULES.md](docs/VERIFICATION_RULES.md)
+1. [docs/VERIFICATION_RULES.md](docs/VERIFICATION_RULES.md) (includes agent completion checklist and five-pass honesty gate)
 2. [docs/QUALITY_GATEWAY.md](docs/QUALITY_GATEWAY.md)
 3. [docs/TASK_VERIFICATION_TEMPLATE.md](docs/TASK_VERIFICATION_TEMPLATE.md)
 

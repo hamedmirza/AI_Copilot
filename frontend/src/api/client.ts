@@ -177,6 +177,11 @@ export const api = {
         }),
       delete: (id: string) =>
         request<{ ok?: boolean }>(`/api/chat/sessions/${id}`, { method: 'DELETE' }),
+      cancel: (id: string) =>
+        request<{ ok: boolean; cancelled: boolean }>(
+          `/api/chat/sessions/${id}/cancel`,
+          { method: 'POST' },
+        ),
     },
     messages: {
       list: (sessionId: string) =>
@@ -213,14 +218,58 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(body ?? {}),
       }),
+    clarify: (id: string, answer: string) =>
+      request<{ ok: boolean; run_id: string; status: string; current_stage: string }>(`/api/runs/${id}/clarify`, {
+        method: 'POST',
+        body: JSON.stringify({ answer }),
+      }),
+    thread: (id: string) => request<Array<Record<string, unknown>>>(`/api/runs/${id}/thread`),
     resume: (id: string) =>
       request<{ ok: boolean; run_id: string; status: string }>(`/api/runs/${id}/resume`, {
         method: 'POST',
       }),
+    continueVisual: (id: string) =>
+      request<{ ok: boolean; passed: boolean; evidence?: Record<string, unknown>; status?: string }>(
+        `/api/runs/${id}/continue-visual`,
+        { method: 'POST' },
+      ),
+    evidenceUrl: (runId: string, filename: string) => {
+      const sep = '?'
+      return `/api/runs/${runId}/evidence/${encodeURIComponent(filename)}${sep}token=${encodeURIComponent(getToken())}`
+    },
     rollbackWorkspace: (id: string) =>
       request(`/api/runs/${id}/rollback-workspace`, { method: 'POST' }),
     rollbackPromote: (id: string) =>
       request(`/api/runs/${id}/rollback-promote`, { method: 'POST' }),
+    deploymentReadiness: (id: string) =>
+      request<{
+        run_id: string
+        status: string
+        ready: boolean
+        gates: Array<{
+          id: string
+          label: string
+          passed: boolean
+          required: boolean
+          detail: string
+        }>
+        changed_files?: string[]
+        visual_evidence?: Record<string, unknown> | null
+        warnings?: string[]
+        mismatch_classes?: string[]
+        readiness?: Record<string, unknown>
+      }>(`/api/runs/${id}/deployment-readiness`),
+  },
+  kanban: {
+    tasks: (projectId: string) =>
+      request<Array<Record<string, unknown>>>(`/api/projects/${projectId}/tasks`),
+    patchTask: (taskId: string, status: string) =>
+      request(`/api/tasks/${taskId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status }),
+      }),
+    metrics: (projectId: string) =>
+      request<Record<string, unknown>>(`/api/projects/${projectId}/metrics`),
   },
   lessons: {
     promoteGlobal: (lessonId: number) =>

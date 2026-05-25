@@ -35,6 +35,7 @@ class PipelineBridge:
                 "project_id": project_id,
                 "description": description,
                 "validation_profile": validation_profile,
+                "session_id": session_id,
             },
         )
         self.forward_run(session_id, run.id)
@@ -113,6 +114,8 @@ class PipelineBridge:
             run = db.get(RunModel, run_id)
             if run is None:
                 return None
+            if getattr(run, "chat_session_id", None):
+                return None
             content = self._build_summary_text(run, event)
             metadata = {
                 "type": "run_summary",
@@ -187,4 +190,3 @@ class PipelineBridge:
 
 
 pipeline_bridge = PipelineBridge()
-

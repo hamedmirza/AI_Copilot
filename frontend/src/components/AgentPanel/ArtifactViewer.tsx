@@ -9,11 +9,13 @@ import {
   FileEdit,
   FileMinus,
   FilePlus,
+  Camera,
   FileText,
   FlaskConical,
   LayoutTemplate,
   ListChecks,
 } from 'lucide-react'
+import { VisualEvidencePanel, type VisualEvidencePayload } from './VisualEvidencePanel'
 import { openRunFile } from '@/lib/openRunFile'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button } from '@/components/ui/primitives'
@@ -63,6 +65,7 @@ function describeArtifact(type: string): ArtifactMeta {
     ui_design: { label: 'UI Designer', icon: LayoutTemplate },
     coder: { label: 'Coder', icon: Code2 },
     test_plan: { label: 'Tester', icon: FlaskConical },
+    visual_evidence: { label: 'Visual evidence', icon: Camera },
   }
   return table[type] || { label: humanize(type), icon: FileText }
 }
@@ -575,6 +578,8 @@ function TestPlanArtifact({ content }: { content: Record<string, unknown> }) {
   const summary = asString(content.summary)
   const commands = asRecordArray(content.commands)
   const notes = asStringArray(content.notes)
+  const visualChecks = asRecordArray(content.visual_checks)
+  const visualSkip = asString(content.visual_checks_skip_reason)
 
   return (
     <div className="space-y-3">
@@ -635,7 +640,68 @@ function TestPlanArtifact({ content }: { content: Record<string, unknown> }) {
           <BulletList items={notes} />
         </div>
       )}
+      {visualSkip && (
+        <div>
+          <SectionHeading>Visual checks deferred</SectionHeading>
+          <Prose text={visualSkip} />
+        </div>
+      )}
+      {visualChecks.length > 0 && (
+        <div>
+          <SectionHeading>Visual checks (executed by IDE browser)</SectionHeading>
+          <div className="space-y-1.5">
+            {visualChecks.map((check, i) => {
+              const url = asString(check.url)
+              const description = asString(check.description)
+              const expected = asString(check.expected)
+              const steps = asRecordArray(check.steps)
+              return (
+                <div
+                  key={`${url}-${i}`}
+                  className="rounded border border-[var(--border)] bg-[var(--bg-tertiary)]/40 p-2 text-xs space-y-1"
+                >
+                  {description && <p className="text-[var(--text-primary)]">{description}</p>}
+                  {url && (
+                    <p className="font-mono text-[11px] text-[var(--text-secondary)] break-all">{url}</p>
+                  )}
+                  {expected && (
+                    <p className="text-[11px] text-[var(--text-secondary)]">Expected: {expected}</p>
+                  )}
+                  {steps.length > 0 && (
+                    <ul className="text-[10px] text-[var(--text-secondary)] list-disc pl-4">
+                      {steps.map((step, j) => (
+                        <li key={j}>
+                          {asString(step.action)}
+                          {step.selector ? ` → ${asString(step.selector)}` : ''}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
     </div>
+  )
+}
+
+function VisualEvidenceArtifact({
+  content,
+  runId,
+}: {
+  content: Record<string, unknown>
+  runId?: string | null
+}) {
+  if (!runId) {
+    return <p className="text-xs text-[var(--text-secondary)]">Run id required to load screenshots.</p>
+  }
+  return (
+    <VisualEvidencePanel
+      runId={runId}
+      evidence={content as VisualEvidencePayload}
+    />
   )
 }
 
@@ -725,6 +791,8 @@ function RenderTypedArtifact({
       return <CoderArtifact content={artifact.content} runId={runId} artifacts={artifacts} />
     case 'test_plan':
       return <TestPlanArtifact content={artifact.content} />
+    case 'visual_evidence':
+      return <VisualEvidenceArtifact content={artifact.content} runId={runId} />
     default:
       return (
         <div className="text-xs font-mono">

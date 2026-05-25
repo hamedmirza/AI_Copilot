@@ -9,7 +9,9 @@ class EventBus:
         self.ws_connections = 0
         self._run_queues: dict[str, list[asyncio.Queue]] = {}
         self._chat_queues: dict[str, list[asyncio.Queue]] = {}
+        self._browser_queues: dict[str, list[asyncio.Queue]] = {}
         self._global_queues: list[asyncio.Queue] = []
+        self.browser_clients: set[str] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
 
     def set_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
@@ -78,6 +80,20 @@ class EventBus:
     async def _dispatch_chat(self, session_id: str, event: dict[str, Any]) -> None:
         for queue in list(self._chat_queues.get(session_id, [])):
             await queue.put(event)
+
+    def subscribe_browser(self, project_id: str) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue()
+        self._browser_queues.setdefault(project_id, []).append(queue)
+        self.browser_clients.add(project_id)
+        return queue
+
+    def unsubscribe_browser(self, project_id: str, queue: asyncio.Queue) -> None:
+        queues = self._browser_queues.get(project_id, [])
+        if queue in queues:
+            queues.remove(queue)
+        if not queues:
+            self._browser_queues.pop(project_id, None)
+            self.browser_clients.discard(project_id)
 
 
 event_bus = EventBus()

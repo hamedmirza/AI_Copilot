@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import verify_websocket_token
 from app.api.routes.chat import router as chat_router
+from app.api.routes.kanban_data import router as kanban_router
 from app.core.exceptions import (
     AICopilotError,
     CommandRejectedError,
@@ -31,6 +32,7 @@ from app.core.settings import get_settings
 from app.db.session import get_db, seed_app_config
 from app.schemas.api import (
     ApproveRequest,
+    ClarifyRequest,
     FileCreateRequest,
     FileWriteRequest,
     GitCheckoutRequest,
@@ -53,9 +55,12 @@ from app.services.run_display import derive_run_display_name, run_numbers_for_ta
 from app.services.run_engine.event_bus import event_bus
 from app.services.tree_cache import get_cached_tree, invalidate_tree_cache, store_tree_cache
 from app.services.project_service import ProjectService
+from app.services.run_thread_service import RunThreadService
+from app.services.run_truth_service import persist_run_truth
 
 router = APIRouter()
 router.include_router(chat_router)
+router.include_router(kanban_router)
 
 
 def _project_to_response(p, db: Session) -> dict:
@@ -119,6 +124,16 @@ def _run_to_response(run, task_description: str, run_number: int | None = None) 
         "approval_reached": getattr(run, "approval_reached", None),
         "promote_rolled_back": getattr(run, "promote_rolled_back", None),
         "primary_failure_class": getattr(run, "primary_failure_class", None),
+        "chat_session_id": getattr(run, "chat_session_id", None),
+        "deliverable_kind": getattr(run, "deliverable_kind", None),
+        "expected_targets": getattr(run, "expected_targets", []),
+        "expected_validation_family": getattr(run, "expected_validation_family", None),
+        "readiness": getattr(run, "readiness", {}),
+        "mismatch_classes": getattr(run, "mismatch_classes", []),
+        "approval_override": getattr(run, "approval_override", None),
+        "clarification_question": getattr(run, "clarification_question", None),
+        "clarification_stage": getattr(run, "clarification_stage", None),
+        "recommended_assumption": (run.clarification_context or {}).get("recommended_assumption"),
         "created_at": run.created_at.isoformat(),
         "updated_at": run.updated_at.isoformat(),
     }
@@ -406,6 +421,8 @@ def create_task(data: TaskCreate, db: Session = Depends(get_db)):
             "use_scout": data.use_scout,
         },
     )
+    chat_session_id = RunThreadService(db).ensure_session(run.id)
+    db.refresh(run)
     return {
         "task": {
             "id": task.id,
@@ -419,6 +436,7 @@ def create_task(data: TaskCreate, db: Session = Depends(get_db)):
             "id": run.id,
             "status": run.status,
             "display_name": derive_run_display_name(task.description, run.created_at),
+            "chat_session_id": chat_session_id,
         },
     }
 
@@ -453,6 +471,8 @@ def get_run(run_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Run not found")
     LearningService(db).ensure_run_learning_state(run)
     task = db.get(TaskModel, run.task_id)
+    persist_run_truth(db, run.id)
+    db.refresh(run)
     task_description = task.description if task else ""
     sibling_runs = (
         db.query(RunModel)
@@ -487,12 +507,82 @@ def run_events(run_id: str, db: Session = Depends(get_db)):
     ]
 
 
+@router.get("/runs/{run_id}/thread")
+def run_thread(run_id: str, db: Session = Depends(get_db)):
+    from app.db.models import RunModel
+
+    run = db.query(RunModel).filter(RunModel.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    return RunThreadService(db).list_entries(run_id)
+
+
+@router.post("/runs/{run_id}/clarify")
+def clarify_run(run_id: str, body: ClarifyRequest, db: Session = Depends(get_db)):
+    from app.db.models import RunModel
+
+    run = db.query(RunModel).filter(RunModel.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    if run.status != "awaiting_clarification":
+        raise HTTPException(400, "Run is not awaiting clarification")
+    question = run.clarification_question or "Clarification requested"
+    clarification_context = dict(run.clarification_context or {})
+    clarification_context["question"] = question
+    clarification_context["answer"] = body.answer.strip()
+    pending_gate = str(clarification_context.get("pending_gate") or "").strip()
+    if not pending_gate:
+        stage_hint = str(run.clarification_stage or run.current_stage or "").strip().lower()
+        if stage_hint == "architect":
+            pending_gate = "architect_navigation"
+        elif stage_hint == "planner":
+            pending_gate = "planner_surface"
+    if pending_gate:
+        resolved = list(clarification_context.get("resolved_gates") or [])
+        if pending_gate not in resolved:
+            resolved.append(pending_gate)
+        clarification_context["resolved_gates"] = resolved
+        clarification_context.pop("pending_gate", None)
+    run.clarification_context_json = json.dumps(clarification_context)
+    run.operator_feedback = "\n\n".join(
+        item for item in [run.operator_feedback or "", f"Clarification answer: {body.answer.strip()}"] if item.strip()
+    )
+    target_stage = run.clarification_stage or run.current_stage or "planner"
+    run.status = "running"
+    run.current_stage = target_stage
+    run.clarification_question = None
+    run.clarification_stage = None
+    db.commit()
+    RunThreadService(db).append_entry(
+        run_id,
+        entry_type="clarification_answered",
+        stage=target_stage,
+        severity="info",
+        message=f"Clarification answered: {body.answer.strip()}",
+        payload={"question": question, "answer": body.answer.strip()},
+        role="user",
+    )
+    run_engine.enqueue(run.id)
+    return {"ok": True, "run_id": run.id, "status": run.status, "current_stage": run.current_stage}
+
+
 @router.get("/runs/{run_id}/artifacts")
 def run_artifacts(run_id: str, db: Session = Depends(get_db)):
     from app.db.models import ArtifactModel
 
     arts = db.query(ArtifactModel).filter(ArtifactModel.run_id == run_id).all()
     return [_artifact_to_response(a) for a in arts]
+
+
+@router.get("/runs/{run_id}/deployment-readiness")
+def get_run_deployment_readiness(run_id: str, db: Session = Depends(get_db)):
+    from app.db.models import RunModel
+    from app.services.deployment_gates import evaluate_deployment_readiness
+
+    run = db.query(RunModel).filter(RunModel.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    return evaluate_deployment_readiness(db, run_id)
 
 
 @router.get("/runs/{run_id}/postmortem")
@@ -605,6 +695,15 @@ def reject_run(run_id: str, body: RejectRequest, db: Session = Depends(get_db)):
     run.status = RunStatus.CHANGES_REQUESTED
     run.error_message = body.reason
     db.commit()
+    RunThreadService(db).append_entry(
+        run_id,
+        entry_type="run_rejected",
+        stage=run.current_stage,
+        severity="warning",
+        message=body.reason,
+        payload={"status": RunStatus.CHANGES_REQUESTED.value},
+    )
+    persist_run_truth(db, run_id)
     LearningService(db).finalize_terminal_run(run_id)
     return {"ok": True}
 
@@ -612,7 +711,7 @@ def reject_run(run_id: str, body: RejectRequest, db: Session = Depends(get_db)):
 @router.post("/runs/{run_id}/retry")
 def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depends(get_db)):
     from app.core.enums import RunStatus
-    from app.db.models import RunModel
+    from app.db.models import ArtifactModel, RunModel
     from app.services.orchestration_service import claim_run
 
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
@@ -638,6 +737,18 @@ def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depen
     run.operator_feedback_present = bool((run.operator_feedback or "").strip())
     run.approval_reached = False
     run.promote_rolled_back = False
+    run.approval_override = False
+    run.clarification_question = None
+    run.clarification_stage = None
+    run.clarification_context_json = "{}"
+    from app.services.visual_evidence_service import clear_visual_evidence_artifacts
+
+    for artifact_type in ("test_plan", "visual_evidence", "pre_deploy_supervisor"):
+        db.query(ArtifactModel).filter(
+            ArtifactModel.run_id == run_id,
+            ArtifactModel.artifact_type == artifact_type,
+        ).delete()
+    clear_visual_evidence_artifacts(db, run_id)
     run.primary_failure_class = None
     if hasattr(run, "failure_class"):
         run.failure_class = None
@@ -646,6 +757,15 @@ def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depen
         run.recovery_status = "none"
         run.superseded_by_run_id = None
     db.commit()
+    RunThreadService(db).append_entry(
+        run_id,
+        entry_type="run_retried",
+        stage=run.current_stage,
+        severity="info",
+        message="Pipeline retry started" + (f": {body.feedback.strip()}" if body and body.feedback else ""),
+        payload={"feedback": body.feedback.strip() if body and body.feedback else ""},
+    )
+    persist_run_truth(db, run_id)
     if claim_run(db, run.id):
         run_engine.enqueue(run.id)
     return {"ok": True}
@@ -993,3 +1113,150 @@ async def events_ws(websocket: WebSocket):
     finally:
         event_bus.unsubscribe_global(q)
         event_bus.ws_connections -= 1
+
+
+@router.websocket("/ws/browser")
+async def browser_ws(websocket: WebSocket, project_id: str = Query(...)):
+    from app.services.browser_control_service import browser_control
+
+    verify_websocket_token(websocket)
+    await websocket.accept()
+    event_bus.ws_connections += 1
+    command_queue = browser_control.register_client(project_id)
+    await websocket.send_json({"type": "browser_connected", "project_id": project_id})
+    forward_task = None
+    try:
+        async def forward_commands() -> None:
+            while True:
+                command = await command_queue.get()
+                await websocket.send_json(command)
+
+        forward_task = asyncio.create_task(forward_commands())
+        while True:
+            message = await websocket.receive_json()
+            msg_type = str(message.get("type") or "")
+            if msg_type == "browser_ready":
+                continue
+            if msg_type == "browser_result":
+                browser_control.resolve_result(
+                    project_id,
+                    str(message.get("request_id") or ""),
+                    bool(message.get("ok")),
+                    message.get("result") if isinstance(message.get("result"), dict) else {},
+                    str(message.get("error") or "") or None,
+                )
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if forward_task is not None:
+            forward_task.cancel()
+        browser_control.unregister_client(project_id)
+        event_bus.ws_connections -= 1
+
+
+@router.get("/runs/{run_id}/evidence/{filename}")
+def run_evidence_file(
+    run_id: str,
+    filename: str,
+    db: Session = Depends(get_db),
+    token: str | None = Query(default=None),
+):
+    from pathlib import Path
+
+    from fastapi.responses import FileResponse
+
+    from app.db.models import RunModel
+
+    from app.api.deps import verify_api_token_value
+
+    verify_api_token_value(token)
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(400, "Invalid filename")
+    run = db.query(RunModel).filter(RunModel.id == run_id).first()
+    if not run or not run.workspace_path:
+        raise HTTPException(404, "Run not found")
+    path = Path(run.workspace_path) / ".ai-copilot" / "runs" / run_id / "evidence" / filename
+    if not path.is_file():
+        raise HTTPException(404, "Evidence file not found")
+    media = "image/png" if filename.lower().endswith(".png") else "application/octet-stream"
+    return FileResponse(path, media_type=media)
+
+
+@router.post("/runs/{run_id}/continue-visual")
+def continue_visual_verification(run_id: str, db: Session = Depends(get_db)):
+    import json
+    from pathlib import Path
+
+    from app.core.enums import RunStatus
+    from app.db.models import ArtifactModel, RunModel, TaskModel
+    from app.services.orchestration_service import orchestration_service
+    from app.services.project_service import ProjectService
+    from app.services.run_truth_service import persist_run_truth
+    from app.services.visual_evidence_service import clear_visual_evidence_artifacts, execute_visual_checks, load_visual_evidence
+    from app.services.workspace_changed_files import workspace_changed_files
+    from app.services.workspace_dev_url import build_default_visual_checks
+
+    run = db.query(RunModel).filter(RunModel.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    if run.status != RunStatus.BLOCKED.value:
+        raise HTTPException(400, "Run is not blocked")
+    evidence = load_visual_evidence(db, run_id) or {}
+    if not evidence.get("browser_client_required") and evidence.get("passed"):
+        raise HTTPException(400, "Visual verification already passed")
+    workspace = Path(run.workspace_path) if run.workspace_path else None
+    if not workspace or not workspace.is_dir():
+        raise HTTPException(400, "Run workspace unavailable")
+    test_plan_row = (
+        db.query(ArtifactModel)
+        .filter(ArtifactModel.run_id == run_id, ArtifactModel.artifact_type == "test_plan")
+        .order_by(ArtifactModel.id.desc())
+        .first()
+    )
+    visual_checks: list[dict] = []
+    if test_plan_row:
+        try:
+            plan = json.loads(test_plan_row.content_json)
+            visual_checks = list(plan.get("visual_checks") or [])
+        except json.JSONDecodeError:
+            visual_checks = []
+    if not visual_checks:
+        changed = workspace_changed_files(db, run_id)
+        visual_checks = build_default_visual_checks(workspace, changed)
+    clear_visual_evidence_artifacts(db, run_id)
+    result = execute_visual_checks(
+        db,
+        run_id,
+        workspace,
+        visual_checks,
+        project_id=run.project_id,
+    )
+    if not result.get("passed"):
+        run.error_message = "Visual evidence capture failed"
+        db.commit()
+        persist_run_truth(db, run_id)
+        return {"ok": False, "passed": False, "evidence": result}
+    from app.services.orchestration_service import orchestration_service
+    from app.services.project_service import ProjectService
+
+    project = ProjectService(db).get(run.project_id)
+    source_root = Path(project.source_repo_spec)
+    run.status = RunStatus.RUNNING.value
+    run.current_stage = "tester"
+    run.error_message = None
+    db.commit()
+    if orchestration_service._finalize_deployment_gates(db, run_id, workspace, source_root):
+        run.status = RunStatus.AWAITING_APPROVAL.value
+        run.operator_feedback = None
+        db.commit()
+        orchestration_service._record_event(
+            db, run_id, "awaiting_approval", run.current_stage or "", "info", "Run awaiting approval"
+        )
+        orchestration_service._emit(run_id, "awaiting_approval", "", "Run awaiting approval")
+        persist_run_truth(db, run_id)
+        return {"ok": True, "passed": True, "evidence": result, "status": run.status}
+    run.status = RunStatus.BLOCKED.value
+    run.error_message = "Deployment gates failed after visual verification"
+    db.commit()
+    persist_run_truth(db, run_id)
+    return {"ok": False, "passed": False, "evidence": result, "status": run.status}

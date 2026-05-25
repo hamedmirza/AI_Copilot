@@ -5,7 +5,7 @@ from typing import Any, TypeVar, get_args, get_origin
 
 from pydantic import BaseModel
 
-from app.agents.payload_normalize import normalize_agent_payload
+from app.agents.payload_normalize import loads_agent_json, normalize_agent_payload
 from app.agents.skill_loader import (
     load_integrity_charter,
     load_pipeline_framework,
@@ -136,7 +136,7 @@ class BaseAgent:
             text = text.strip("`")
             if "\n" in text:
                 text = text.split("\n", 1)[1]
-        payload = json.loads(text)
+        payload = loads_agent_json(text)
         if isinstance(payload, dict):
             payload = normalize_agent_payload(schema.__name__, payload)
         return schema.model_validate(payload)

@@ -16,6 +16,7 @@ Turn ambiguous work into a small set of independently executable steps with test
 1. Read task description, `task_kind`, validation profile, and any operator feedback in context.
 2. Identify constraints (stack, paths, forbidden changes) from project layout and prior artifacts.
 3. Decompose into 3–10 steps; each step must stand alone and map to verifiable criteria.
+4. For UI work, include an acceptance criterion that the feature is **reachable in the running IDE** (workbench panel or `App.tsx` entry).
 4. Order steps by dependency (data model → API → UI → tests).
 5. List risks (unknown APIs, migration, flaky tests, approval gates).
 6. State what is explicitly **out of scope** in `risks` or step descriptions when helpful.

@@ -32,6 +32,15 @@ from app.tools.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
+
+class ChatCancelled(Exception):
+    """Cooperative stop: partial streamed content may be attached."""
+
+    def __init__(self, content: str = "") -> None:
+        self.content = content
+        super().__init__()
+
+
 _MAX_CONTEXT_ITEMS = 20
 _MAX_CONTEXT_DEPTH = 3
 _MAX_CONTEXT_TEXT = 500
@@ -44,15 +53,28 @@ class ChatOrchestrator:
         self._executor = ThreadPoolExecutor(max_workers=2)
         self._futures: set[Future[Any]] = set()
         self._lock = Lock()
+        self._cancel_flags: dict[str, bool] = {}
+        self._active_sessions: set[str] = set()
 
     def _mode_registry_for(self, db: Session) -> ChatModeRegistry:
         return ChatModeRegistry(ConfigService(db).get_all())
 
     def enqueue(self, session_id: str, user_message_id: str, context: dict[str, Any] | None = None) -> None:
+        with self._lock:
+            self._cancel_flags.pop(session_id, None)
         future = self._executor.submit(self._run_session, session_id, user_message_id, context or {})
         with self._lock:
             self._futures.add(future)
         future.add_done_callback(self._discard_future)
+
+    def cancel(self, session_id: str) -> bool:
+        with self._lock:
+            self._cancel_flags[session_id] = True
+            return session_id in self._active_sessions
+
+    def _is_cancelled(self, session_id: str) -> bool:
+        with self._lock:
+            return bool(self._cancel_flags.get(session_id))
 
     def _discard_future(self, future: Future[Any]) -> None:
         with self._lock:
@@ -71,14 +93,21 @@ class ChatOrchestrator:
             wait(pending, timeout=remaining)
 
     def _run_session(self, session_id: str, user_message_id: str, context: dict[str, Any]) -> None:
+        with self._lock:
+            self._active_sessions.add(session_id)
         db = SessionLocal()
         try:
             self._process(db, session_id, user_message_id, context)
+        except ChatCancelled:
+            pass
         except Exception as exc:
             logger.exception("Chat orchestration failed for session %s: %s", session_id, exc)
             event_bus.emit_chat(session_id, {"type": "error", "message": str(exc)})
         finally:
             db.close()
+            with self._lock:
+                self._active_sessions.discard(session_id)
+                self._cancel_flags.pop(session_id, None)
 
     def _process(self, db: Session, session_id: str, user_message_id: str, context: dict[str, Any]) -> None:
         chat_service = ChatService(db)
@@ -153,14 +182,33 @@ class ChatOrchestrator:
         event_bus.emit_chat(session_id, {"type": "status", "message": "Thinking…"})
         turn_started = time.monotonic()
         for _ in range(max(1, mode.max_tool_rounds)):
-            result = self._invoke_provider(
-                session_id,
-                provider,
-                messages,
-                tool_schemas,
-                mode=session.mode,
-                max_output_tokens=max_output_tokens,
-            )
+            if self._is_cancelled(session_id):
+                self._finalize_cancelled(
+                    db,
+                    session_id,
+                    user_message_id,
+                    "",
+                    turn_started=turn_started,
+                )
+                return
+            try:
+                result = self._invoke_provider(
+                    session_id,
+                    provider,
+                    messages,
+                    tool_schemas,
+                    mode=session.mode,
+                    max_output_tokens=max_output_tokens,
+                )
+            except ChatCancelled as exc:
+                self._finalize_cancelled(
+                    db,
+                    session_id,
+                    user_message_id,
+                    exc.content,
+                    turn_started=turn_started,
+                )
+                return
             tool_calls = result.tool_calls or self._parse_react_fallback(result.content)
             if tool_calls:
                 assistant_message = chat_service.append_message(
@@ -179,6 +227,15 @@ class ChatOrchestrator:
                 )
                 event_bus.emit_chat(session_id, {"type": "status", "message": "Running tools…"})
                 for call in tool_calls:
+                    if self._is_cancelled(session_id):
+                        self._finalize_cancelled(
+                            db,
+                            session_id,
+                            user_message_id,
+                            "",
+                            turn_started=turn_started,
+                        )
+                        return
                     event_bus.emit_chat(
                         session_id,
                         {
@@ -236,6 +293,15 @@ class ChatOrchestrator:
                             },
                         )
                         messages.append({"role": "tool", "tool_call_id": call.id, "content": error_text})
+                if self._is_cancelled(session_id):
+                    self._finalize_cancelled(
+                        db,
+                        session_id,
+                        user_message_id,
+                        "",
+                        turn_started=turn_started,
+                    )
+                    return
                 continue
 
             turn_duration_ms = int((time.monotonic() - turn_started) * 1000)
@@ -314,7 +380,8 @@ class ChatOrchestrator:
             page_element_hint = (
                 "\n\nThe user selected a DOM element in the browser preview (see editor_context.page_element). "
                 "Use search_files to locate matching components by class names, ids, or visible text before editing. "
-                "Prefer the project's component/source files over editing raw HTML snippets."
+                "Prefer the project's component/source files over editing raw HTML snippets. "
+                "Use browser_navigate / browser_snapshot / browser_click / browser_screenshot to verify UI behavior when helpful."
             )
         system_content = f"{mode_prompt}{page_element_hint}\n\nCurrent context:\n{system_context_json}"
         if use_nothink:
@@ -392,6 +459,8 @@ class ChatOrchestrator:
         max_output_tokens: int = 4096,
         retried: bool = False,
     ) -> ChatCompletionResult:
+        if self._is_cancelled(session_id):
+            raise ChatCancelled()
         accumulated = ""
         tool_calls: list[ChatToolCall] = []
         finish_reason = "stop"
@@ -402,6 +471,8 @@ class ChatOrchestrator:
                 tools=tool_schemas,
                 max_tokens=max_output_tokens,
             ):
+                if self._is_cancelled(session_id):
+                    raise ChatCancelled(accumulated)
                 if isinstance(chunk, ChatStreamChunk) and chunk.delta:
                     accumulated += chunk.delta
                     event_bus.emit_chat(session_id, {"type": "token", "content": chunk.delta})
@@ -409,7 +480,11 @@ class ChatOrchestrator:
                     tool_calls = chunk.tool_calls
                 if isinstance(chunk, ChatStreamChunk) and chunk.finish_reason:
                     finish_reason = chunk.finish_reason
+            if self._is_cancelled(session_id):
+                raise ChatCancelled(accumulated)
             return ChatCompletionResult(content=accumulated, tool_calls=tool_calls, finish_reason=finish_reason)
+        except ChatCancelled:
+            raise
         except ProviderError as exc:
             if not retried and self._is_memory_pressure_error(exc):
                 fallback_provider = self._provider_after_memory_fallback(provider, mode)
@@ -434,7 +509,11 @@ class ChatOrchestrator:
                         retried=True,
                     )
             raise
+        except ChatCancelled:
+            raise
         except Exception:
+            if self._is_cancelled(session_id):
+                raise ChatCancelled(accumulated)
             try:
                 result = provider.invoke_chat(
                     messages,
@@ -455,9 +534,42 @@ class ChatOrchestrator:
                             retried=True,
                         )
                 raise
+            if self._is_cancelled(session_id):
+                raise ChatCancelled(result.content or "")
             if result.content:
                 event_bus.emit_chat(session_id, {"type": "token", "content": result.content})
             return result
+
+    def _finalize_cancelled(
+        self,
+        db: Session,
+        session_id: str,
+        user_message_id: str,
+        content: str,
+        *,
+        turn_started: float | None = None,
+    ) -> None:
+        chat_service = ChatService(db)
+        duration_ms: int | None = None
+        if turn_started is not None:
+            duration_ms = int((time.monotonic() - turn_started) * 1000)
+        metadata = self._assistant_metadata(user_message_id, duration_ms=duration_ms)
+        metadata["cancelled"] = True
+        final_content = content.strip() or "Stopped"
+        assistant = chat_service.append_message(
+            session_id,
+            role="assistant",
+            content=final_content,
+            metadata=metadata,
+        )
+        event_bus.emit_chat(
+            session_id,
+            {
+                "type": "cancelled",
+                "message_id": assistant.id,
+                "message": self._message_payload(assistant),
+            },
+        )
 
     def _is_memory_pressure_error(self, exc: ProviderError) -> bool:
         lowered = str(exc).lower()

@@ -19,6 +19,7 @@ Form hypotheses, gather evidence, and prefer logs, diffs, and small validation c
 ## Tools
 
 - `read_file`, `search_files`, `git_diff`, `run_command`, `run_lint_profile`, `read_logs`.
+- IDE browser: `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_wait` — reproduce UI failures against the project dev server.
 
 ## Quality gates
 

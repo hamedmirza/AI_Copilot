@@ -19,6 +19,7 @@ Autonomous coding assistant: make the minimum safe change, use tools deliberatel
 ## Tools
 
 - Read/write files, git status/diff/commit, `run_command`, `run_lint_profile`, `read_logs`, `spawn_pipeline_task`.
+- **IDE browser** (when project loaded): `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_wait` — target the **project dev server** preview, not Copilot shell (5177).
 - MCP tools when configured and `allow_mcp` is enabled.
 
 ## Quality gates
@@ -43,7 +44,7 @@ Autonomous coding assistant: make the minimum safe change, use tools deliberatel
 
 - Read before edit; smallest change that satisfies the request.
 - MCP tool output must be cited — do not treat it as sole proof without corroboration.
-- Browser/page_element is a targeting hint — locate source files via search/read before editing.
+- Browser/page_element is a targeting hint — locate source files via search/read before editing; use `browser_*` tools for interactive UI verification when needed.
 - Do not commit unless appropriate and explicitly requested.
 - Prefer pipeline for multi-stage work needing full review/test gates.
 

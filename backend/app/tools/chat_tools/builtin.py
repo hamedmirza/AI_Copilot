@@ -61,9 +61,23 @@ def _read_file(arguments: dict[str, Any], context: ToolExecutionContext) -> dict
 
 
 def _write_file(arguments: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+    from app.core.exceptions import PatchGuardError
+    from app.services.contract_guard import contract_guard_issues
+    from app.services.integration_guard import integration_guard_issues
+
     path = str(arguments.get("path") or "").strip()
     content = str(arguments.get("content") or "")
-    return context.file_service.write_file(path, content)
+    result = context.file_service.write_file(path, content)
+    rel = path.replace("\\", "/")
+    if rel.startswith("frontend/src/pages/") or rel.startswith("frontend/src/routes/"):
+        issues = integration_guard_issues(context.workspace, changed_files=[rel]) + contract_guard_issues(
+            context.workspace, [rel]
+        )
+        critical = [item for item in issues if item.get("severity") == "critical"]
+        if critical:
+            message = "; ".join(str(item.get("message") or "") for item in critical[:2])
+            raise PatchGuardError("chat_write_guard", f"Chat write blocked by deployment gate: {message}")
+    return result
 
 
 def _list_files(arguments: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
@@ -175,6 +189,51 @@ def _write_plan_artifact(arguments: dict[str, Any], context: ToolExecutionContex
 
 def _write_design_artifact(arguments: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
     return _write_artifact(arguments, context, "design")
+
+
+def _browser_tool(action: str, arguments: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+    from app.services.browser_control_service import browser_control
+
+    project_id = context.project.id
+    args = dict(arguments)
+    if action == "navigate":
+        url = browser_control.validate_loopback_url(str(args.get("url") or ""))
+        args = {"url": url}
+    result = browser_control.execute_sync(project_id, action, args)
+    if not result.get("ok"):
+        error = str(result.get("error") or "browser command failed")
+        raise ValueError(error)
+    payload = dict(result.get("result") or {})
+    if action == "screenshot" and isinstance(payload.get("dataUrl"), str):
+        data_url = payload["dataUrl"]
+        payload["dataUrl"] = data_url[:120] + "…" if len(data_url) > 120 else data_url
+    return payload
+
+
+def _browser_navigate(arguments: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+    return _browser_tool("navigate", arguments, context)
+
+
+def _browser_snapshot(arguments: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+    return _browser_tool("snapshot", arguments, context)
+
+
+def _browser_click(arguments: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+    return _browser_tool("click", arguments, context)
+
+
+def _browser_type(arguments: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+    return _browser_tool("type", arguments, context)
+
+
+def _browser_screenshot(arguments: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+    return _browser_tool("screenshot", arguments, context)
+
+
+def _browser_wait(arguments: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+    args = dict(arguments)
+    args["timeout_ms"] = int(args.get("timeout_ms") or 8000)
+    return _browser_tool("wait_for", args, context)
 
 
 BUILTIN_CHAT_TOOLS: dict[str, ToolSpec] = {
@@ -307,5 +366,70 @@ BUILTIN_CHAT_TOOLS: dict[str, ToolSpec] = {
             "required": ["title", "content"],
         },
         handler=_write_design_artifact,
+    ),
+    "browser_navigate": ToolSpec(
+        name="browser_navigate",
+        description="Navigate the IDE browser panel to a loopback URL and load the page for verification.",
+        parameters={
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+        },
+        handler=_browser_navigate,
+    ),
+    "browser_snapshot": ToolSpec(
+        name="browser_snapshot",
+        description="Capture visible text and metadata from the IDE browser preview.",
+        parameters={
+            "type": "object",
+            "properties": {"selector": {"type": "string"}},
+        },
+        handler=_browser_snapshot,
+    ),
+    "browser_click": ToolSpec(
+        name="browser_click",
+        description="Click an element in the IDE browser preview by CSS selector.",
+        parameters={
+            "type": "object",
+            "properties": {"selector": {"type": "string"}},
+            "required": ["selector"],
+        },
+        handler=_browser_click,
+    ),
+    "browser_type": ToolSpec(
+        name="browser_type",
+        description="Type text into an input in the IDE browser preview.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "selector": {"type": "string"},
+                "text": {"type": "string"},
+                "clear": {"type": "boolean"},
+            },
+            "required": ["selector", "text"],
+        },
+        handler=_browser_type,
+    ),
+    "browser_screenshot": ToolSpec(
+        name="browser_screenshot",
+        description="Capture a screenshot from the IDE browser preview (returns truncated data URL).",
+        parameters={
+            "type": "object",
+            "properties": {"selector": {"type": "string"}},
+        },
+        handler=_browser_screenshot,
+    ),
+    "browser_wait": ToolSpec(
+        name="browser_wait",
+        description="Wait for a selector or visible text in the IDE browser preview.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "selector": {"type": "string"},
+                "text": {"type": "string"},
+                "timeout_ms": {"type": "integer"},
+            },
+        },
+        handler=_browser_wait,
     ),
 }

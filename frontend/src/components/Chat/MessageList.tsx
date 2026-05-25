@@ -12,10 +12,7 @@ interface MessageListProps {
   thinkingLabel?: string | null
   pendingToolCalls?: ChatToolCall[]
   runEventsById: Record<string, RunEvent[]>
-  runActionBusy?: boolean
-  onApproveRun: (runId: string) => void | Promise<void>
-  onRejectRun: (runId: string) => void | Promise<void>
-  onRetryRun: (runId: string, feedback?: string) => void | Promise<void>
+  onOpenRunInAgents?: (runId: string) => void
 }
 
 export function MessageList({
@@ -25,10 +22,7 @@ export function MessageList({
   thinkingLabel,
   pendingToolCalls = [],
   runEventsById,
-  runActionBusy,
-  onApproveRun,
-  onRejectRun,
-  onRetryRun,
+  onOpenRunInAgents,
 }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const displayMessages = useMemo(() => prepareMessagesForDisplay(messages), [messages])
@@ -68,10 +62,7 @@ export function MessageList({
           message={message}
           thinkingLabel={message.pending ? thinkingLabel : null}
           runEventsById={runEventsById}
-          runActionBusy={runActionBusy}
-          onApproveRun={onApproveRun}
-          onRejectRun={onRejectRun}
-          onRetryRun={onRetryRun}
+          onOpenRunInAgents={onOpenRunInAgents}
         />
       ))}
       {pendingToolCalls.length > 0 && (

@@ -21,6 +21,8 @@ _SKIP_NAMES = frozenset({
     "app.db",
     "app.db-shm",
     "app.db-wal",
+    "logs",
+    "runtime",
 })
 _PROMOTABLE_HIDDEN_ROOTS = {".ai-copilot"}
 _LINKABLE_DEP_DIRS = (
@@ -140,6 +142,31 @@ def discard_run_workspace(run_id: str) -> None:
 def reset_run_workspace(source_repo: Path, run_id: str) -> Path:
     discard_run_workspace(run_id)
     return prepare_run_workspace(source_repo, run_id)
+
+
+def list_workspace_changed_files(workspace: Path, source_root: Path) -> list[str]:
+    """Paths that differ from source or are new — used for tester/reviewer/deploy gates."""
+    workspace = workspace.resolve()
+    source_root = _resolve_source_repo(source_root)
+    changed: list[str] = []
+    if not workspace.exists():
+        return changed
+    for path in workspace.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(workspace)
+        if not is_promotable_path(rel):
+            continue
+        src_file = source_root / rel
+        if src_file.is_file():
+            try:
+                if path.read_bytes() != src_file.read_bytes():
+                    changed.append(str(rel).replace("\\", "/"))
+            except OSError:
+                continue
+        else:
+            changed.append(str(rel).replace("\\", "/"))
+    return sorted(changed)
 
 
 # Aliases used across the codebase
