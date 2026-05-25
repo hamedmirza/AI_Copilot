@@ -16,7 +16,7 @@ from app.services.snapshot_service import snapshot_promoted_files
 from app.services.deployment_gates import assert_ready_for_approval
 from app.services.supervisor_service import run_post_deploy_supervisor
 from app.services.workspace_service import list_workspace_changed_files
-from app.services.workspace_service import cleanup_run_workspace, is_promotable_path, promote_to_source
+from app.services.workspace_service import cleanup_run_workspace, promote_to_source
 from app.services.run_truth_service import persist_run_truth
 from app.services.run_thread_service import RunThreadService
 

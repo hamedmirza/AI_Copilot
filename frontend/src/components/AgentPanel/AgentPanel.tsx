@@ -62,6 +62,7 @@ export function AgentPanel() {
   } = useRunDetail()
   const [description, setDescription] = useState('')
   const [validationProfile, setValidationProfile] = useState('python')
+  const [allowWebSearch, setAllowWebSearch] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [descError, setDescError] = useState('')
   const [newRunExpanded, setNewRunExpanded] = useState(true)
@@ -326,6 +327,7 @@ export function AgentPanel() {
         project_id: projectId,
         description: taskBody,
         validation_profile: validationProfile,
+        allow_web_search: allowWebSearch,
       }) as { run: { id: string; status: string } }
       setPageElementSelection(null)
       const run = result.run
@@ -426,6 +428,15 @@ export function AgentPanel() {
                 <option value="node">Node</option>
                 <option value="custom">Custom</option>
               </select>
+              <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                <input
+                  type="checkbox"
+                  className="rounded border-[var(--border)]"
+                  checked={allowWebSearch}
+                  onChange={(e) => setAllowWebSearch(e.target.checked)}
+                />
+                Web search
+              </label>
               <Button
                 loading={submitting}
                 disabled={runStatus === 'running'}

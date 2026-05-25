@@ -1,6 +1,6 @@
 import json
 from datetime import UTC, datetime
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 from uuid import uuid4
 
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
@@ -64,6 +64,7 @@ class TaskModel(Base):
     validation_profile: Mapped[str] = mapped_column(String(64), default="python")
     task_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
     use_scout: Mapped[bool] = mapped_column(Boolean, default=False)
+    allow_web_search: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
 
     project: Mapped[ProjectModel] = relationship(back_populates="tasks")
@@ -106,6 +107,7 @@ class RunModel(Base):
     readiness_json: Mapped[str] = mapped_column(Text, default="{}")
     mismatch_classes_json: Mapped[str] = mapped_column(Text, default="[]")
     approval_override: Mapped[bool] = mapped_column(Boolean, default=False)
+    allow_web_search: Mapped[bool] = mapped_column(Boolean, default=False)
     clarification_question: Mapped[str | None] = mapped_column(Text, nullable=True)
     clarification_stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
     clarification_context_json: Mapped[str] = mapped_column(Text, default="{}")
@@ -312,11 +314,7 @@ class ImprovementExposureModel(Base):
 
     @property
     def tags(self) -> list[str]:
-        try:
-            parsed = json.loads(self.tags_json)
-        except json.JSONDecodeError:
-            return []
-        return [str(item) for item in parsed] if isinstance(parsed, list) else []
+        return self.improvement.tags if self.improvement else []
 
 
 class PlaybookModel(Base):
@@ -341,10 +339,14 @@ class ChatSessionModel(Base):
     mode: Mapped[str] = mapped_column(String(64), default="general")
     model_override: Mapped[str | None] = mapped_column(String(255), nullable=True)
     nothink: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=None)
+    allow_web_search: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UtcDateTime(), default=utc_now, onupdate=utc_now
     )
+    message_count: ClassVar[int]
+    last_message_preview: ClassVar[str | None]
+    last_message_at: ClassVar[datetime | None]
 
     project: Mapped[ProjectModel] = relationship(back_populates="chat_sessions")
     messages: Mapped[list["ChatMessageModel"]] = relationship(

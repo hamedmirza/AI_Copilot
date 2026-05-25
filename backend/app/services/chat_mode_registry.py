@@ -24,11 +24,11 @@ class ChatModeRegistry:
             label="General",
             description="General-purpose project chat with read-only tools.",
             system_prompt=(
-                "You are AI Copilot. Be concise, grounded in the project, and prefer reading files "
-                "before making claims. Use tools when they materially improve accuracy."
+                "You are AI Copilot. Be concise. For LM Studio/Ollama URL or IP questions, use "
+                "runtime_settings in context only (no tools). For code questions, read files before claiming."
             ),
-            allowed_tools=["read_file", "list_files", "search_files"],
-            max_tool_rounds=6,
+            allowed_tools=["read_file", "list_files", "search_files", "web_search"],
+            max_tool_rounds=4,
             allow_mcp=False,
             model_key="model_chat",
             read_only=True,
@@ -52,6 +52,7 @@ class ChatModeRegistry:
                 "run_command",
                 "run_lint_profile",
                 "read_logs",
+                "web_search",
                 "spawn_pipeline_task",
                 "browser_navigate",
                 "browser_snapshot",
@@ -73,7 +74,7 @@ class ChatModeRegistry:
                 "You are a planning specialist. Produce structured implementation plans and identify "
                 "risks before coding."
             ),
-            allowed_tools=["read_file", "list_files", "search_files", "write_plan_artifact"],
+            allowed_tools=["read_file", "list_files", "search_files", "web_search", "write_plan_artifact"],
             max_tool_rounds=6,
             allow_mcp=False,
             model_key="model_chat_planner",
@@ -94,6 +95,7 @@ class ChatModeRegistry:
                 "run_command",
                 "run_lint_profile",
                 "read_logs",
+                "web_search",
                 "browser_navigate",
                 "browser_snapshot",
                 "browser_click",
@@ -114,7 +116,7 @@ class ChatModeRegistry:
                 "You are a software architect. Focus on trade-offs, boundaries, and implementation "
                 "sequencing rather than code-level detail."
             ),
-            allowed_tools=["read_file", "list_files", "search_files", "write_design_artifact"],
+            allowed_tools=["read_file", "list_files", "search_files", "web_search", "write_design_artifact"],
             max_tool_rounds=6,
             allow_mcp=False,
             model_key="model_chat_architect",

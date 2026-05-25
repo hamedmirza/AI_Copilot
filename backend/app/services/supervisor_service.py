@@ -85,42 +85,6 @@ def apply_doc_updates(fs: FileService, doc_updates: list[dict]) -> list[str]:
     return written
 
 
-def run_pre_deploy_supervisor(
-    db: Session,
-    run_id: str,
-    workspace_paths: list[str],
-    workspace: Path,
-) -> dict | None:
-    """Attest plan vs workspace before operator approval (no promotion yet)."""
-    if not workspace_paths:
-        return None
-
-    run = db.get(RunModel, run_id)
-    if not run:
-        return None
-
-    project = ProjectService(db).get(run.project_id)
-    context = build_post_deploy_context(db, run, workspace_paths)
-    provider = ProviderRegistry.get().resolve_stage(PipelineStage.SUPERVISOR)
-    agent = SupervisorAgent(provider)
-    output = agent.attest(context)
-
-    fs = FileService(workspace, project.protected_files)
-    written_paths = apply_doc_updates(fs, [item.model_dump() for item in output.doc_updates])
-
-    payload = output.model_dump()
-    payload["written_paths"] = written_paths
-    db.add(
-        ArtifactModel(
-            run_id=run_id,
-            artifact_type="pre_deploy_supervisor",
-            content_json=json.dumps(payload),
-        )
-    )
-    db.commit()
-    return payload
-
-
 def run_post_deploy_supervisor(
     db: Session,
     run_id: str,
@@ -170,6 +134,14 @@ def run_pre_deploy_supervisor(
     from app.services.visual_evidence_service import visual_evidence_passed
 
     run = db.get(RunModel, run_id)
+    if not run:
+        return {
+            "approved": False,
+            "summary": "Run not found for pre-deploy supervisor",
+            "plan_gaps": [{"step_id": "run", "message": "critical: run not found"}],
+            "deterministic": {},
+            "llm_plan_gaps": [],
+        }
     plan = _load_artifact(db, run_id, "plan") or {}
     criteria_lines: list[str] = []
     for step in plan.get("steps") or []:

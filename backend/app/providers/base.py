@@ -104,6 +104,30 @@ class BaseProvider(ABC):
         for message in messages:
             role = str(message.get("role") or "user")
             content = self._truncate_text(message.get("content") or "", self._MAX_REACT_MESSAGE_TEXT)
+            if role == "assistant" and isinstance(message.get("tool_calls"), list):
+                summarized_calls = []
+                for call in message.get("tool_calls") or []:
+                    if not isinstance(call, dict):
+                        continue
+                    summarized_calls.append(
+                        {
+                            "id": call.get("id"),
+                            "name": call.get("name"),
+                            "arguments": call.get("arguments"),
+                        }
+                    )
+                if summarized_calls:
+                    content = (
+                        f"{content}\nTOOL_CALLS:\n"
+                        f"{self._truncate_text(json.dumps(summarized_calls, default=str), self._MAX_REACT_MESSAGE_TEXT)}"
+                    ).strip()
+            if role == "tool":
+                tool_name = str(message.get("name") or "tool")
+                tool_call_id = str(message.get("tool_call_id") or "")
+                prefix = f"TOOL_RESULT {tool_name}"
+                if tool_call_id:
+                    prefix += f" ({tool_call_id})"
+                content = f"{prefix}:\n{content}"
             if role == "system":
                 system_parts.append(str(content))
                 continue
@@ -190,8 +214,13 @@ class BaseProvider(ABC):
             return {"content": text, "tool_calls": [], "finish_reason": "stop"}
         if not isinstance(data, dict):
             return {"content": text, "tool_calls": [], "finish_reason": "stop"}
+        has_content_field = "content" in data
+        has_tool_calls_field = "tool_calls" in data
         if not isinstance(data.get("tool_calls"), list):
             data["tool_calls"] = []
+        if not has_content_field and not has_tool_calls_field:
+            data["content"] = text
+            return data
         if "content" not in data:
             data["content"] = ""
         return data

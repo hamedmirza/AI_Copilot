@@ -14,10 +14,6 @@ _ENTRY_SURFACES = (
 
 _PAGE_DIR = Path("frontend/src/pages")
 _ROUTES_DIR = Path("frontend/src/routes")
-_KANBAN_DUPLICATE_MARKERS = (
-    "frontend/src/components/Kanban/KanbanBoard.tsx",
-)
-
 _EXPORT_DEFAULT = re.compile(
     r"export\s+default\s+(?:function\s+)?([A-Za-z_][\w$]*)",
     re.MULTILINE,
@@ -250,20 +246,6 @@ def integration_guard_issues(
     issues.extend(_orphan_routes_layer(workspace, entry_text, changed_files))
     issues.extend(_center_workbench_mount_issues(workspace, entry_text))
 
-    changed_set = {p.replace("\\", "/") for p in (changed_files or [])}
-    for dup in _KANBAN_DUPLICATE_MARKERS:
-        if (workspace / dup).is_file():
-            page_exists = (workspace / "frontend/src/pages/KanbanPage.tsx").is_file()
-            if page_exists and (not changed_set or dup in changed_set or "KanbanPage" in str(changed_set)):
-                issues.append(
-                    {
-                        "severity": "important",
-                        "path": dup,
-                        "message": (
-                            "Mock KanbanBoard coexists with pipeline Kanban page — remove or consolidate implementations."
-                        ),
-                    }
-                )
     return issues
 
 

@@ -17,9 +17,7 @@ _PORT_PATTERNS = (
 _SCRIPT_NAMES = ("dev", "start", "serve", "preview")
 
 _PAGE_ROUTE_HINTS: dict[str, str] = {
-    "kanbanpage": "/kanban",
     "reportingpage": "/reporting",
-    "kanban": "/kanban",
     "reporting": "/reporting",
 }
 
@@ -56,7 +54,8 @@ def infer_dev_server_base(workspace: Path) -> str:
         pkg = _read_package_json(workspace, rel)
         if not pkg:
             continue
-        scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+        scripts_value = pkg.get("scripts")
+        scripts = scripts_value if isinstance(scripts_value, dict) else {}
         script_text = ""
         for name in _SCRIPT_NAMES:
             value = scripts.get(name)
@@ -82,7 +81,7 @@ def infer_routes_from_changed_files(changed_files: list[str]) -> list[str]:
                 seen.add(route)
                 routes.append(route)
         if "routes/index" in path:
-            for route in ("/kanban", "/reporting"):
+            for route in ("/reporting",):
                 if route not in seen:
                     seen.add(route)
                     routes.append(route)

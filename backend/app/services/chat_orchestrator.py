@@ -22,6 +22,12 @@ from app.agents.skill_loader import (
     load_role_skill,
 )
 from app.services.chat_mode_registry import ChatModeDefinition, ChatModeRegistry
+from app.services.chat_optimization import (
+    effective_max_output_tokens,
+    format_runtime_settings_answer,
+    is_runtime_settings_question,
+    should_offer_tools,
+)
 from app.services.chat_service import ChatService
 from app.services.config_service import ConfigService
 from app.services.project_service import ProjectService
@@ -142,13 +148,43 @@ class ChatOrchestrator:
             mode.key,
             session_id,
         )
+        user_message = db.get(ChatMessageModel, user_message_id)
+        user_text = str(user_message.content or "") if user_message else ""
+        provider_runtime = self._provider_runtime_context(config)
+
+        if is_runtime_settings_question(user_text):
+            turn_started = time.monotonic()
+            answer = format_runtime_settings_answer(provider_runtime)
+            assistant = chat_service.append_message(
+                session_id,
+                role="assistant",
+                content=answer,
+                metadata=self._assistant_metadata(
+                    user_message_id,
+                    duration_ms=int((time.monotonic() - turn_started) * 1000),
+                ),
+            )
+            event_bus.emit_chat(
+                session_id,
+                {
+                    "type": "done",
+                    "message_id": assistant.id,
+                    "message": self._message_payload(assistant),
+                },
+            )
+            logger.info("chat session=%s answered runtime_settings without LLM", session_id)
+            return
+
         tool_registry = ToolRegistry(db)
-        available_tools = tool_registry.resolve_tools(mode)
-        tool_schemas = [tool.openai_schema for tool in available_tools.values()]
+        available_tools = tool_registry.resolve_tools(mode, session=session)
+        use_tools = should_offer_tools(mode.key, user_text, read_only=mode.read_only)
+        tool_schemas = (
+            [tool.openai_schema for tool in available_tools.values()] if use_tools else []
+        )
         tool_context = ToolExecutionContext(db=db, project=project, session=session)
         history_limit = max(1, min(int(config.get("chat_history_limit", 50) or 50), 500))
         max_context_tokens = max(2048, min(int(config.get("chat_max_context_tokens", 32768) or 32768), 200_000))
-        max_output_tokens = max(256, min(int(config.get("chat_max_output_tokens", 4096) or 4096), 32_768))
+        max_output_tokens = effective_max_output_tokens(mode.key, config, user_text)
 
         use_nothink = self._resolve_use_nothink(session.nothink, config)
         mode_prompt = self._mode_prompt_with_skill(mode)
@@ -157,6 +193,7 @@ class ChatOrchestrator:
             project_path=project.source_repo_spec,
             mode_prompt=mode_prompt,
             context={**context, "git_branch": git_branch},
+            provider_runtime=provider_runtime,
             use_nothink=use_nothink,
         )
         model_name = str(getattr(provider, "model", "") or "")
@@ -343,9 +380,10 @@ class ChatOrchestrator:
         skill_text = load_role_skill(skill_key) if skill_key else ""
         if skill_text:
             parts.append(skill_text)
-        framework = load_pipeline_framework()
-        if framework:
-            parts.append(framework)
+        if mode.key != "general":
+            framework = load_pipeline_framework()
+            if framework:
+                parts.append(framework)
         integrity = load_integrity_charter()
         if integrity:
             parts.append(integrity)
@@ -357,6 +395,22 @@ class ChatOrchestrator:
             return bool(session_nothink)
         return bool(config.get("nothink_default", True))
 
+    @staticmethod
+    def _provider_runtime_context(config: dict[str, Any]) -> dict[str, str]:
+        active = "ollama" if config.get("ollama_enabled") else "lmstudio"
+        return {
+            "active_provider": active,
+            "lmstudio_base_url": str(config.get("lmstudio_base_url") or "").strip(),
+            "ollama_base_url": str(config.get("ollama_base_url") or "").strip(),
+            "lmstudio_model_default": str(config.get("lmstudio_model") or "").strip(),
+            "ollama_model_default": str(config.get("ollama_model") or "").strip(),
+            "note": (
+                "Authoritative live values from AI Copilot Settings (SQLite). "
+                "For LM Studio/Ollama host or URL questions, answer from runtime_settings only; "
+                "do not cite .env, config_service._DEFAULTS, or source-file defaults."
+            ),
+        }
+
     def _build_provider_messages(
         self,
         history: list[ChatMessageModel],
@@ -364,16 +418,18 @@ class ChatOrchestrator:
         project_path: str,
         mode_prompt: str,
         context: dict[str, Any],
+        provider_runtime: dict[str, str] | None = None,
         use_nothink: bool = True,
     ) -> list[dict[str, Any]]:
         system_context = {
             "workspace_path": project_path,
+            "runtime_settings": provider_runtime or {},
             "editor_context": self._truncate_value(context),
         }
-        system_context_json = json.dumps(system_context, indent=2, default=str)
+        system_context_json = json.dumps(system_context, separators=(",", ":"), default=str)
         if len(system_context_json) > _MAX_SYSTEM_CONTEXT_TEXT:
             system_context["editor_context"] = {"notice": "editor context truncated for size"}
-            system_context_json = json.dumps(system_context, indent=2, default=str)
+            system_context_json = json.dumps(system_context, separators=(",", ":"), default=str)
         page_element_hint = ""
         page_element = context.get("page_element") if isinstance(context, dict) else None
         if isinstance(page_element, dict) and page_element.get("selector"):
@@ -434,16 +490,16 @@ class ChatOrchestrator:
         if depth >= _MAX_CONTEXT_DEPTH:
             return "[truncated]"
         if isinstance(value, dict):
-            items = list(value.items())[:_MAX_CONTEXT_ITEMS]
-            result = {str(key): self._truncate_value(item, depth + 1) for key, item in items}
-            if len(value) > len(items):
-                result["_truncated"] = f"{len(value) - len(items)} additional item(s)"
+            dict_items = list(value.items())[:_MAX_CONTEXT_ITEMS]
+            result = {str(key): self._truncate_value(item, depth + 1) for key, item in dict_items}
+            if len(value) > len(dict_items):
+                result["_truncated"] = f"{len(value) - len(dict_items)} additional item(s)"
             return result
         if isinstance(value, list):
-            items = [self._truncate_value(item, depth + 1) for item in value[:_MAX_CONTEXT_ITEMS]]
-            if len(value) > len(items):
-                items.append(f"...{len(value) - len(items)} more item(s)")
-            return items
+            list_items: list[Any] = [self._truncate_value(item, depth + 1) for item in value[:_MAX_CONTEXT_ITEMS]]
+            if len(value) > len(list_items):
+                list_items.append(f"...{len(value) - len(list_items)} more item(s)")
+            return list_items
         if isinstance(value, tuple):
             return [self._truncate_value(item, depth + 1) for item in value[:_MAX_CONTEXT_ITEMS]]
         return self._truncate_text(value, _MAX_CONTEXT_TEXT)
@@ -575,7 +631,12 @@ class ChatOrchestrator:
         lowered = str(exc).lower()
         return any(
             hint in lowered
-            for hint in ("insufficient system resources", "failed to load model", "memory pressure")
+            for hint in (
+                "insufficient system resources",
+                "failed to load model",
+                "model unloaded",
+                "memory pressure",
+            )
         )
 
     def _provider_after_memory_fallback(self, provider, mode: str):

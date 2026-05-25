@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse

@@ -123,6 +123,7 @@ export const api = {
     delete: (id: string) => request(`/api/projects/${id}`, { method: 'DELETE' }),
     tree: (id: string) => request<{ items: Array<{ path: string; type: string; size: number }> }>(`/api/projects/${id}/tree`),
     runs: (id: string) => request(`/api/projects/${id}/runs`),
+    kanban: (id: string) => request<Record<string, unknown>>(`/api/projects/${id}/kanban`),
     lessons: (id: string) => request(`/api/projects/${id}/lessons`),
     improvements: (id: string, params?: { status?: string; scope?: string }) =>
       request(
@@ -209,6 +210,15 @@ export const api = {
       ),
     failureSummary: (projectId?: string) =>
       request(`/api/runs/failure-summary${buildQuery({ project_id: projectId })}`),
+    cleanupFailed: (projectId?: string) =>
+      request<{
+        deleted_count: number
+        deleted_run_ids: string[]
+        workspaces_removed: number
+        snapshots_removed: number
+        orphan_workspaces_removed: number
+        by_project: Record<string, number>
+      }>(`/api/runs/cleanup${buildQuery({ project_id: projectId })}`, { method: 'POST' }),
     approve: (id: string, comment = '') =>
       request(`/api/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ comment }) }),
     reject: (id: string, reason: string) =>
@@ -260,14 +270,7 @@ export const api = {
         readiness?: Record<string, unknown>
       }>(`/api/runs/${id}/deployment-readiness`),
   },
-  kanban: {
-    tasks: (projectId: string) =>
-      request<Array<Record<string, unknown>>>(`/api/projects/${projectId}/tasks`),
-    patchTask: (taskId: string, status: string) =>
-      request(`/api/tasks/${taskId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ status }),
-      }),
+  reporting: {
     metrics: (projectId: string) =>
       request<Record<string, unknown>>(`/api/projects/${projectId}/metrics`),
   },

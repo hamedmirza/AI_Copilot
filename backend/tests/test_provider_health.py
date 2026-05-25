@@ -58,7 +58,7 @@ def test_health_provider_summary_includes_suggested_ollama_url(monkeypatch: pyte
         {
             "ollama_enabled": False,
             "ollama_base_url": "http://127.0.0.1:11434/v1",
-            "lmstudio_base_url": "http://192.168.128.70:1234/v1",
+            "lmstudio_base_url": "http://172.10.1.2:1234/v1",
         }
     )
     monkeypatch.setattr(

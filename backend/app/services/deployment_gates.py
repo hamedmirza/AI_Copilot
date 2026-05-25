@@ -69,7 +69,6 @@ def evaluate_deployment_readiness(
 
 
 def assert_ready_for_approval(db: Session, run_id: str) -> None:
-    from app.core.exceptions import ValidationError
     from app.services.deployment_readiness_service import validate_approval_allowed
 
     validate_approval_allowed(db, run_id)

@@ -28,6 +28,7 @@ class PipelineBridge:
         project_id: str,
         description: str,
         validation_profile: str | None = None,
+        allow_web_search: bool = False,
     ) -> dict[str, str]:
         task, run = create_task_and_run(
             db,
@@ -36,6 +37,7 @@ class PipelineBridge:
                 "description": description,
                 "validation_profile": validation_profile,
                 "session_id": session_id,
+                "allow_web_search": allow_web_search,
             },
         )
         self.forward_run(session_id, run.id)

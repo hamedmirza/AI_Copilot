@@ -76,6 +76,7 @@ function extractRunIds(messages: ChatMessage[]): string[] {
 type SessionSelectionOptions = {
   selectionMode?: ChatModelSelectionMode
   modelOverride?: string
+  allowWebSearch?: boolean
 }
 
 export function ChatPanel() {
@@ -129,11 +130,12 @@ export function ChatPanel() {
   const clearRunEvents = useChatStore((state) => state.clearRunEvents)
   const pendingRunId = useChatStore((state) => state.pendingRunId)
   const composerPrefill = useChatStore((state) => state.composerPrefill)
-  const setPendingRunId = useChatStore((state) => state.setPendingRunId)
   const setComposerPrefill = useChatStore((state) => state.setComposerPrefill)
   const resetChatState = useChatStore((state) => state.resetChatState)
   const pageElementSelection = useUIStore((state) => state.pageElementSelection)
   const setPageElementSelection = useUIStore((state) => state.setPageElementSelection)
+  const setRightPanelTab = useUIStore((state) => state.setRightPanelTab)
+  const requestOpenRunDrawer = useUIStore((state) => state.requestOpenRunDrawer)
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [linkedRunStatus, setLinkedRunStatus] = useState<string | null>(null)
   const [loadingMessages, setLoadingMessages] = useState(false)
@@ -141,6 +143,7 @@ export function ChatPanel() {
   const [deletingSession, setDeletingSession] = useState(false)
   const [composerValue, setComposerValue] = useState('')
   const [deleteConfirmSessionId, setDeleteConfirmSessionId] = useState<string | null>(null)
+  const [allowWebSearchDraft, setAllowWebSearchDraft] = useState(false)
 
   useEffect(() => {
     if (composerPrefill) {
@@ -182,6 +185,7 @@ export function ChatPanel() {
     () => sessions.find((session) => session.id === currentSessionId) || null,
     [sessions, currentSessionId]
   )
+  const effectiveAllowWebSearch = currentSession?.allow_web_search ?? allowWebSearchDraft
   const effectiveNothink = useMemo(
     () => resolveEffectiveNothink(currentSession?.nothink, appSettings.nothink_default),
     [appSettings.nothink_default, currentSession?.nothink],
@@ -190,6 +194,10 @@ export function ChatPanel() {
     () => historySearchQuery.trim() ? (searchResults || sessions) : sessions,
     [historySearchQuery, searchResults, sessions]
   )
+
+  useEffect(() => {
+    setAllowWebSearchDraft(Boolean(currentSession?.allow_web_search))
+  }, [currentSession?.allow_web_search, currentSessionId])
 
   const setModeLocally = useCallback((mode: ChatMode) => {
     setActiveMode(mode)
@@ -209,6 +217,19 @@ export function ChatPanel() {
     }
   }, [currentSessionId, setModeLocally, upsertSession])
 
+  const handleAllowWebSearchToggle = useCallback(async (enabled: boolean) => {
+    setAllowWebSearchDraft(enabled)
+    if (!currentSessionId || !currentSession) return
+    upsertSession({ ...currentSession, allow_web_search: enabled })
+    try {
+      const updated = await api.chat.sessions.update(currentSessionId, { allow_web_search: enabled })
+      upsertSession(toChatSession(updated))
+    } catch (error) {
+      upsertSession(currentSession)
+      showError(error)
+    }
+  }, [currentSession, currentSessionId, upsertSession])
+
   const createSession = useCallback(async (
     mode: ChatMode = activeMode,
     options?: SessionSelectionOptions,
@@ -221,6 +242,7 @@ export function ChatPanel() {
       mode,
       title: 'New chat',
       model_override: nextSelectionMode === 'manual' && manualModel ? manualModel : null,
+      allow_web_search: options?.allowWebSearch ?? allowWebSearchDraft,
     }) as Record<string, unknown>
     const session = toChatSession(raw)
     upsertSession(session)
@@ -235,9 +257,11 @@ export function ChatPanel() {
     setActiveMode(normalizeChatMode(session.mode))
     setModelSelectionMode(normalizeModelSelectionMode(session.model_override))
     setSelectedModel(session.model_override || '')
+    setAllowWebSearchDraft(Boolean(session.allow_web_search))
     return session
   }, [
     activeMode,
+    allowWebSearchDraft,
     clearRunEvents,
     clearStreamingContent,
     projectId,
@@ -264,7 +288,7 @@ export function ChatPanel() {
       const raw = await api.chat.sessions.list(projectId)
       const nextSessions = raw.map((session) => toChatSession(session))
       if (nextSessions.length === 0) {
-        await createSession(activeMode)
+        await createSession(activeMode, { allowWebSearch: effectiveAllowWebSearch })
         return
       }
       setSessions(nextSessions)
@@ -284,6 +308,7 @@ export function ChatPanel() {
   }, [
     activeMode,
     createSession,
+    effectiveAllowWebSearch,
     projectId,
     resetChatState,
     setSearchResults,
@@ -481,6 +506,7 @@ export function ChatPanel() {
       const created = await createSession(activeMode, {
         selectionMode: modelSelectionMode,
         modelOverride: selectedModel,
+        allowWebSearch: effectiveAllowWebSearch,
       })
       sessionId = created?.id || null
     }
@@ -563,7 +589,6 @@ export function ChatPanel() {
     activeMode,
     activeTab,
     appendMessage,
-    clearRunEvents,
     createSession,
     currentSessionId,
     modelSelectionMode,
@@ -579,6 +604,7 @@ export function ChatPanel() {
     tabs,
     upsertSession,
     updateMessage,
+    effectiveAllowWebSearch,
   ])
 
   const handleStop = useCallback(async () => {
@@ -612,7 +638,7 @@ export function ChatPanel() {
       return
     }
     if (command.type === 'clear') {
-      await createSession(activeMode)
+      await createSession(activeMode, { allowWebSearch: effectiveAllowWebSearch })
       setComposerValue('')
       return
     }
@@ -639,7 +665,7 @@ export function ChatPanel() {
     if (command.type === 'task') {
       let sessionId = currentSessionId
       if (!sessionId) {
-        const created = await createSession('agent')
+        const created = await createSession('agent', { allowWebSearch: effectiveAllowWebSearch })
         sessionId = created?.id || null
       }
       if (!sessionId || !projectId) return
@@ -657,6 +683,7 @@ export function ChatPanel() {
           const result = await api.chat.spawnTask(sessionId, {
             description: taskDescription,
             validation_profile: validationProfile,
+            allow_web_search: effectiveAllowWebSearch,
           }) as Record<string, unknown>
           runId = String(result.run_id || (result.run as Record<string, unknown> | undefined)?.id || '')
           taskId = String(result.task_id || (result.task as Record<string, unknown> | undefined)?.id || '')
@@ -666,6 +693,7 @@ export function ChatPanel() {
             project_id: projectId,
             description: taskDescription,
             validation_profile: validationProfile,
+            allow_web_search: effectiveAllowWebSearch,
           }) as Record<string, unknown>
           const runObj = fallback.run as Record<string, unknown> | undefined
           runId = String(runObj?.id || '')
@@ -704,11 +732,11 @@ export function ChatPanel() {
     clearRunEvents,
     createSession,
     currentSessionId,
+    effectiveAllowWebSearch,
     handleManualModelChange,
     persistModeChange,
     pageElementSelection,
     projectId,
-    refreshCurrentSessionSummary,
     sendMessage,
     setPageElementSelection,
     treeItems,
@@ -734,14 +762,14 @@ export function ChatPanel() {
       if (nextSessions.length > 0) {
         setCurrentSessionId(nextSessions[0].id)
       } else {
-        await createSession(activeMode)
+        await createSession(activeMode, { allowWebSearch: effectiveAllowWebSearch })
       }
     } catch (error) {
       showError(error)
     } finally {
       setDeletingSession(false)
     }
-  }, [activeMode, createSession, deleteConfirmSessionId, removeSession, setCurrentSessionId])
+  }, [activeMode, createSession, deleteConfirmSessionId, effectiveAllowWebSearch, removeSession, setCurrentSessionId])
 
   useEffect(() => {
     if (!spawnedRunIds.length) return
@@ -824,25 +852,35 @@ export function ChatPanel() {
             <span>
               {`Mode: ${activeMode} • Model: ${
                 modelSelectionMode === 'manual' && selectedModel ? selectedModel : 'Auto'
-              } • Thinking: ${effectiveNothink ? 'off' : 'on'}`}
+              } • Thinking: ${effectiveNothink ? 'off' : 'on'} • Web: ${effectiveAllowWebSearch ? 'on' : 'off'}`}
             </span>
           </div>
         )}
       </div>
 
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
         {historyOpen && (
-          <ChatHistory
-            sessions={historySessions}
-            currentSessionId={currentSessionId}
-            loading={loadingSessions}
-            deleting={deletingSession}
-            searchQuery={historySearchQuery}
-            onSearchChange={setHistorySearchQuery}
-            onSelect={handleSelectSession}
-            onNew={() => void createSession(activeMode)}
-            onDelete={handleDeleteSession}
-          />
+          <>
+            <button
+              type="button"
+              className="absolute inset-0 z-30 bg-black/50"
+              aria-label="Close chat history"
+              onClick={() => setHistoryOpen(false)}
+            />
+            <aside className="absolute left-0 top-0 bottom-0 z-40 flex w-72 max-w-[85%] min-h-0 flex-col border-r border-[var(--border)] bg-[var(--bg-secondary)] shadow-lg">
+              <ChatHistory
+                sessions={historySessions}
+                currentSessionId={currentSessionId}
+                loading={loadingSessions}
+                deleting={deletingSession}
+                searchQuery={historySearchQuery}
+                onSearchChange={setHistorySearchQuery}
+                onSelect={handleSelectSession}
+                onNew={() => void createSession(activeMode, { allowWebSearch: effectiveAllowWebSearch })}
+                onDelete={handleDeleteSession}
+              />
+            </aside>
+          </>
         )}
 
         <div className="min-w-0 flex-1 flex flex-col overflow-hidden">
@@ -853,11 +891,16 @@ export function ChatPanel() {
             thinkingLabel={assistantStatus || (streaming ? 'Thinking…' : null)}
             pendingToolCalls={pendingToolCalls}
             runEventsById={runEventsById}
+            onOpenRunInAgents={(runId) => {
+              setRightPanelTab('agents')
+              requestOpenRunDrawer(runId, 'conversation')
+            }}
           />
 
           <ChatComposer
             value={composerValue}
             mode={activeMode}
+            allowWebSearch={effectiveAllowWebSearch}
             treeItems={treeItems}
             disabled={composerDisabled}
             submitting={submitting}
@@ -870,6 +913,7 @@ export function ChatPanel() {
             onClearPageElement={() => setPageElementSelection(null)}
             onChange={setComposerValue}
             onModeChange={(mode) => void persistModeChange(mode)}
+            onAllowWebSearchChange={(enabled) => void handleAllowWebSearchToggle(enabled)}
             onCommand={handleCommand}
           />
         </div>

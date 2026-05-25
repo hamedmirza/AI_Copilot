@@ -5,7 +5,7 @@ from pathlib import Path
 import git
 from git import Repo
 
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import ValidationError
 
 
 class GitService:

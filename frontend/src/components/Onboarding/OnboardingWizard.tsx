@@ -13,7 +13,7 @@ export function OnboardingWizard() {
   const allowSkip = projects.length > 0
   const setCurrentProject = useProjectStore((s) => s.setCurrentProject)
   const [step, setStep] = useState(1)
-  const [lmUrl, setLmUrl] = useState('http://192.168.128.70:1234/v1')
+  const [lmUrl, setLmUrl] = useState('http://172.10.1.2:1234/v1')
   const [testing, setTesting] = useState(false)
   const [testOk, setTestOk] = useState<boolean | null>(null)
   const [name, setName] = useState('')
@@ -96,7 +96,7 @@ export function OnboardingWizard() {
               className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-3 py-2 text-sm mb-2"
               value={lmUrl}
               onChange={(e) => setLmUrl(e.target.value)}
-              placeholder="http://192.168.128.70:1234/v1"
+              placeholder="http://172.10.1.2:1234/v1"
             />
             <Button loading={testing} onClick={testLm}>Test Connection</Button>
             {testOk === true && <p className="text-[var(--success)] text-sm mt-2">✓ Connected</p>}

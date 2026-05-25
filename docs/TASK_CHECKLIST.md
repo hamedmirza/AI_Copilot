@@ -58,7 +58,7 @@
 | `./scripts/server.sh stop` then `pytest -q` | **38 passed** |
 | `npm --prefix frontend run build` | Success (tsc + vite) |
 | `GET /api/health` | `{"status":"ok","version":"0.1.0"}` |
-| `POST /api/settings/reset` | Reverts to `http://192.168.128.70:1234/v1`, `worker_count: 1` |
+| `POST /api/settings/reset` | Reverts to `http://172.10.1.2:1234/v1`, `worker_count: 1` |
 | `test_run_workspace_isolation` | Run workspace under `runtime/workspaces/{run_id}`, source unchanged until approve |
 
 ### Browser E2E (`http://localhost:5177`)
@@ -83,7 +83,7 @@
 
 ## Known limitations (non-blocking)
 
-- **LM Studio live test** at `192.168.128.70:1234` not verified on this machine when LAN host is offline; Test Connection works when reachable.
+- **LM Studio live test** at `172.10.1.2:1234` not verified on this machine when LAN host is offline; Test Connection works when reachable.
 - **pytest teardown** — background run workers may log `Event loop is closed` after TestClient shutdown (benign; tests still pass).
 
 ## Commands

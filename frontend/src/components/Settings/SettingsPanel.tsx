@@ -416,7 +416,7 @@ export function SettingsPanel() {
                 <label className="block text-xs mb-1">Base URL</label>
                 <input
                   className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-sm"
-                  value={String(settings.lmstudio_base_url || 'http://127.0.0.1:1234/v1')}
+                  value={String(settings.lmstudio_base_url || 'http://172.10.1.2:1234/v1')}
                   onChange={(e) => setSettings({ ...settings, lmstudio_base_url: e.target.value })}
                   onBlur={(e) => { void save('lmstudio_base_url', e.target.value); void testConnection('lmstudio') }}
                 />

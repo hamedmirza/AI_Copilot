@@ -1,6 +1,4 @@
 import hashlib
-import json
-import os
 import shutil
 from pathlib import Path
 
@@ -160,6 +158,8 @@ class FileService:
             except PermissionError:
                 return nodes
             for entry in entries:
+                if entry.is_symlink():
+                    continue
                 if entry.name.startswith(".") and entry.name not in (".env.example",):
                     continue
                 if entry.is_dir() and entry.name in _TREE_SKIP_DIRS:

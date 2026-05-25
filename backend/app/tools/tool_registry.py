@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.mcp.client_manager import MCPClientManager
 from app.mcp.registry_bridge import MCPRegistryBridge
 from app.services.chat_mode_registry import ChatModeDefinition
+from app.db.models import ChatSessionModel
 from app.tools.chat_tools import BUILTIN_CHAT_TOOLS, ToolExecutionContext, ToolSpec
 
 
@@ -27,9 +28,16 @@ class ToolRegistry:
         self.mcp_manager = mcp_manager or MCPClientManager()
         self.mcp_bridge = MCPRegistryBridge(db, self.mcp_manager)
 
-    def resolve_tools(self, mode: ChatModeDefinition) -> dict[str, ResolvedTool]:
+    def resolve_tools(
+        self,
+        mode: ChatModeDefinition,
+        *,
+        session: ChatSessionModel | None = None,
+    ) -> dict[str, ResolvedTool]:
         resolved: dict[str, ResolvedTool] = {}
         for name in mode.allowed_tools:
+            if name == "web_search" and not getattr(session, "allow_web_search", False):
+                continue
             builtin = BUILTIN_CHAT_TOOLS.get(name)
             if not builtin:
                 continue

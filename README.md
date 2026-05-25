@@ -6,7 +6,7 @@ A local VS Code-like IDE with an embedded 7-agent software team pipeline, remote
 
 - Python 3.12+
 - Node.js 20+
-- LM Studio (optional, for live LLM) — default LAN URL: `http://192.168.128.70:1234/v1`
+- LM Studio (optional, for live LLM) — default LAN URL: `http://172.10.1.2:1234/v1`
 
 ## Quick Start
 
@@ -39,7 +39,7 @@ Open http://localhost:5177 — complete the onboarding wizard on first launch.
 1. Install LM Studio on your network PC
 2. Load a model (recommended: `qwen2.5-coder-32b-instruct` for coding)
 3. Enable **Start on LAN** (binds to `0.0.0.0:1234`)
-4. In AI Copilot Settings (`Cmd+,`), verify URL: `http://192.168.128.70:1234/v1`
+4. In AI Copilot Settings (`Cmd+,`), verify URL: `http://172.10.1.2:1234/v1`
 5. Click **Test Connection**
 
 All runtime settings are stored in SQLite (`backend/app.db`) — no server restart needed after changes.

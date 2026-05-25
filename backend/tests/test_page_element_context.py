@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 
 from app.services.chat_orchestrator import ChatOrchestrator
 

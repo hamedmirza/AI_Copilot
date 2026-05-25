@@ -138,6 +138,35 @@ def test_chat_tool_git_status_basics(client, tmp_path: Path):
     assert any(item["path"] == "main.py" for item in parsed["untracked"])
 
 
+def test_tool_registry_hides_web_search_unless_session_enabled(client, tmp_path: Path):
+    project_id = _create_project(client, tmp_path, "chat-web-tool-project")
+    created = client.post(
+        "/api/chat/sessions",
+        json={"project_id": project_id, "title": "Tool Chat", "mode": "agent"},
+        headers=HEADERS,
+    )
+    assert created.status_code == 200
+    session_id = created.json()["id"]
+
+    db = SessionLocal()
+    try:
+        session = ChatService(db).get_session(session_id)
+        mode = __import__("app.services.chat_mode_registry", fromlist=["ChatModeRegistry"]).ChatModeRegistry().get_mode(
+            "agent"
+        )
+        tool_registry = ToolRegistry(db)
+        tools = tool_registry.resolve_tools(mode, session=session)
+        assert "web_search" not in tools
+
+        session.allow_web_search = True
+        db.commit()
+        db.refresh(session)
+        tools = tool_registry.resolve_tools(mode, session=session)
+        assert "web_search" in tools
+    finally:
+        db.close()
+
+
 def test_chat_modes_endpoint_lists_builtin_modes(client):
     response = client.get("/api/chat/modes", headers=HEADERS)
     assert response.status_code == 200

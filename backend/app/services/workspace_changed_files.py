@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.services.workspace_service import is_promotable_path
+from app.services.workspace_walk import iter_workspace_files
 
 
 def workspace_changed_files(workspace: Path, source_root: Path) -> list[str]:
@@ -13,9 +14,7 @@ def workspace_changed_files(workspace: Path, source_root: Path) -> list[str]:
     source = source_root.resolve()
     root = workspace.resolve()
     paths: list[str] = []
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
+    for path in iter_workspace_files(root):
         rel = path.relative_to(root)
         if not is_promotable_path(rel):
             continue

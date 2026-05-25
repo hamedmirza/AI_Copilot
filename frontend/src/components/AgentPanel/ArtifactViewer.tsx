@@ -826,7 +826,7 @@ function ArtifactBody({
           artifact={artifact}
           runId={runId}
           artifacts={artifacts}
-          onRetryWithFeedback={onRetryWithFeedback || (() => {})}
+          onRetryWithFeedback={onRetryWithFeedback}
           busy={retryBusy}
           retryDisabled={retryDisabled}
         />

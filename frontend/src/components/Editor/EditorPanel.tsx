@@ -56,7 +56,7 @@ export function EditorPanel() {
     const delay = Number(settings.editor_auto_save_delay_ms) || 2000
     autoSaveTimer.current = window.setTimeout(() => saveFile(activeTab), delay)
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current) }
-  }, [current?.content, settings.editor_auto_save, activeTab, saveFile, current?.dirty])
+  }, [activeTab, current?.content, current?.dirty, saveFile, settings.editor_auto_save, settings.editor_auto_save_delay_ms])
 
   const handleClose = (path: string) => {
     const tab = tabs.find((t) => t.path === path)
@@ -84,7 +84,7 @@ export function EditorPanel() {
       startLineNumber: selection.startLineNumber,
       endLineNumber: selection.endLineNumber,
     })
-  }, [current?.path, setSelection])
+  }, [current, setSelection])
 
   if (tabs.length === 0) {
     return <EmptyState title="No files open" description="Open a file from the Explorer to start editing" />

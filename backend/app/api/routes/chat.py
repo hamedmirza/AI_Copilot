@@ -41,6 +41,7 @@ def _session_response(session) -> ChatSessionResponse:
         mode=session.mode,
         model_override=session.model_override,
         nothink=session.nothink,
+        allow_web_search=bool(getattr(session, "allow_web_search", False)),
         message_count=int(getattr(session, "message_count", 0) or 0),
         last_message_preview=getattr(session, "last_message_preview", None),
         last_message_at=getattr(session, "last_message_at", None),
@@ -116,6 +117,7 @@ def create_chat_session(body: ChatSessionCreate, db: Session = Depends(get_db)):
                 mode=body.mode,
                 model_override=body.model_override,
                 nothink=body.nothink,
+                allow_web_search=body.allow_web_search,
             ).id
         )
     )
@@ -142,6 +144,7 @@ def update_chat_session(session_id: str, body: ChatSessionUpdate, db: Session = 
                     mode=body.mode,
                     model_override=body.model_override if "model_override" in body.model_fields_set else UNSET,
                     nothink=body.nothink if "nothink" in body.model_fields_set else UNSET,
+                    allow_web_search=body.allow_web_search if "allow_web_search" in body.model_fields_set else UNSET,
                 ).id
             )
         )
@@ -221,6 +224,7 @@ def spawn_chat_task(session_id: str, body: ChatSpawnTaskRequest, db: Session = D
             project_id=session.project_id,
             description=body.description,
             validation_profile=body.validation_profile,
+            allow_web_search=session.allow_web_search if body.allow_web_search is None else body.allow_web_search,
         )
         assistant_message = service.append_message(
             session_id,
@@ -237,7 +241,13 @@ def spawn_chat_task(session_id: str, body: ChatSpawnTaskRequest, db: Session = D
                 **result,
             },
         )
-        return ChatSpawnTaskResponse(**result, message_id=assistant_message.id, chat_session_id=session_id)
+        return ChatSpawnTaskResponse(
+            ok=bool(result.get("ok", True)),
+            run_id=str(result.get("run_id") or ""),
+            task_id=str(result.get("task_id") or ""),
+            message_id=assistant_message.id,
+            chat_session_id=session_id,
+        )
     except NotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
 

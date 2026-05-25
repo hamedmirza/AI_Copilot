@@ -69,7 +69,7 @@ class ConfigService:
         return {row.key: _parse_value(row.key, row.value) for row in rows}
 
     _DEFAULTS: dict[str, object] = {
-        "lmstudio_base_url": "http://192.168.128.70:1234/v1",
+        "lmstudio_base_url": "http://172.10.1.2:1234/v1",
         "lmstudio_api_key": "lm-studio",
         "lmstudio_model": "",
         "ollama_base_url": "http://172.10.1.2:11434/v1",
@@ -83,7 +83,7 @@ class ConfigService:
         "max_review_retries": 3,
         "chat_history_limit": 50,
         "chat_max_context_tokens": 32768,
-        "chat_max_output_tokens": 4096,
+        "chat_max_output_tokens": 2048,
         "nothink_default": True,
         "stop_on_first_failure": True,
         "model_planner": "qwen3.6-27b",

@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react'
 import { api } from '@/api/client'
-import { normalizeThreadEntry } from '@/components/AgentPanel/RunConversationPanel'
+import { normalizeThreadEntry } from '@/components/AgentPanel/runThread'
 import { normalizeRunEvents } from '@/lib/runEvents'
 import { showError } from '@/lib/toast'
 import type { RunArtifact, RunDetail, RunEvent, RunThreadEntry } from '@/types/runs'

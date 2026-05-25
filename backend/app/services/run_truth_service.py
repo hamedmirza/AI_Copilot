@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -14,13 +15,42 @@ from app.services.workspace_changed_files import workspace_changed_files
 _FRONTEND_EXTENSIONS = (".js", ".jsx", ".ts", ".tsx", ".css", ".scss", ".html")
 _BACKEND_EXTENSIONS = (".py", ".pyi")
 _REPORT_EXTENSIONS = (".md", ".txt", ".rst")
+_FRONTEND_UI_TOKENS = ("page", "dashboard", "kanban", "ui", "frontend", "screen", "view")
+
+
+def description_implies_frontend_ui(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    for token in _FRONTEND_UI_TOKENS:
+        if len(token) <= 3:
+            if re.search(rf"\b{re.escape(token)}\b", lowered):
+                return True
+        elif token in lowered:
+            return True
+    return False
+
+
+def should_run_ui_designer(
+    description: str,
+    task_kind: str | None,
+    deliverable_kind: str | None = None,
+) -> bool:
+    if task_kind == "analysis":
+        return False
+    kind = deliverable_kind or infer_deliverable_kind(description, task_kind)
+    if kind == "frontend":
+        return True
+    if kind in {"report", "backend"}:
+        return False
+    if kind == "mixed":
+        return description_implies_frontend_ui(description)
+    return description_implies_frontend_ui(description)
 
 
 def infer_deliverable_kind(description: str, task_kind: str | None) -> str:
     text = (description or "").strip().lower()
     if task_kind == "analysis":
         return "report"
-    if any(token in text for token in ("page", "dashboard", "kanban", "ui", "frontend", "screen", "view")):
+    if description_implies_frontend_ui(text):
         return "frontend"
     if any(token in text for token in ("api", "backend", "route", "service", "endpoint", "database")):
         return "backend"

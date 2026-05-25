@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.core.exceptions import ValidationError
-from app.services.workspace_service import prepare_run_workspace, runs_root
+from app.services.workspace_service import prepare_run_workspace
 from app.tools.lint_runner import canonical_frontend_required_commands, scope_profile_commands
 
 

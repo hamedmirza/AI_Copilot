@@ -6,6 +6,7 @@ import { useWebSocket } from '@/hooks/useWebSocket'
 import { showError } from '@/lib/toast'
 import { EmptyState, Skeleton } from '@/components/ui/primitives'
 import {
+  formatRunElapsed,
   formatRunRelativeTime,
   hasRecoveryMetadata,
   runDisplayLabel,
@@ -42,6 +43,7 @@ export function RunsPanel() {
   const { hydrateRun } = useRunDetail()
   const [loadingRuns, setLoadingRuns] = useState(false)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [searchQuery, setSearchQuery] = useState('')
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const runDrawerRequest = useUIStore((s) => s.runDrawerRequest)
   const clearRunDrawerRequest = useUIStore((s) => s.clearRunDrawerRequest)
@@ -58,12 +60,18 @@ export function RunsPanel() {
     recovery_status: r.recovery_status != null ? String(r.recovery_status) : null,
     error_message: r.error_message != null ? String(r.error_message) : null,
     created_at: String(r.created_at || ''),
+    updated_at: r.updated_at != null ? String(r.updated_at) : undefined,
   })), [runs])
 
-  const filteredRuns = useMemo(
-    () => runSummaries.filter((run) => matchesFilter(run.status, statusFilter)),
-    [runSummaries, statusFilter],
-  )
+  const filteredRuns = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    return runSummaries.filter((run) => {
+      if (!matchesFilter(run.status, statusFilter)) return false
+      if (!q) return true
+      const label = runDisplayLabel(run).toLowerCase()
+      return label.includes(q) || run.id.toLowerCase().includes(q)
+    })
+  }, [runSummaries, statusFilter, searchQuery])
 
   const loadRuns = useCallback(async () => {
     if (!projectId) {
@@ -127,7 +135,16 @@ export function RunsPanel() {
   return (
     <div className="h-full flex min-h-0 overflow-hidden">
       <div className="w-[40%] min-w-0 flex flex-col border-r border-[var(--border)] p-2">
-        <div className="flex flex-wrap gap-1 shrink-0 mb-2">
+        <div className="shrink-0 mb-2 space-y-2">
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search runs…"
+            className="w-full text-xs px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--bg-tertiary)] outline-none focus:border-[var(--accent)]"
+            aria-label="Search runs"
+          />
+          <div className="flex flex-wrap gap-1">
           {FILTER_OPTIONS.map((opt) => (
             <button
               key={opt.id}
@@ -142,6 +159,7 @@ export function RunsPanel() {
               {opt.label}
             </button>
           ))}
+          </div>
         </div>
 
         <div className="flex-1 min-h-0 overflow-auto space-y-1">
@@ -172,8 +190,12 @@ export function RunsPanel() {
                     )}
                     <span className="flex-1 min-w-0 truncate font-medium">{runDisplayLabel(run)}</span>
                   </div>
-                  <div className="mt-0.5 text-[10px] text-[var(--text-secondary)] flex gap-2">
+                  <div className="mt-0.5 text-[10px] text-[var(--text-secondary)] flex gap-2 flex-wrap">
                     <span>{formatRunRelativeTime(run.created_at)}</span>
+                    {(() => {
+                      const elapsed = formatRunElapsed(run.created_at, run.updated_at, run.status)
+                      return elapsed ? <span>{elapsed}</span> : null
+                    })()}
                     {run.current_stage && <span className="truncate">{run.current_stage}</span>}
                   </div>
                 </button>

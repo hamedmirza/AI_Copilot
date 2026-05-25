@@ -21,7 +21,7 @@ export function ReportingWorkbenchPanel() {
     setLoading(true)
     setError(null)
     try {
-      const data = await api.kanban.metrics(id)
+      const data = await api.reporting.metrics(id)
       setMetrics({
         successRate: Number(data.successRate ?? 0),
         failureRate: Number(data.failureRate ?? 0),

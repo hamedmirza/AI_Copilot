@@ -3,32 +3,11 @@ import { FolderOpen } from 'lucide-react'
 import { api } from '@/api/client'
 import { showError } from '@/lib/toast'
 import { Button } from '@/components/ui/primitives'
-
-export const VALIDATION_PROFILES = [
-  { value: 'python', label: 'Python' },
-  { value: 'react', label: 'React' },
-  { value: 'fullstack', label: 'Fullstack' },
-  { value: 'node', label: 'Node' },
-  { value: 'custom', label: 'Custom' },
-] as const
-
-export type SourceType = 'workspace' | 'git'
-
-export interface ProjectWizardForm {
-  name: string
-  description: string
-  source_type: SourceType
-  source_repo_spec: string
-  validation_profile: string
-}
-
-export const emptyWizardForm = (): ProjectWizardForm => ({
-  name: '',
-  description: '',
-  source_type: 'workspace',
-  source_repo_spec: '',
-  validation_profile: 'python',
-})
+import {
+  type ProjectWizardForm,
+  type SourceType,
+  VALIDATION_PROFILES,
+} from './projectWizardConfig'
 
 function validateStep(step: number, form: ProjectWizardForm): string | null {
   if (step === 1) {

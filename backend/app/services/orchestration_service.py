@@ -3,10 +3,11 @@ import logging
 import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
+from typing import Any, Callable, cast
 
+import httpx
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.orm import Session
 
@@ -18,6 +19,7 @@ from app.agents import (
     TesterAgent,
     UIDesignerAgent,
 )
+from app.agents.tool_runtime import PipelineToolExecutionContext, PipelineToolRuntime
 from app.core.enums import PipelineStage, RunStatus
 from app.core.logging import run_id_var, worker_id_var
 from app.db.models import ArtifactModel, RunEventModel, RunModel, TaskModel
@@ -35,16 +37,18 @@ from app.services.workspace_service import clone_for_run
 from app.core.exceptions import CommandRejectedError, PatchGuardError
 from app.tools.command_runner import run_command, validate_command
 from app.tools.lint_runner import (
+    FRONTEND_SCAFFOLD_MESSAGE,
     canonical_frontend_required_commands,
     get_profile_commands,
     normalize_tester_dry_run_commands,
+    partition_frontend_commands,
     scope_profile_commands,
 )
 from app.services.deployment_gates import effective_changed_files, evaluate_deployment_readiness
 from app.services.integration_guard import integration_guard_issues
 from app.services.contract_guard import contract_guard_issues
 from app.services.integration_guard import integration_requires_visual_evidence
-from app.services.visual_evidence_service import execute_visual_checks, clear_visual_evidence_artifacts
+from app.services.visual_evidence_service import execute_visual_checks
 from app.services.workspace_dev_url import build_default_visual_checks
 from app.services.supervisor_service import run_pre_deploy_supervisor
 from app.services.run_truth_service import (
@@ -52,8 +56,10 @@ from app.services.run_truth_service import (
     expected_validation_family,
     infer_deliverable_kind,
     persist_run_truth,
+    should_run_ui_designer,
 )
 from app.services.run_thread_service import RunThreadService
+from app.services.web_search_service import WebSearchError, WebSearchService
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +225,9 @@ class OrchestrationService:
             db.add(RunEventModel(**event_payload))
             db.commit()
         except Exception:
-            db.rollback()
+            transaction = db.get_transaction()
+            if transaction is not None and transaction.is_active:
+                db.rollback()
             isolated = SessionLocal()
             try:
                 isolated.add(RunEventModel(**event_payload))
@@ -407,12 +415,12 @@ class OrchestrationService:
         learner = LearningService(db)
         learner.ensure_run_task_kind(run)
         RunThreadService(db).ensure_session(run_id, run.chat_session_id)
-        context_base = self._build_context_base(run, task.description)
+        context_base = self._build_context_base(db, run_id, run, task.description)
         fs = FileService(workspace, project.protected_files)
 
         ConfigService(db).reload_registry()
 
-        stages: list[tuple[PipelineStage, callable]] = [
+        stages: list[tuple[PipelineStage, Callable[[str], object]]] = [
             (PipelineStage.PLANNER, lambda ctx: self._stage_planner(db, run_id, ctx)),
             (PipelineStage.ARCHITECT, lambda ctx: self._stage_architect(db, run_id, ctx)),
             (PipelineStage.UI_DESIGNER, lambda ctx: self._stage_ui(db, run_id, ctx)),
@@ -430,6 +438,9 @@ class OrchestrationService:
 
         for stage, fn in stages[start_index:]:
             run = db.get(RunModel, run_id)
+            if not run:
+                self._finalize_terminal_state(db, run_id)
+                return
             clarification = self._needs_clarification(run, task.description, stage.value)
             if clarification:
                 question, recommendation, gate_id = clarification
@@ -469,6 +480,9 @@ class OrchestrationService:
             persist_run_truth(db, run_id)
 
         run = db.get(RunModel, run_id)
+        if not run:
+            self._finalize_terminal_state(db, run_id)
+            return
         if run.status == RunStatus.RUNNING.value:
             if not self._finalize_deployment_gates(db, run_id, workspace, source):
                 self._finalize_terminal_state(db, run_id)
@@ -488,7 +502,25 @@ class OrchestrationService:
             persist_run_truth(db, run_id)
             self._finalize_terminal_state(db, run_id)
 
-    def _build_context_base(self, run: RunModel, task_description: str) -> str:
+    def _build_context_base(
+        self,
+        db_or_run: Session | RunModel,
+        run_id_or_task_description: str,
+        run: RunModel | None = None,
+        task_description: str | None = None,
+    ) -> str:
+        db: Session | None
+        run_id: str
+        if isinstance(db_or_run, RunModel):
+            db = None
+            run = db_or_run
+            run_id = run.id
+            task_description = run_id_or_task_description
+        else:
+            db = db_or_run
+            run_id = run_id_or_task_description
+        if run is None or task_description is None:
+            raise ValueError("run and task_description are required")
         task_kind = run.task_kind or infer_task_kind(task_description)
         guidance = [f"Task mode: {task_kind}."]
         if task_kind == "analysis":
@@ -505,6 +537,32 @@ class OrchestrationService:
             answer = str(run.clarification_context.get("answer") or "").strip()
             if question and answer:
                 context_base += f"\n\nClarification resolved:\nQuestion: {question}\nAnswer: {answer}"
+        if run.allow_web_search:
+            try:
+                search_block = WebSearchService().build_context_block(task_description, limit=5)
+                context_base += f"\n\n{search_block}"
+                if db is not None:
+                    self._record_event(
+                        db,
+                        run_id,
+                        "web_search_context_loaded",
+                        "planner",
+                        "info",
+                        "Loaded public web search context for the task",
+                        {"query": task_description},
+                    )
+            except (WebSearchError, httpx.HTTPError) as exc:
+                context_base += f"\n\nWeb search note:\nEnabled, but search results were unavailable: {exc}"
+                if db is not None:
+                    self._record_event(
+                        db,
+                        run_id,
+                        "web_search_context_failed",
+                        "planner",
+                        "warning",
+                        f"Web search context unavailable: {exc}",
+                        {"query": task_description},
+                    )
         return context_base
 
     def _stage_context(self, db: Session, run: RunModel, stage: str, context_base: str) -> str:
@@ -537,7 +595,97 @@ class OrchestrationService:
                     "\n".join(f"- {path}" for path in protected_files),
                 ]
             )
+        if stage == PipelineStage.UI_DESIGNER.value:
+            context = self._append_pipeline_artifact_context(
+                db,
+                run.id,
+                context,
+                include_ui_design=False,
+            )
         return context
+
+    def _append_pipeline_artifact_context(
+        self,
+        db: Session,
+        run_id: str,
+        context: str,
+        *,
+        include_ui_design: bool = False,
+    ) -> str:
+        plan = self._latest_artifact(db, run_id, "plan") or {}
+        architect = self._latest_artifact(db, run_id, "architect") or {}
+        sections = [context]
+        plan_summary = self._truncate(plan.get("summary") or "", self._REVIEW_ARTIFACT_LIMIT)
+        if plan_summary:
+            sections.extend(["", "Planner summary:", plan_summary])
+        criteria_lines = self._plan_acceptance_criteria_lines(plan)
+        if criteria_lines:
+            sections.extend(["", "Planner acceptance criteria:", *criteria_lines])
+        architect_overview = self._truncate(architect.get("overview") or "", self._REVIEW_ARTIFACT_LIMIT)
+        if architect_overview:
+            sections.extend(["", "Architect overview:", architect_overview])
+        modules = architect.get("modules") or []
+        if modules:
+            module_lines = [f"- {module}" for module in modules if str(module).strip()]
+            if module_lines:
+                sections.extend(["", "Architect modules:", *module_lines[:20]])
+        blueprint_paths = self._blueprint_paths(architect)
+        if blueprint_paths:
+            sections.extend(["", "Architect blueprint paths:", "\n".join(f"- {path}" for path in blueprint_paths)])
+        if include_ui_design:
+            ui_design = self._latest_artifact(db, run_id, "ui_design")
+            if ui_design:
+                sections.extend(
+                    [
+                        "",
+                        "UI design summary:",
+                        self._truncate(ui_design.get("layout_description") or "", self._REVIEW_ARTIFACT_LIMIT),
+                        self._truncate(
+                            json.dumps(ui_design.get("components") or [], ensure_ascii=True),
+                            self._REVIEW_ARTIFACT_LIMIT,
+                        ),
+                    ]
+                )
+        return "\n".join(sections)
+
+    def _build_stage_tool_runtime(self, db: Session, run_id: str, stage: str) -> PipelineToolRuntime | None:
+        run = db.get(RunModel, run_id)
+        if run is None:
+            return None
+        project = ProjectService(db).get(run.project_id)
+        workspace = Path(run.workspace_path or project.source_repo_spec)
+
+        def on_tool_event(event_type: str, payload: dict[str, Any]) -> None:
+            tool_name = str(payload.get("tool") or "tool")
+            if event_type == "start":
+                message = f"Pipeline tool started: {tool_name}"
+                severity = "info"
+            elif event_type == "end":
+                message = f"Pipeline tool completed: {tool_name}"
+                severity = "info"
+            else:
+                message = f"Pipeline tool failed: {tool_name}"
+                severity = "warning"
+            event_name = f"pipeline_tool_{event_type}"
+            self._record_event(db, run_id, event_name, stage, severity, message, payload)
+            self._emit(run_id, event_name, stage, message, payload)
+
+        return PipelineToolRuntime(
+            PipelineToolExecutionContext(
+                db=db,
+                project=project,
+                run=run,
+                workspace=workspace,
+            ),
+            allow_web_search=bool(run.allow_web_search),
+            on_tool_event=on_tool_event,
+        )
+
+    def _make_stage_agent(self, agent_cls, provider, tool_runtime: PipelineToolRuntime | None):
+        try:
+            return agent_cls(provider, tool_runtime=tool_runtime)
+        except TypeError:
+            return agent_cls(provider)
 
     def _finalize_terminal_state(self, db: Session, run_id: str) -> None:
         run = db.get(RunModel, run_id)
@@ -555,7 +703,7 @@ class OrchestrationService:
     def _stage_planner(self, db: Session, run_id: str, context: str):
         provider = ProviderRegistry.get().resolve_stage(PipelineStage.PLANNER)
         self._log_provider(db, run_id, "planner", provider)
-        agent = PlannerAgent(provider)
+        agent = self._make_stage_agent(PlannerAgent, provider, self._build_stage_tool_runtime(db, run_id, "planner"))
         output = agent.plan(context)
         self._save_artifact(db, run_id, "plan", output.model_dump())
         persist_run_truth(db, run_id)
@@ -564,20 +712,36 @@ class OrchestrationService:
     def _stage_architect(self, db: Session, run_id: str, context: str):
         provider = ProviderRegistry.get().resolve_stage(PipelineStage.ARCHITECT)
         self._log_provider(db, run_id, "architect", provider)
-        agent = ArchitectAgent(provider)
+        agent = self._make_stage_agent(ArchitectAgent, provider, self._build_stage_tool_runtime(db, run_id, "architect"))
         output = agent.design(context)
         self._save_artifact(db, run_id, "architect", output.model_dump())
         persist_run_truth(db, run_id)
         return True
 
     def _stage_ui(self, db: Session, run_id: str, context: str):
+        run = db.get(RunModel, run_id)
+        task = run.task if run else None
+        description = task.description if task else ""
+        deliverable_kind = run.deliverable_kind if run else None
+        task_kind = run.task_kind if run else None
+        if not should_run_ui_designer(description, task_kind, deliverable_kind):
+            self._record_event(
+                db,
+                run_id,
+                "ui_designer_skipped",
+                "ui_designer",
+                "info",
+                "UI stage skipped",
+                {
+                    "reason": "no_ui_surface_detected",
+                    "deliverable_kind": deliverable_kind or infer_deliverable_kind(description, task_kind),
+                },
+            )
+            return True
         provider = ProviderRegistry.get().resolve_stage(PipelineStage.UI_DESIGNER)
         self._log_provider(db, run_id, "ui_designer", provider)
-        agent = UIDesignerAgent(provider)
+        agent = self._make_stage_agent(UIDesignerAgent, provider, self._build_stage_tool_runtime(db, run_id, "ui_designer"))
         output = agent.design(context)
-        if output is None:
-            self._record_event(db, run_id, "ui_designer_skipped", "ui_designer", "info", "UI stage skipped")
-            return True
         self._save_artifact(db, run_id, "ui_design", output.model_dump())
         persist_run_truth(db, run_id)
         return True
@@ -585,7 +749,7 @@ class OrchestrationService:
     def _stage_coder(self, db: Session, run_id: str, context: str, fs: FileService):
         provider = ProviderRegistry.get().resolve_stage(PipelineStage.CODER)
         self._log_provider(db, run_id, "coder", provider)
-        agent = CoderAgent(provider)
+        agent = self._make_stage_agent(CoderAgent, provider, self._build_stage_tool_runtime(db, run_id, "coder"))
         run = db.get(RunModel, run_id)
         project = ProjectService(db).get(run.project_id) if run else None
         source_root = Path(project.source_repo_spec) if project else fs.workspace
@@ -965,6 +1129,19 @@ class OrchestrationService:
             sections.extend(["", "Acceptance criteria checklist:", *criteria_lines])
         if blueprint_paths:
             sections.extend(["", "Architect blueprint paths:", "\n".join(f"- {path}" for path in blueprint_paths)])
+        ui_design = self._latest_artifact(db, run_id, "ui_design")
+        if ui_design:
+            sections.extend(
+                [
+                    "",
+                    "UI design summary:",
+                    self._truncate(ui_design.get("layout_description") or "", self._REVIEW_ARTIFACT_LIMIT),
+                    self._truncate(
+                        json.dumps(ui_design.get("components") or [], ensure_ascii=True),
+                        self._REVIEW_ARTIFACT_LIMIT,
+                    ),
+                ]
+            )
         if protected_files:
             sections.extend(
                 [
@@ -1301,9 +1478,11 @@ class OrchestrationService:
         max_retries = int(ConfigService(db).get_all().get("max_review_retries", 3))
         provider = ProviderRegistry.get().resolve_stage(PipelineStage.REVIEWER)
         self._log_provider(db, run_id, "reviewer", provider)
-        agent = ReviewerAgent(provider)
+        agent = self._make_stage_agent(ReviewerAgent, provider, self._build_stage_tool_runtime(db, run_id, "reviewer"))
         for attempt in range(1, max_retries + 1):
             run = db.get(RunModel, run_id)
+            if not run:
+                return False
             run.review_attempts = attempt
             db.commit()
             review_context, changed_files, structural_summaries, file_details = self._build_reviewer_context(
@@ -1428,6 +1607,8 @@ class OrchestrationService:
             self._save_artifact(db, run_id, f"review_{attempt}", review_payload)
             if output.approved:
                 self._resolve_pipeline_blocks(db, run_id, resolved_by_stage="reviewer", stage="reviewer")
+                issues = review_payload.get("issues")
+                issue_list = issues if isinstance(issues, list) else []
                 self._record_event(
                     db,
                     run_id,
@@ -1435,20 +1616,22 @@ class OrchestrationService:
                     "reviewer",
                     "info",
                     output.summary,
-                    {"attempt": attempt, "issues": review_payload.get("issues", [])},
+                    {"attempt": attempt, "issues": issue_list},
                 )
                 self._emit(
                     run_id,
                     "reviewer_approved",
                     "reviewer",
                     output.summary,
-                    {"attempt": attempt, "issues": review_payload.get("issues", [])},
+                    {"attempt": attempt, "issues": issue_list},
                 )
                 persist_run_truth(db, run_id)
                 return True
+            issues = review_payload.get("issues")
+            issue_list = issues if isinstance(issues, list) else []
             issue_guidance = "; ".join(
                 str(issue.get("message") or "")
-                for issue in (review_payload.get("issues") or [])[:3]
+                for issue in issue_list[:3]
                 if isinstance(issue, dict)
             )
             self._record_pipeline_block(
@@ -1468,22 +1651,26 @@ class OrchestrationService:
                 "reviewer",
                 "warning",
                 output.summary,
-                {"attempt": attempt, "issues": review_payload.get("issues", [])},
+                {"attempt": attempt, "issues": issue_list},
             )
             self._emit(
                 run_id,
                 "reviewer_requested_changes",
                 "reviewer",
                 output.summary,
-                {"attempt": attempt, "issues": review_payload.get("issues", [])},
+                {"attempt": attempt, "issues": issue_list},
             )
-            if self._review_failed_for_missing_context(output.summary, review_payload.get("issues", []), changed_files):
+            if self._review_failed_for_missing_context(
+                output.summary,
+                cast(list[dict[str, Any]], issue_list),
+                changed_files,
+            ):
                 self._mark_changes_requested(
                     db,
                     run_id,
                     f"Reviewer could not validate the patch with the available context: {output.summary}",
                     "reviewer_failed_fast",
-                    {"attempt": attempt, "issues": review_payload.get("issues", []), "changed_files": changed_files},
+                    {"attempt": attempt, "issues": issue_list, "changed_files": changed_files},
                 )
                 return False
             if attempt < max_retries:
@@ -1516,6 +1703,61 @@ class OrchestrationService:
                 return False
         return True
 
+    def _block_frontend_scaffold(
+        self,
+        db: Session,
+        run_id: str,
+        blocked_commands: list[str],
+    ) -> bool:
+        self._record_pipeline_block(
+            db,
+            run_id,
+            block_type="frontend_scaffold_missing",
+            stage="tester",
+            source="validation_profile",
+            message=FRONTEND_SCAFFOLD_MESSAGE,
+            guidance=(
+                "Add frontend/package.json and install the frontend toolchain in the run workspace "
+                "before retrying fullstack or react validation."
+            ),
+            target_stages=["coder", "tester"],
+        )
+        for command in blocked_commands:
+            self._record_event(
+                db,
+                run_id,
+                "frontend_scaffold_missing",
+                "tester",
+                "error",
+                FRONTEND_SCAFFOLD_MESSAGE,
+                {"command": command, "required": True},
+            )
+        run = db.get(RunModel, run_id)
+        if not run:
+            return False
+        run.status = RunStatus.BLOCKED.value
+        run.error_message = FRONTEND_SCAFFOLD_MESSAGE
+        db.commit()
+        self._emit(run_id, "run_blocked", "tester", FRONTEND_SCAFFOLD_MESSAGE)
+        return False
+
+    def _record_optional_frontend_scaffold_skips(
+        self,
+        db: Session,
+        run_id: str,
+        blocked_commands: list[str],
+    ) -> None:
+        for command in blocked_commands:
+            self._record_event(
+                db,
+                run_id,
+                "validation_skipped",
+                "tester",
+                "info",
+                FRONTEND_SCAFFOLD_MESSAGE,
+                {"command": command, "required": False, "reason": "frontend_scaffold_missing"},
+            )
+
     def _execute_tester_command_batch(
         self,
         db: Session,
@@ -1528,6 +1770,25 @@ class OrchestrationService:
     ) -> bool:
         if not commands:
             return True
+        workspace_path = Path(workspace)
+        runnable, blocked = partition_frontend_commands(commands, workspace_path)
+        if blocked and required:
+            for command in blocked:
+                self._record_event(
+                    db,
+                    run_id,
+                    "frontend_scaffold_missing",
+                    "tester",
+                    "error",
+                    FRONTEND_SCAFFOLD_MESSAGE,
+                    {"command": command, "required": required},
+                )
+            return False
+        if blocked and not required:
+            self._record_optional_frontend_scaffold_skips(db, run_id, blocked)
+        commands = runnable
+        if not commands:
+            return not required
         started_event = f"{event_prefix}_started"
         result_event = f"{event_prefix}_result"
         rejected_event = f"{event_prefix}_rejected"
@@ -1636,12 +1897,14 @@ class OrchestrationService:
         else:
             provider = ProviderRegistry.get().resolve_stage(PipelineStage.TESTER)
             self._log_provider(db, run_id, "tester", provider)
-            agent = TesterAgent(provider)
+            agent = self._make_stage_agent(TesterAgent, provider, self._build_stage_tool_runtime(db, run_id, "tester"))
             output = agent.test_plan(context)
             if self._tester_requires_visual_plan(db, run_id, changed_files):
                 skip_reason = (output.visual_checks_skip_reason or "").strip()
                 if not output.visual_checks and not skip_reason:
                     run = db.get(RunModel, run_id)
+                    if not run:
+                        return False
                     run.status = RunStatus.BLOCKED.value
                     run.error_message = (
                         "Frontend/UI work requires visual_checks[] or visual_checks_skip_reason"
@@ -1703,16 +1966,25 @@ class OrchestrationService:
                 dry_run_commands, gate_changed, workspace
             )
 
+        workspace_path = Path(workspace)
+        dry_run_runnable, dry_run_blocked = partition_frontend_commands(dry_run_commands, workspace_path)
+        if dry_run_blocked:
+            return self._block_frontend_scaffold(db, run_id, dry_run_blocked)
+
         dry_run_passed = self._execute_tester_command_batch(
             db,
             run_id,
             workspace,
-            dry_run_commands,
+            dry_run_runnable,
             event_prefix="dry_run",
             required=True,
         )
         if not dry_run_passed:
             run = db.get(RunModel, run_id)
+            if not run:
+                return False
+            if run.error_message == FRONTEND_SCAFFOLD_MESSAGE:
+                return False
             run.status = RunStatus.BLOCKED.value
             run.error_message = "Dry-run verification failed"
             db.commit()
@@ -1725,7 +1997,9 @@ class OrchestrationService:
         seen_optional: set[str] = set()
         frontend_build_required = any(is_frontend_code_path(path) for path in changed_files)
         if frontend_build_required:
-            profile_commands = canonical_frontend_required_commands(profile_commands, changed_files)
+            profile_commands = canonical_frontend_required_commands(
+                profile_commands, changed_files, workspace_path
+            )
         for command in profile_commands:
             if command not in seen_required:
                 seen_required.add(command)
@@ -1736,17 +2010,23 @@ class OrchestrationService:
             seen_optional.add(command)
             optional_commands.append(command)
 
-        commands: list[tuple[str, bool]] = [(cmd, True) for cmd in required_commands] + [(cmd, False) for cmd in optional_commands]
+        required_runnable, required_blocked = partition_frontend_commands(required_commands, workspace_path)
+        optional_runnable, optional_blocked = partition_frontend_commands(optional_commands, workspace_path)
+        if required_blocked:
+            return self._block_frontend_scaffold(db, run_id, required_blocked)
+        if optional_blocked:
+            self._record_optional_frontend_scaffold_skips(db, run_id, optional_blocked)
+
         required_passed = self._execute_tester_command_batch(
             db,
             run_id,
             workspace,
-            [cmd for cmd, is_required in commands if is_required],
+            required_runnable,
             event_prefix="validation",
             required=True,
         )
         if required_passed:
-            for command in [cmd for cmd, is_required in commands if not is_required]:
+            for command in optional_runnable:
                 self._execute_tester_command_batch(
                     db,
                     run_id,
@@ -1756,8 +2036,7 @@ class OrchestrationService:
                     required=False,
                 )
 
-        required_executed = len([cmd for cmd, is_required in commands if is_required])
-        if required_commands and required_executed == 0:
+        if required_commands and not required_runnable:
             required_passed = False
             self._record_event(
                 db,
@@ -1781,6 +2060,8 @@ class OrchestrationService:
                 target_stages=["coder", "tester"],
             )
             run = db.get(RunModel, run_id)
+            if not run:
+                return False
             run.status = RunStatus.BLOCKED.value
             run.error_message = "Validation failed"
             db.commit()
@@ -1910,6 +2191,7 @@ def create_task_and_run(db: Session, data: dict):
         validation_profile=profile,
         task_kind=task_kind,
         use_scout=bool(data.get("use_scout", False)),
+        allow_web_search=bool(data.get("allow_web_search", False)),
     )
     db.add(task)
     db.flush()
@@ -1921,6 +2203,7 @@ def create_task_and_run(db: Session, data: dict):
         task_kind=task_kind,
         recovery_status="none",
         chat_session_id=data.get("session_id"),
+        allow_web_search=bool(data.get("allow_web_search", False)),
         deliverable_kind=infer_deliverable_kind(data["description"], task_kind),
         expected_targets_json=json.dumps(
             expected_targets_for_kind(infer_deliverable_kind(data["description"], task_kind))

@@ -145,12 +145,12 @@ class LMStudioCatalog:
             fallback = self.pick_best(mode, require_tool_use=require_tool_use)
             if fallback and fallback != target:
                 fallback_record = catalog.get(fallback)
-                unload = (
+                fallback_unload = (
                     self.loaded_instance_ids()
                     if fallback_record and not fallback_record.is_loaded
                     else self.loaded_instance_ids(except_model=fallback)
                 )
-                return fallback, unload
+                return fallback, fallback_unload
 
         unload: list[str] = []
         if resources.loaded_count > 0 and (
@@ -207,9 +207,12 @@ def merge_catalog_payload(v0_models: list[dict[str, Any]], v1_models: list[dict[
         if not model_id or model_id in seen:
             continue
         seen.add(model_id)
-        v1 = v1_by_key.get(model_id, {})
-        caps = v1.get("capabilities") if isinstance(v1.get("capabilities"), dict) else {}
-        quant = v1.get("quantization") if isinstance(v1.get("quantization"), dict) else item.get("quantization")
+        v1_raw = v1_by_key.get(model_id)
+        v1 = v1_raw if isinstance(v1_raw, dict) else {}
+        caps_value = v1.get("capabilities")
+        caps = caps_value if isinstance(caps_value, dict) else {}
+        quant_value = v1.get("quantization")
+        quant = quant_value if isinstance(quant_value, dict) else item.get("quantization")
         loaded_instances = [
             str(inst.get("id") or "")
             for inst in (v1.get("loaded_instances") or [])
@@ -231,8 +234,10 @@ def merge_catalog_payload(v0_models: list[dict[str, Any]], v1_models: list[dict[
         if key in seen:
             continue
         seen.add(key)
-        caps = v1.get("capabilities") if isinstance(v1.get("capabilities"), dict) else {}
-        quant = v1.get("quantization") if isinstance(v1.get("quantization"), dict) else {}
+        caps_value = v1.get("capabilities")
+        caps = caps_value if isinstance(caps_value, dict) else {}
+        quant_value = v1.get("quantization")
+        quant = quant_value if isinstance(quant_value, dict) else {}
         loaded_instances = [
             str(inst.get("id") or "")
             for inst in (v1.get("loaded_instances") or [])

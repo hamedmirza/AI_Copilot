@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import Session
@@ -97,12 +97,13 @@ class ChatService:
         last_message_preview: str | None,
         last_message_at: datetime | None,
     ) -> ChatSessionModel:
-        session.message_count = int(message_count or 0)
-        session.last_message_preview = (
+        summary = cast(Any, session)
+        summary.message_count = int(message_count or 0)
+        summary.last_message_preview = (
             _truncate_text(last_message_preview, 120) if last_message_preview and last_message_preview.strip() else None
         )
-        session.last_message_at = last_message_at
-        return session
+        summary.last_message_at = last_message_at
+        return cast(ChatSessionModel, summary)
 
     def list_sessions(self, project_id: str, q: str | None = None) -> list[ChatSessionModel]:
         query = self._session_summary_query().filter(ChatSessionModel.project_id == project_id)
@@ -156,6 +157,7 @@ class ChatService:
         mode: str = "general",
         model_override: str | None = None,
         nothink: bool | None = None,
+        allow_web_search: bool = False,
     ) -> ChatSessionModel:
         session = ChatSessionModel(
             project_id=project_id,
@@ -163,6 +165,7 @@ class ChatService:
             mode=mode,
             model_override=_normalize_model_override(model_override),
             nothink=nothink,
+            allow_web_search=bool(allow_web_search),
         )
         self.db.add(session)
         self.db.commit()
@@ -177,6 +180,7 @@ class ChatService:
         mode: str | None = None,
         model_override: str | None | object = UNSET,
         nothink: bool | None | object = UNSET,
+        allow_web_search: bool | None | object = UNSET,
     ) -> ChatSessionModel:
         session = self.get_session(session_id)
         if title is not None:
@@ -189,6 +193,8 @@ class ChatService:
             )
         if nothink is not UNSET:
             session.nothink = nothink if isinstance(nothink, bool) or nothink is None else None
+        if allow_web_search is not UNSET:
+            session.allow_web_search = bool(allow_web_search)
         session.updated_at = _now()
         self.db.commit()
         self.db.refresh(session)

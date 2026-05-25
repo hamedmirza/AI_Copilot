@@ -17,6 +17,7 @@ export type ComposerCommand =
 interface ChatComposerProps {
   value: string
   mode: ChatMode
+  allowWebSearch: boolean
   treeItems: TreeItem[]
   disabled?: boolean
   submitting?: boolean
@@ -29,12 +30,14 @@ interface ChatComposerProps {
   onClearPageElement?: () => void
   onChange: (value: string) => void
   onModeChange: (mode: ChatMode) => void
+  onAllowWebSearchChange: (enabled: boolean) => void
   onCommand: (command: ComposerCommand) => void | Promise<void>
 }
 
 export function ChatComposer({
   value,
   mode,
+  allowWebSearch,
   treeItems,
   disabled,
   submitting,
@@ -47,6 +50,7 @@ export function ChatComposer({
   onClearPageElement,
   onChange,
   onModeChange,
+  onAllowWebSearchChange,
   onCommand,
 }: ChatComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -144,7 +148,19 @@ export function ChatComposer({
   return (
     <div className="border-t border-[var(--border)] p-3 space-y-2 bg-[var(--bg-secondary)]">
       <div className="flex items-center justify-between gap-2">
-        <ModeSelector value={mode} onChange={onModeChange} disabled={disabled || submitting} />
+        <div className="flex items-center gap-3">
+          <ModeSelector value={mode} onChange={onModeChange} disabled={disabled || submitting} />
+          <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+            <input
+              type="checkbox"
+              className="rounded border-[var(--border)]"
+              checked={allowWebSearch}
+              onChange={(event) => onAllowWebSearchChange(event.target.checked)}
+              disabled={disabled || submitting}
+            />
+            Web search
+          </label>
+        </div>
         <span className="text-[11px] text-[var(--text-secondary)]">
           `/mode`, `/task`, `/clear`, `/mcp list`, `/model`
         </span>

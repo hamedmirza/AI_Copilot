@@ -56,11 +56,39 @@ function isSameOriginUrl(url: string, parentOrigin: string): boolean {
 
 type BridgeBanner = 'none' | 'waiting' | 'missing' | 'server_down'
 
+function sendSelectionToChat(
+  selection: PageElementSelection,
+  successMessage: string,
+  {
+    currentSessionId,
+    setActiveMode,
+    setComposerPrefill,
+    upsertSession,
+  }: {
+    currentSessionId: string | null
+    setActiveMode: (mode: 'agent') => void
+    setComposerPrefill: (value: string) => void
+    upsertSession: (session: ReturnType<typeof toChatSession>) => void
+  },
+) {
+  setActiveMode('agent')
+  if (currentSessionId) {
+    void api.chat.sessions
+      .update(currentSessionId, { mode: 'agent' })
+      .then((updated) => upsertSession(toChatSession(updated)))
+      .catch((error) => showError(error))
+  }
+  setComposerPrefill(formatElementForChat(selection))
+  openChatForElementFix()
+  showSuccess(successMessage)
+}
+
 export function BrowserPanel() {
   const projectId = useProjectStore((s) => s.currentProjectId)
   const treeItems = useEditorStore((s) => s.treeItems)
   const runStatus = useRunStore((s) => s.runStatus)
   const currentSessionId = useChatStore((s) => s.currentSessionId)
+  const currentSession = useChatStore((s) => s.sessions.find((session) => session.id === s.currentSessionId) || null)
   const setActiveMode = useChatStore((s) => s.setActiveMode)
   const setComposerPrefill = useChatStore((s) => s.setComposerPrefill)
   const addSpawnedRunId = useChatStore((s) => s.addSpawnedRunId)
@@ -85,6 +113,7 @@ export function BrowserPanel() {
   const setPickerBridgeInstalled = useUIStore((s) => s.setPickerBridgeInstalled)
 
   const storedUrl = projectId ? browserUrlByProject[projectId] ?? '' : ''
+  const currentSessionAllowWebSearch = Boolean(currentSession?.allow_web_search)
   const [inputUrl, setInputUrl] = useState(storedUrl)
   const [frameUrl, setFrameUrl] = useState(storedUrl)
   const [urlError, setUrlError] = useState(false)
@@ -324,10 +353,15 @@ export function BrowserPanel() {
         const selection = pickerPayloadToSelection(payload)
         setPageElementSelection(selection)
         setBrowserPickerActive(false)
-        disablePickerInFrame()
+       disablePickerInFrame()
         clearHandshakeTimer()
         setBridgeBanner('none')
-        sendSelectionToChat(selection, 'Element added to chat — agent mode enabled')
+        sendSelectionToChat(selection, 'Element added to chat — agent mode enabled', {
+          currentSessionId,
+          setActiveMode,
+          setComposerPrefill,
+          upsertSession,
+        })
         return
       }
 
@@ -347,11 +381,14 @@ export function BrowserPanel() {
     disablePickerInFrame,
     enablePickerInFrame,
     projectId,
+    currentSessionId,
+    setActiveMode,
     setBrowserBridgeReady,
     setBrowserPickerActive,
+    setComposerPrefill,
     setPageElementSelection,
     setPickerBridgeInstalled,
-    sendSelectionToChat,
+    upsertSession,
   ])
 
   useEffect(() => () => clearHandshakeTimer(), [clearHandshakeTimer])
@@ -410,23 +447,15 @@ export function BrowserPanel() {
     startHandshakeTimer,
   ])
 
-  function sendSelectionToChat(selection: PageElementSelection, successMessage: string) {
-    setActiveMode('agent')
-    if (currentSessionId) {
-      void api.chat.sessions
-        .update(currentSessionId, { mode: 'agent' })
-        .then((updated) => upsertSession(toChatSession(updated)))
-        .catch((error) => showError(error))
-    }
-    setComposerPrefill(formatElementForChat(selection))
-    openChatForElementFix()
-    showSuccess(successMessage)
-  }
-
   const fixInChat = useCallback(() => {
     if (!pageElementSelection) return
-    sendSelectionToChat(pageElementSelection, 'Element attached — agent mode enabled')
-  }, [pageElementSelection])
+    sendSelectionToChat(pageElementSelection, 'Element attached — agent mode enabled', {
+      currentSessionId,
+      setActiveMode,
+      setComposerPrefill,
+      upsertSession,
+    })
+  }, [currentSessionId, pageElementSelection, setActiveMode, setComposerPrefill, upsertSession])
 
   const spawnUiTask = useCallback(async () => {
     if (!pageElementSelection || !projectId) return
@@ -443,6 +472,7 @@ export function BrowserPanel() {
         const result = await api.chat.spawnTask(currentSessionId, {
           description,
           validation_profile: profile,
+          allow_web_search: currentSessionAllowWebSearch,
         }) as Record<string, unknown>
         runId = String(result.run_id || '')
         taskId = String(result.task_id || '')
@@ -451,6 +481,7 @@ export function BrowserPanel() {
           project_id: projectId,
           description,
           validation_profile: profile,
+          allow_web_search: currentSessionAllowWebSearch,
         }) as Record<string, unknown>
         runId = String((fallback.run as Record<string, unknown> | undefined)?.id || '')
         taskId = String((fallback.task as Record<string, unknown> | undefined)?.id || '')
@@ -475,6 +506,7 @@ export function BrowserPanel() {
     appendMessage,
     clearRunEvents,
     currentSessionId,
+    currentSessionAllowWebSearch,
     pageElementSelection,
     projectId,
     treeItems,

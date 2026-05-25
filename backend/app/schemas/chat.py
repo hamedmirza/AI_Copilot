@@ -12,6 +12,7 @@ class ChatSessionCreate(BaseModel):
     mode: str = "general"
     model_override: str | None = None
     nothink: bool | None = None
+    allow_web_search: bool = False
 
 
 class ChatSessionUpdate(BaseModel):
@@ -19,6 +20,7 @@ class ChatSessionUpdate(BaseModel):
     mode: str | None = None
     model_override: str | None = None
     nothink: bool | None = None
+    allow_web_search: bool | None = None
 
 
 class ChatSessionResponse(BaseModel):
@@ -28,6 +30,7 @@ class ChatSessionResponse(BaseModel):
     mode: str
     model_override: str | None
     nothink: bool | None = None
+    allow_web_search: bool = False
     message_count: int = 0
     last_message_preview: str | None = None
     last_message_at: datetime | None = None
@@ -68,6 +71,7 @@ class ChatCancelResponse(BaseModel):
 class ChatSpawnTaskRequest(BaseModel):
     description: str = Field(min_length=1)
     validation_profile: str | None = None
+    allow_web_search: bool | None = None
 
 
 class ChatSpawnTaskResponse(BaseModel):

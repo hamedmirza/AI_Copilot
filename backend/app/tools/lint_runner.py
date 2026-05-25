@@ -14,8 +14,35 @@ DEFAULT_PROFILES = {
     "custom": [],
 }
 
+FRONTEND_SCAFFOLD_MESSAGE = (
+    "Scaffold frontend first: add frontend/package.json (and install toolchain) "
+    "in the run workspace before frontend validation."
+)
+
 _FRONTEND_LINT_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".css", ".scss", ".html"}
 _PYTHON_SUFFIXES = {".py", ".pyi"}
+
+
+def workspace_has_frontend_package(workspace: Path) -> bool:
+    return (workspace / "frontend" / "package.json").is_file()
+
+
+def is_frontend_npm_command(command: str) -> bool:
+    normalized = command.strip().lower()
+    return normalized.startswith("npm --prefix frontend") or (
+        "npm" in normalized and "--prefix frontend" in normalized
+    )
+
+
+def partition_frontend_commands(
+    commands: list[str],
+    workspace: Path,
+) -> tuple[list[str], list[str]]:
+    if workspace_has_frontend_package(workspace):
+        return list(commands), []
+    blocked = [command for command in commands if is_frontend_npm_command(command)]
+    runnable = [command for command in commands if command not in blocked]
+    return runnable, blocked
 
 
 def get_profile_commands(profiles_json: str, profile: str) -> list[str]:
@@ -58,8 +85,8 @@ def scope_profile_commands(commands: list[str], changed_files: list[str]) -> lis
 
 
 def canonical_frontend_dry_run_commands(workspace: Path | None = None) -> list[str]:
-    _ = workspace
-    # Run from repo/workspace root; npm --prefix frontend runs tsc via vite build.
+    if workspace is not None and not workspace_has_frontend_package(workspace):
+        return []
     return ["npm --prefix frontend run build"]
 
 
@@ -68,13 +95,18 @@ def normalize_tester_dry_run_commands(
     changed_files: list[str],
     workspace: Path | None = None,
 ) -> list[str]:
-    _ = llm_commands
     if not any(path.startswith("frontend/") for path in changed_files):
         return llm_commands
     return canonical_frontend_dry_run_commands(workspace)
 
 
-def canonical_frontend_required_commands(profile_commands: list[str], changed_files: list[str]) -> list[str]:
+def canonical_frontend_required_commands(
+    profile_commands: list[str],
+    changed_files: list[str],
+    workspace: Path | None = None,
+) -> list[str]:
+    if workspace is not None and not workspace_has_frontend_package(workspace):
+        return []
     commands = ["npm --prefix frontend run build"]
     wants_lint = "npm --prefix frontend run lint" in profile_commands
     frontend_changed = [

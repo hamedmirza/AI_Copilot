@@ -23,6 +23,7 @@ export interface RunSummary {
   recovery_status?: string | null
   error_message?: string | null
   created_at: string
+  updated_at?: string
 }
 
 export function hasRecoveryMetadata(run: RunSummary): boolean {
@@ -360,4 +361,36 @@ export function formatRunRelativeTime(iso: string): string {
   if (Math.abs(diffMs) < hour) return fmt.format(Math.round(diffMs / minute), 'minute')
   if (Math.abs(diffMs) < day) return fmt.format(Math.round(diffMs / hour), 'hour')
   return fmt.format(Math.round(diffMs / day), 'day')
+}
+
+const TERMINAL_RUN_STATUSES = new Set([
+  'completed',
+  'failed',
+  'blocked',
+  'changes_requested',
+  'cancelled',
+])
+
+function formatDurationMs(ms: number): string {
+  if (ms < 0) return ''
+  const minute = 60 * 1000
+  const hour = 60 * minute
+  if (ms < minute) return `${Math.max(1, Math.round(ms / 1000))}s`
+  if (ms < hour) return `${Math.round(ms / minute)}m`
+  return `${Math.round(ms / hour)}h`
+}
+
+/** Elapsed wall time for a run (terminal: created→updated; active: created→now). */
+export function formatRunElapsed(
+  createdIso: string,
+  updatedIso: string | null | undefined,
+  status: string,
+): string {
+  const created = parseApiDateTime(createdIso)
+  if (!created) return ''
+  const terminal = TERMINAL_RUN_STATUSES.has(status)
+  const end = terminal && updatedIso ? parseApiDateTime(updatedIso) : new Date()
+  if (!end) return ''
+  const label = formatDurationMs(end.getTime() - created.getTime())
+  return terminal ? label : `Active · ${label}`
 }

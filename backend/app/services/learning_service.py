@@ -90,7 +90,7 @@ def infer_task_kind(description: str) -> str:
         "validation": sum(1 for hint in _VALIDATION_HINTS if hint in lower),
         "playbook": sum(1 for hint in _PLAYBOOK_HINTS if hint in lower),
     }
-    best_kind = max(scores, key=scores.get)
+    best_kind = max(scores, key=lambda kind: scores[kind])
     best_score = scores[best_kind]
     if best_score <= 0:
         return "implementation"
@@ -1361,8 +1361,8 @@ class LearningService:
         top = matches[:4]
         block_top: list[ImprovementMatch] = []
         for item in matches:
-            improvement = self.db.get(ImprovementModel, item.source_id)
-            metadata = _loads_dict(improvement.decision_metadata_json) if improvement else {}
+            improvement_row = self.db.get(ImprovementModel, item.source_id)
+            metadata = _loads_dict(improvement_row.decision_metadata_json) if improvement_row else {}
             if metadata.get("source") == "block_resolution":
                 block_top.append(item)
             if len(block_top) >= 2:

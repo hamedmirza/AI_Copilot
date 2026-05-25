@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Terminal } from 'xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -30,15 +30,15 @@ export function TerminalPanel() {
     tab.term.dispose()
   }
 
-  const disposeAllTabs = () => {
+  const disposeAllTabs = useCallback(() => {
     setTabs((prev) => {
       prev.forEach(disposeTab)
       return []
     })
     setActiveId(null)
-  }
+  }, [])
 
-  const spawnTerminal = () => {
+  const spawnTerminal = useCallback(() => {
     if (!projectId) return
     const id = crypto.randomUUID()
     const term = new Terminal({ cursorBlink: true, fontSize: 13, theme: { background: '#1e1e1e' } })
@@ -65,7 +65,7 @@ export function TerminalPanel() {
     const tab: TermTab = { id, term, fitAddon, ws }
     setTabs((prev) => [...prev, tab])
     setActiveId(id)
-  }
+  }, [projectId])
 
   useEffect(() => {
     if (projectIdRef.current === projectId) return
@@ -76,11 +76,11 @@ export function TerminalPanel() {
         spawnTerminal()
       })
     }
-  }, [projectId])
+  }, [disposeAllTabs, projectId, spawnTerminal])
 
   useEffect(() => () => {
     disposeAllTabs()
-  }, [])
+  }, [disposeAllTabs])
 
   useEffect(() => {
     const active = tabs.find((t) => t.id === activeId)

@@ -121,6 +121,8 @@ def run_migrations() -> None:
                 _safe_execute_ddl(conn, "ALTER TABLE chat_sessions ADD COLUMN model_override VARCHAR(255)")
             if not _column_exists("chat_sessions", "nothink"):
                 _safe_execute_ddl(conn, "ALTER TABLE chat_sessions ADD COLUMN nothink BOOLEAN")
+            if not _column_exists("chat_sessions", "allow_web_search"):
+                _safe_execute_ddl(conn, "ALTER TABLE chat_sessions ADD COLUMN allow_web_search BOOLEAN DEFAULT 0")
 
     if _table_exists("chat_messages"):
         with engine.begin() as conn:
@@ -183,6 +185,8 @@ def run_migrations() -> None:
                 _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN mismatch_classes_json TEXT DEFAULT '[]'")
             if not _column_exists("runs", "approval_override"):
                 _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN approval_override BOOLEAN DEFAULT 0")
+            if not _column_exists("runs", "allow_web_search"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN allow_web_search BOOLEAN DEFAULT 0")
             if not _column_exists("runs", "clarification_question"):
                 _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN clarification_question TEXT")
             if not _column_exists("runs", "clarification_stage"):
@@ -197,6 +201,8 @@ def run_migrations() -> None:
         with engine.begin() as conn:
             if not _column_exists("tasks", "task_kind"):
                 _safe_execute_ddl(conn, "ALTER TABLE tasks ADD COLUMN task_kind VARCHAR(32)")
+            if not _column_exists("tasks", "allow_web_search"):
+                _safe_execute_ddl(conn, "ALTER TABLE tasks ADD COLUMN allow_web_search BOOLEAN DEFAULT 0")
 
     if _table_exists("mcp_servers"):
         with engine.begin() as conn:

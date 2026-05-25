@@ -4,12 +4,13 @@ import { api } from '@/api/client'
 import { useEditorStore, useProjectStore, useRunStore } from '@/store'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button } from '@/components/ui/primitives'
+import { ProjectAddWizard } from './ProjectAddWizard'
 import {
-  ProjectAddWizard,
-  VALIDATION_PROFILES,
   emptyWizardForm,
   type ProjectWizardForm,
-} from './ProjectAddWizard'
+  type SourceType,
+  VALIDATION_PROFILES,
+} from './projectWizardConfig'
 
 interface ProjectRow {
   id: string
@@ -25,8 +26,6 @@ interface Props {
   initialMode?: 'list' | 'add'
   onProjectsChanged?: (opts?: { selectId?: string; clearWorkspace?: boolean }) => void
 }
-
-type SourceType = 'workspace' | 'git'
 
 type FormState = ProjectWizardForm
 

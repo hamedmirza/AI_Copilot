@@ -85,7 +85,9 @@ def scope_issues(
             )
             continue
 
-        blueprint_roots = {_package_root(bp) for bp in blueprint_paths if _package_root(bp)}
+        blueprint_roots = {
+            root for bp in blueprint_paths for root in [_package_root(bp)] if root is not None
+        }
         path_root = _package_root(path)
         if blueprint_roots and path_root and path_root not in blueprint_roots:
             issues.append(

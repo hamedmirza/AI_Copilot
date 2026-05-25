@@ -91,10 +91,11 @@ def test_architect_agent(provider: FakeProvider):
     assert len(result.file_changes) >= 1
 
 
-def test_ui_designer_skips_non_frontend(provider: FakeProvider):
+def test_ui_designer_runs_for_ui_wording(provider: FakeProvider):
     agent = UIDesignerAgent(provider)
-    result = agent.design("Build a CLI tool")
-    assert result is None
+    result = agent.design("Build a professional UI for the kanban dashboard")
+    assert isinstance(result, UIDesignerOutput)
+    assert result.layout_description
 
 
 def test_ui_designer_runs_for_frontend(provider: FakeProvider):
@@ -146,6 +147,76 @@ def test_agent_adds_lmstudio_specific_requirements():
     PlannerAgent(provider).plan("Build a REST API for todos")
     system_prompt, _user_prompt = provider.call_log[-1]
     assert "LM Studio requirement" in system_prompt
+
+
+def test_agent_tool_loop_executes_tools_before_final_schema():
+    class ToolLoopProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def invoke_json(self, system_prompt: str, user_prompt: str) -> str:
+            self.call_log.append((system_prompt, user_prompt))
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps(
+                    {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "search-1",
+                                "name": "web_search",
+                                "arguments": {"query": "latest API docs"},
+                            }
+                        ],
+                        "finish_reason": "tool_calls",
+                    }
+                )
+            assert "TOOL_RESULT web_search" in user_prompt
+            return json.dumps(
+                {
+                    "summary": "Grounded plan",
+                    "steps": [
+                        {
+                            "step_id": "1",
+                            "title": "Use findings",
+                            "description": "Incorporate the fetched documentation context",
+                            "acceptance_criteria": ["Plan reflects external docs"],
+                        }
+                    ],
+                    "risks": [],
+                }
+            )
+
+    class StubToolRuntime:
+        def __init__(self) -> None:
+            self.executed: list[tuple[str, dict[str, object]]] = []
+
+        def tool_schemas(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "description": "Search the web",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                        },
+                    },
+                }
+            ]
+
+        def execute(self, tool_name: str, arguments: dict[str, object]) -> str:
+            self.executed.append((tool_name, arguments))
+            return json.dumps({"results": [{"title": "OpenAI Docs", "url": "https://developers.openai.com/api/docs"}]})
+
+    provider = ToolLoopProvider()
+    runtime = StubToolRuntime()
+    result = PlannerAgent(provider, tool_runtime=runtime).plan("Research the latest docs before planning")
+    assert result.summary == "Grounded plan"
+    assert runtime.executed == [("web_search", {"query": "latest API docs"})]
 
 
 def test_reviewer_agent(provider: FakeProvider):

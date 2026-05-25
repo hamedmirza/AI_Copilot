@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 
 from app.core.exceptions import NotFoundError, ValidationError
+from app.services.workspace_walk import iter_workspace_files
 
 _SKIP_NAMES = frozenset({
     "__pycache__",
@@ -122,9 +123,7 @@ def promote_workspace_to_source(workspace: Path, source_repo: Path) -> None:
     if not source.exists():
         source.mkdir(parents=True, exist_ok=True)
 
-    for path in workspace.rglob("*"):
-        if not path.is_file():
-            continue
+    for path in iter_workspace_files(workspace):
         rel = path.relative_to(workspace)
         if not is_promotable_path(rel):
             continue
@@ -151,9 +150,7 @@ def list_workspace_changed_files(workspace: Path, source_root: Path) -> list[str
     changed: list[str] = []
     if not workspace.exists():
         return changed
-    for path in workspace.rglob("*"):
-        if not path.is_file():
-            continue
+    for path in iter_workspace_files(workspace):
         rel = path.relative_to(workspace)
         if not is_promotable_path(rel):
             continue

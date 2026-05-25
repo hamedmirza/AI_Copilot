@@ -50,12 +50,15 @@ export function useBrowserPickerShortcuts(
     if (!enabled) return
 
     const onKeyDown = (e: KeyboardEvent) => {
-      handleBrowserPickerKeyDown(e, handlers, options)
+      handleBrowserPickerKeyDown(e, handlers, {
+        hasSelection: options.hasSelection,
+        pickerActive: options.pickerActive,
+      })
     }
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [enabled, handlers, options.hasSelection, options.pickerActive])
+  }, [enabled, handlers, options, options.hasSelection, options.pickerActive])
 }
 
 export function openChatForElementFix() {

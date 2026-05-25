@@ -3,16 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import uuid
-from contextlib import asynccontextmanager
 from typing import Any
 
 import ptyprocess
 from starlette.concurrency import run_in_threadpool
 from urllib.parse import unquote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, Response
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.orm import Session
 
@@ -20,16 +18,13 @@ from app.api.deps import verify_websocket_token
 from app.api.routes.chat import router as chat_router
 from app.api.routes.kanban_data import router as kanban_router
 from app.core.exceptions import (
-    AICopilotError,
-    CommandRejectedError,
     NotFoundError,
     PatchGuardError,
     PathTraversalError,
     ValidationError,
 )
-from app.core.logging import new_request_id, read_log_lines, request_id_var
-from app.core.settings import get_settings
-from app.db.session import get_db, seed_app_config
+from app.core.logging import read_log_lines
+from app.db.session import get_db
 from app.schemas.api import (
     ApproveRequest,
     ClarifyRequest,
@@ -55,6 +50,7 @@ from app.services.run_display import derive_run_display_name, run_numbers_for_ta
 from app.services.run_engine.event_bus import event_bus
 from app.services.tree_cache import get_cached_tree, invalidate_tree_cache, store_tree_cache
 from app.services.project_service import ProjectService
+from app.services.run_cleanup_service import RunCleanupService
 from app.services.run_thread_service import RunThreadService
 from app.services.run_truth_service import persist_run_truth
 
@@ -131,6 +127,7 @@ def _run_to_response(run, task_description: str, run_number: int | None = None) 
         "readiness": getattr(run, "readiness", {}),
         "mismatch_classes": getattr(run, "mismatch_classes", []),
         "approval_override": getattr(run, "approval_override", None),
+        "allow_web_search": getattr(run, "allow_web_search", None),
         "clarification_question": getattr(run, "clarification_question", None),
         "clarification_stage": getattr(run, "clarification_stage", None),
         "recommended_assumption": (run.clarification_context or {}).get("recommended_assumption"),
@@ -419,6 +416,7 @@ def create_task(data: TaskCreate, db: Session = Depends(get_db)):
             "description": data.description,
             "validation_profile": data.validation_profile,
             "use_scout": data.use_scout,
+            "allow_web_search": data.allow_web_search,
         },
     )
     chat_session_id = RunThreadService(db).ensure_session(run.id)
@@ -430,6 +428,7 @@ def create_task(data: TaskCreate, db: Session = Depends(get_db)):
             "description": task.description,
             "validation_profile": task.validation_profile,
             "use_scout": task.use_scout,
+            "allow_web_search": task.allow_web_search,
             "created_at": task.created_at.isoformat(),
         },
         "run": {
@@ -437,6 +436,7 @@ def create_task(data: TaskCreate, db: Session = Depends(get_db)):
             "status": run.status,
             "display_name": derive_run_display_name(task.description, run.created_at),
             "chat_session_id": chat_session_id,
+            "allow_web_search": run.allow_web_search,
         },
     }
 
@@ -444,6 +444,17 @@ def create_task(data: TaskCreate, db: Session = Depends(get_db)):
 @router.get("/runs/failure-summary")
 def get_failure_summary(project_id: str | None = None, db: Session = Depends(get_db)):
     return LearningService(db).failure_summary(project_id)
+
+
+@router.post("/runs/cleanup")
+def cleanup_failed_runs(
+    project_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Remove terminal failed runs (failed/blocked/changes_requested/cancelled) and their workspaces."""
+    if project_id:
+        ProjectService(db).get(project_id)
+    return RunCleanupService(db).purge_terminal_failed_runs(project_id)
 
 
 @router.get("/improvements/{improvement_id}")
@@ -992,9 +1003,9 @@ async def get_logs(
             while True:
                 lines = read_log_lines(limit)
                 if level:
-                    lines = [l for l in lines if l.get("level") == level.lower()]
+                    lines = [line for line in lines if line.get("level") == level.lower()]
                 if run_id:
-                    lines = [l for l in lines if l.get("run_id") == run_id]
+                    lines = [line for line in lines if line.get("run_id") == run_id]
                 if len(lines) > seen:
                     for line in lines[seen:]:
                         yield {"event": "log", "data": json.dumps(line)}
@@ -1005,9 +1016,9 @@ async def get_logs(
 
     lines = read_log_lines(limit)
     if level:
-        lines = [l for l in lines if l.get("level") == level.lower()]
+        lines = [line for line in lines if line.get("level") == level.lower()]
     if run_id:
-        lines = [l for l in lines if l.get("run_id") == run_id]
+        lines = [line for line in lines if line.get("run_id") == run_id]
     return {"lines": lines}
 
 
@@ -1188,12 +1199,12 @@ def continue_visual_verification(run_id: str, db: Session = Depends(get_db)):
     from pathlib import Path
 
     from app.core.enums import RunStatus
-    from app.db.models import ArtifactModel, RunModel, TaskModel
+    from app.db.models import ArtifactModel, RunModel
     from app.services.orchestration_service import orchestration_service
     from app.services.project_service import ProjectService
     from app.services.run_truth_service import persist_run_truth
     from app.services.visual_evidence_service import clear_visual_evidence_artifacts, execute_visual_checks, load_visual_evidence
-    from app.services.workspace_changed_files import workspace_changed_files
+    from app.services.workspace_service import list_workspace_changed_files
     from app.services.workspace_dev_url import build_default_visual_checks
 
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
@@ -1221,7 +1232,8 @@ def continue_visual_verification(run_id: str, db: Session = Depends(get_db)):
         except json.JSONDecodeError:
             visual_checks = []
     if not visual_checks:
-        changed = workspace_changed_files(db, run_id)
+        project = ProjectService(db).get(run.project_id)
+        changed = list_workspace_changed_files(workspace, Path(project.source_repo_spec))
         visual_checks = build_default_visual_checks(workspace, changed)
     clear_visual_evidence_artifacts(db, run_id)
     result = execute_visual_checks(
@@ -1236,9 +1248,6 @@ def continue_visual_verification(run_id: str, db: Session = Depends(get_db)):
         db.commit()
         persist_run_truth(db, run_id)
         return {"ok": False, "passed": False, "evidence": result}
-    from app.services.orchestration_service import orchestration_service
-    from app.services.project_service import ProjectService
-
     project = ProjectService(db).get(run.project_id)
     source_root = Path(project.source_repo_spec)
     run.status = RunStatus.RUNNING.value

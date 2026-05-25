@@ -1,21 +1,11 @@
-import { startTransition, useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, startTransition, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { Toaster } from 'sonner'
 import { api } from '@/api/client'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { ActivityBar } from '@/components/ActivityBar/ActivityBar'
-import { EditorPanel } from '@/components/Editor/EditorPanel'
-import { AgentPanel } from '@/components/AgentPanel/AgentPanel'
 import { AgentPanelLayoutToggle } from '@/components/AgentPanel/AgentPanelLayoutToggle'
-import { RunsPanel } from '@/components/AgentPanel/RunsPanel'
-import { ChatPanel } from '@/components/Chat/ChatPanel'
 import { ChatWebSocketBridge } from '@/components/Chat/ChatWebSocketBridge'
 import { resetChatStreamRefs } from '@/lib/chatStreamRefs'
-import { GitPanel } from '@/components/GitPanel/GitPanel'
-import { TerminalPanel } from '@/components/Terminal/TerminalPanel'
-import { LogViewer } from '@/components/LogViewer/LogViewer'
-import { SettingsPanel } from '@/components/Settings/SettingsPanel'
-import { OnboardingWizard } from '@/components/Onboarding/OnboardingWizard'
-import { ProjectManagerDialog } from '@/components/Project/ProjectManagerDialog'
 import { StatusBar } from '@/components/StatusBar/StatusBar'
 import { useAppStore, useChatStore, useEditorStore, useProjectStore, useRunStore, useSettingsStore, useUIStore } from '@/store'
 import { Button, EmptyState } from '@/components/ui/primitives'
@@ -25,6 +15,25 @@ import { isRightPanelTabMounted, rightPanelPanelClass, type RightPanelTab } from
 import { getContribution, getContributions } from '@/workbench/registry'
 import { useBrowserAgentDriver } from '@/hooks/useBrowserAgentDriver'
 
+const EditorPanel = lazy(async () => ({ default: (await import('@/components/Editor/EditorPanel')).EditorPanel }))
+const AgentPanel = lazy(async () => ({ default: (await import('@/components/AgentPanel/AgentPanel')).AgentPanel }))
+const RunsPanel = lazy(async () => ({ default: (await import('@/components/AgentPanel/RunsPanel')).RunsPanel }))
+const ChatPanel = lazy(async () => ({ default: (await import('@/components/Chat/ChatPanel')).ChatPanel }))
+const GitPanel = lazy(async () => ({ default: (await import('@/components/GitPanel/GitPanel')).GitPanel }))
+const TerminalPanel = lazy(async () => ({ default: (await import('@/components/Terminal/TerminalPanel')).TerminalPanel }))
+const LogViewer = lazy(async () => ({ default: (await import('@/components/LogViewer/LogViewer')).LogViewer }))
+const SettingsPanel = lazy(async () => ({ default: (await import('@/components/Settings/SettingsPanel')).SettingsPanel }))
+const OnboardingWizard = lazy(async () => ({ default: (await import('@/components/Onboarding/OnboardingWizard')).OnboardingWizard }))
+const ProjectManagerDialog = lazy(async () => ({ default: (await import('@/components/Project/ProjectManagerDialog')).ProjectManagerDialog }))
+
+function LazyPanelFallback() {
+  return (
+    <div className="flex h-full min-h-0 items-center justify-center text-sm text-[var(--text-secondary)]">
+      Loading…
+    </div>
+  )
+}
+
 function SidebarContent() {
   const panel = useUIStore((s) => s.activePanel)
   const agentPanelPlacement = useUIStore((s) => s.agentPanelPlacement)
@@ -32,7 +41,11 @@ function SidebarContent() {
   const contrib = getContribution('sidebar', effectivePanel)
   if (!contrib) return null
   const Component = contrib.Component
-  return <Component />
+  return (
+    <Suspense fallback={<LazyPanelFallback />}>
+      <Component />
+    </Suspense>
+  )
 }
 
 function CenterContent() {
@@ -43,7 +56,9 @@ function CenterContent() {
   return (
     <div className="relative h-full min-h-0 flex flex-col flex-1">
       <div className={panelWrap(activeCenterView === 'editor')}>
-        <EditorPanel />
+        <Suspense fallback={<LazyPanelFallback />}>
+          <EditorPanel />
+        </Suspense>
       </div>
       {getContributions('center').map((contrib) => {
         const Component = contrib.Component
@@ -53,7 +68,9 @@ function CenterContent() {
             className={panelWrap(activeCenterView === contrib.id)}
             aria-hidden={activeCenterView !== contrib.id}
           >
-            <Component />
+            <Suspense fallback={<LazyPanelFallback />}>
+              <Component />
+            </Suspense>
           </div>
         )
       })}
@@ -73,17 +90,23 @@ function RightPanelContent({
     <>
       {isRightPanelTabMounted('chat', tabs) && (
         <div className={rightPanelPanelClass(tab === 'chat')} aria-hidden={tab !== 'chat'}>
-          <ChatPanel />
+          <Suspense fallback={<LazyPanelFallback />}>
+            <ChatPanel />
+          </Suspense>
         </div>
       )}
       {isRightPanelTabMounted('agents', tabs) && (
         <div className={rightPanelPanelClass(tab === 'agents')} aria-hidden={tab !== 'agents'}>
-          <AgentPanel />
+          <Suspense fallback={<LazyPanelFallback />}>
+            <AgentPanel />
+          </Suspense>
         </div>
       )}
       {isRightPanelTabMounted('runs', tabs) && (
         <div className={rightPanelPanelClass(tab === 'runs')} aria-hidden={tab !== 'runs'}>
-          <RunsPanel />
+          <Suspense fallback={<LazyPanelFallback />}>
+            <RunsPanel />
+          </Suspense>
         </div>
       )}
     </>
@@ -274,14 +297,16 @@ export default function App() {
     <div className="h-full flex flex-col">
       <ChatWebSocketBridge />
       <Toaster theme="dark" position="bottom-right" richColors />
-      <OnboardingWizard />
-      <SettingsPanel />
-      <ProjectManagerDialog
-        open={projectManagerOpen}
-        onClose={() => setProjectManagerOpen(false)}
-        initialMode={projectManagerMode}
-        onProjectsChanged={() => bumpTreeRefresh()}
-      />
+      <Suspense fallback={null}>
+        <OnboardingWizard />
+        <SettingsPanel />
+        <ProjectManagerDialog
+          open={projectManagerOpen}
+          onClose={() => setProjectManagerOpen(false)}
+          initialMode={projectManagerMode}
+          onProjectsChanged={() => bumpTreeRefresh()}
+        />
+      </Suspense>
 
       {/* Top bar */}
       <div className="h-9 flex items-center px-3 bg-[#323233] border-b border-[var(--border)] shrink-0">
@@ -389,9 +414,21 @@ export default function App() {
                   </button>
                 </div>
                 <div className="flex-1 overflow-hidden">
-                  {bottomTab === 'terminal' && <TerminalPanel />}
-                  {bottomTab === 'git' && <GitPanel pollWhenVisible={gitPanelVisible} />}
-                  {bottomTab === 'problems' && <LogViewer />}
+                  {bottomTab === 'terminal' && (
+                    <Suspense fallback={<LazyPanelFallback />}>
+                      <TerminalPanel />
+                    </Suspense>
+                  )}
+                  {bottomTab === 'git' && (
+                    <Suspense fallback={<LazyPanelFallback />}>
+                      <GitPanel pollWhenVisible={gitPanelVisible} />
+                    </Suspense>
+                  )}
+                  {bottomTab === 'problems' && (
+                    <Suspense fallback={<LazyPanelFallback />}>
+                      <LogViewer />
+                    </Suspense>
+                  )}
                 </div>
               </div>
             </>
@@ -412,7 +449,7 @@ export default function App() {
                       }`}
                       onClick={() => useUIStore.getState().setRightPanelTab(tab)}
                     >
-                      {tab}
+                      {tab === 'chat' ? 'Chat' : tab === 'agents' ? 'Agents' : 'Runs'}
                     </button>
                   ))}
                 </div>

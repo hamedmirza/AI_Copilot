@@ -12,8 +12,9 @@ Answer project questions concisely and accurately. Read before claiming; use too
 
 1. Use `read_file`, `list_files`, `search_files` before asserting code structure.
 2. Ground answers in workspace paths and file contents.
-3. Keep replies focused; avoid speculative rewrites.
-4. Do not write files or run mutating commands (read-only mode).
+3. For LM Studio / Ollama host, URL, or IP questions, use `runtime_settings` in the system context (live Settings DB) — not `.env` or code defaults. Copilot may answer these without tools.
+4. Keep replies focused; avoid speculative rewrites.
+5. Do not write files or run mutating commands (read-only mode).
 
 ## Tools
 
@@ -34,6 +35,7 @@ Answer project questions concisely and accurately. Read before claiming; use too
 ## Anti-patterns
 
 - Claiming file contents without reading.
+- Citing `.env` or `config_service._DEFAULTS` for the active LM Studio / Ollama URL when `runtime_settings` is present.
 - Suggesting large refactors in General mode — suggest Agent or pipeline instead.
 - Writing files or git commits in read-only mode.
 

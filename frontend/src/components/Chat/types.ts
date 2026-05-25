@@ -50,6 +50,17 @@ export function normalizeSessionNothink(value: unknown): boolean | null {
   return null
 }
 
+export function normalizeBoolean(value: unknown, fallback = false): boolean {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true' || normalized === '1') return true
+    if (normalized === 'false' || normalized === '0' || normalized === '') return false
+  }
+  return fallback
+}
+
 export function resolveEffectiveNothink(
   sessionNothink: boolean | null | undefined,
   globalDefault: unknown,
@@ -100,6 +111,7 @@ export function toChatSession(value: JsonRecord): ChatSession {
     mode: normalizeChatMode(value.mode),
     model_override: normalizeModelOverride(value.model_override),
     nothink: normalizeSessionNothink(value.nothink),
+    allow_web_search: normalizeBoolean(value.allow_web_search),
     message_count: Number(value.message_count || 0),
     last_message_preview: value.last_message_preview ? String(value.last_message_preview) : null,
     last_message_at: value.last_message_at ? String(value.last_message_at) : null,

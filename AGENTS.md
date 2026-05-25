@@ -78,7 +78,7 @@ In development, React Strict Mode double-mounts components. You may see benign c
 
 ## Stub workbench data
 
-Kanban and Reporting panels use stub HTTP APIs until persistent storage exists. See [docs/KANBAN_STUB_DATA.md](docs/KANBAN_STUB_DATA.md).
+The Reporting panel uses a stub HTTP API until persistent storage exists. See [docs/KANBAN_STUB_DATA.md](docs/KANBAN_STUB_DATA.md).
 
 ## Verification workflow
 

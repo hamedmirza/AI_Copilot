@@ -1,5 +1,4 @@
 import logging
-import time
 import json
 from typing import Any
 from uuid import uuid4
@@ -80,15 +79,31 @@ class LMStudioProvider(BaseProvider):
             ],
         }
         try:
-            response = self._client.post(url, headers=self._headers(), json=payload)
-            response.raise_for_status()
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
-            return (content or "").strip()
+            return self._invoke_json_once(url, payload)
         except httpx.TimeoutException as exc:
             raise ProviderError(self._timeout_error_message(exc)) from exc
         except httpx.HTTPError as exc:
+            if self._is_model_unloaded_error(exc) and self.load_model(model):
+                try:
+                    return self._invoke_json_once(url, payload)
+                except httpx.HTTPError as retry_exc:
+                    exc = retry_exc
             raise ProviderError(self._provider_error_message(exc)) from exc
+
+    def _invoke_json_once(self, url: str, payload: dict[str, Any]) -> str:
+        response = self._client.post(url, headers=self._headers(), json=payload)
+        response.raise_for_status()
+        data = response.json()
+        content = data["choices"][0]["message"]["content"]
+        return (content or "").strip()
+
+    def _post_chat_completion(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        response = self._client.post(url, headers=self._headers(), json=payload)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ProviderError("LM Studio returned an unexpected chat completion payload")
+        return data
 
     def _apply_max_tokens(self, payload: dict[str, Any], max_tokens: int | None) -> None:
         if max_tokens is not None and max_tokens > 0:
@@ -115,23 +130,29 @@ class LMStudioProvider(BaseProvider):
             payload["tool_choice"] = "auto"
         self._apply_max_tokens(payload, max_tokens)
         try:
-            response = self._client.post(url, headers=self._headers(), json=payload)
-            response.raise_for_status()
-            data = response.json()
+            data = self._post_chat_completion(url, payload)
         except httpx.TimeoutException as exc:
             raise ProviderError(self._timeout_error_message(exc)) from exc
         except httpx.HTTPError as exc:
-            if self._is_model_request_error(exc):
-                raise ProviderError(f"LM Studio model error: {self._http_error_message(exc)}") from exc
-            if self._is_context_request_error(exc):
-                raise ProviderError(f"LM Studio context error: {self._http_error_message(exc)}") from exc
-            if tools and self._should_fallback_to_react(exc):
-                logger.warning(
-                    "LM Studio rejected native tool calling, falling back to JSON ReAct: %s",
-                    self._http_error_message(exc),
-                )
-                return super().invoke_chat(messages, tools=tools, stream=stream, max_tokens=max_tokens)
-            raise ProviderError(self._provider_error_message(exc)) from exc
+            if self._is_model_unloaded_error(exc) and self.load_model(model):
+                try:
+                    data = self._post_chat_completion(url, payload)
+                except httpx.HTTPError as retry_exc:
+                    exc = retry_exc
+                else:
+                    exc = None
+            if exc is not None:
+                if self._is_model_request_error(exc):
+                    raise ProviderError(f"LM Studio model error: {self._http_error_message(exc)}") from exc
+                if self._is_context_request_error(exc):
+                    raise ProviderError(f"LM Studio context error: {self._http_error_message(exc)}") from exc
+                if tools and self._should_fallback_to_react(exc):
+                    logger.warning(
+                        "LM Studio rejected native tool calling, falling back to JSON ReAct: %s",
+                        self._http_error_message(exc),
+                    )
+                    return super().invoke_chat(messages, tools=tools, stream=stream, max_tokens=max_tokens)
+                raise ProviderError(self._provider_error_message(exc)) from exc
         try:
             message = data["choices"][0]["message"]
         except (KeyError, IndexError, TypeError):
@@ -263,12 +284,41 @@ class LMStudioProvider(BaseProvider):
                 logger.warning("LM Studio failed to unload %s: %s", normalized, exc)
         return unloaded
 
-    def prepare_model(self, model_id: str, mode: str = "general") -> str:
-        catalog = self.fetch_catalog()
+    def _load_timeout(self) -> httpx.Timeout:
+        read_seconds = max(float(self.timeout_seconds), 300.0)
+        return httpx.Timeout(connect=5.0, read=read_seconds, write=30.0, pool=5.0)
+
+    def load_model(self, model_id: str) -> bool:
+        normalized = (model_id or "").strip()
+        if not normalized:
+            return False
+        try:
+            response = self._client.post(
+                f"{self._rest_base}/api/v1/models/load",
+                headers=self._headers(),
+                json={"model": normalized},
+                timeout=self._load_timeout(),
+            )
+            response.raise_for_status()
+            logger.info("Loaded LM Studio model %r", normalized)
+            return True
+        except httpx.HTTPError as exc:
+            logger.warning("LM Studio failed to load %s: %s", normalized, self._http_error_message(exc))
+            return False
+
+    def prepare_model(
+        self,
+        model_id: str,
+        mode: str = "general",
+        *,
+        catalog: LMStudioCatalog | None = None,
+        allow_unload: bool = True,
+    ) -> str:
+        catalog = catalog or self.fetch_catalog()
         if catalog is None:
             return model_id
         selected, unload = catalog.resolve_runnable(model_id, mode)
-        if unload:
+        if unload and allow_unload:
             freed = self.unload_instances(unload)
             if freed:
                 logger.info(
@@ -276,7 +326,23 @@ class LMStudioProvider(BaseProvider):
                     len(freed),
                     selected or model_id,
                 )
-        return selected or model_id
+        target = selected or model_id
+        record = catalog.by_id().get(target)
+        if record is not None and not record.is_loaded:
+            if not self.load_model(target):
+                fallback = catalog.pick_best(mode)
+                if fallback and fallback != target:
+                    logger.warning(
+                        "LM Studio could not load %r; falling back to %r for mode %r",
+                        target,
+                        fallback,
+                        mode,
+                    )
+                    fallback_record = catalog.by_id().get(fallback)
+                    if fallback_record is not None and not fallback_record.is_loaded:
+                        self.load_model(fallback)
+                    return fallback
+        return target
 
     def list_models(self) -> list[str]:
         catalog = self.fetch_catalog()
@@ -426,6 +492,7 @@ class LMStudioProvider(BaseProvider):
         hints = (
             "failed to load model",
             "model loading",
+            "model unloaded",
             "insufficient system resources",
             "model not found",
             "unknown model",
@@ -433,6 +500,9 @@ class LMStudioProvider(BaseProvider):
             "no model",
         )
         return any(hint in lowered for hint in hints)
+
+    def _is_model_unloaded_error(self, exc: httpx.HTTPError) -> bool:
+        return "model unloaded" in self._http_error_message(exc).lower()
 
     def _is_context_request_error(self, exc: httpx.HTTPError) -> bool:
         lowered = self._http_error_message(exc).lower()

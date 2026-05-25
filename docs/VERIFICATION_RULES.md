@@ -62,14 +62,14 @@ Also: **Visually checked** every user-visible item you changed (browser on `http
 
 | Area | Steps | Expected |
 |------|-------|----------|
-| Kanban / Reporting | ActivityBar → Kanban / Reporting | Center panel mounts; Kanban shows stub notice (see KANBAN doc) |
+| Reporting | ActivityBar → Reporting | Center panel mounts; metrics are stub-backed (see KANBAN doc) |
 | Run drawer | Runs → Open run details | Conversation \| Pipeline tabs; composer at bottom |
 | Clarification E2E | `backend/.venv/bin/python scripts/seed_awaiting_clarification_run.py` → open that run | Conversation shows question + **Send answer**; submit → run `running`, thread has `clarification_answered` |
 | Chat bridge | Run in `awaiting_clarification` with linked chat | Composer says **Send answer**; **Open run conversation** opens drawer |
 
 ### Disclosure in completion notes
 
-- State if Kanban/reporting metrics are **stub-backed**.
+- State if reporting metrics are **stub-backed**.
 - State which manual browser rows were executed (not “should work”).
 - If clarify E2E was not run, say so — do not claim drawer clarification is verified.
 
@@ -80,4 +80,4 @@ Also: **Visually checked** every user-visible item you changed (browser on `http
 - Native dialogs were not monkeypatched in new tests
 - Frontend build failed or was not run when TSX changed
 - Any of the five-pass honesty answers is **yes**
-- Stub Kanban data was described as real task storage
+- Stub reporting metrics were described as real production data

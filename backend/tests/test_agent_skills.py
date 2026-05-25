@@ -1,6 +1,6 @@
 """Tests for static role skills and prompt loading."""
 
-from app.agents import PlannerAgent, UIDesignerAgent, PlaybookSupervisorAgent, SupervisorAgent
+from app.agents import PlannerAgent, UIDesignerAgent, PlaybookSupervisorAgent
 from app.agents.skill_loader import (
     SKILLS_DIR,
     chat_mode_skill_key,

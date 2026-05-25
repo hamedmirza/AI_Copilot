@@ -4,6 +4,8 @@ import json
 import sqlite3
 from starlette.websockets import WebSocketDisconnect
 
+from app.db.session import SessionLocal
+
 HEADERS = {"X-Api-Token": "dev-token"}
 
 
@@ -32,7 +34,7 @@ def test_settings_reset(client):
     r = client.post("/api/settings/reset", headers=HEADERS)
     assert r.status_code == 200
     body = r.json()
-    assert body["lmstudio_base_url"] == "http://192.168.128.70:1234/v1"
+    assert body["lmstudio_base_url"] == "http://172.10.1.2:1234/v1"
     assert body["worker_count"] == 1
     assert body["stop_on_first_failure"] is True
     assert body["ollama_enabled"] is False
@@ -158,8 +160,9 @@ def test_projects_endpoint_migrates_old_schema_db(tmp_path):
         "approval_reached",
         "promote_rolled_back",
         "primary_failure_class",
+        "allow_web_search",
     } <= run_columns
-    assert "task_kind" in task_columns
+    assert {"task_kind", "allow_web_search"} <= task_columns
     assert "global_skills" in tables
     assert "improvements" in tables
     assert "improvement_exposures" in tables
@@ -216,6 +219,82 @@ def test_run_workspace_isolation(client, tmp_path):
     assert (proj_a / "secret.txt").read_text() == "project-a\n"
 
 
+def test_task_creation_persists_web_search_flag(client, tmp_path):
+    project_id = client.post(
+        "/api/projects",
+        json={
+            "name": "Web Search Task Project",
+            "source_repo_spec": str(tmp_path),
+            "validation_profile": "python",
+        },
+        headers=HEADERS,
+    ).json()["id"]
+
+    created = client.post(
+        "/api/tasks",
+        json={
+            "project_id": project_id,
+            "description": "Research the latest upstream API behavior and implement the required adapter change",
+            "validation_profile": "python",
+            "allow_web_search": True,
+        },
+        headers=HEADERS,
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload["task"]["allow_web_search"] is True
+    assert payload["run"]["allow_web_search"] is True
+
+    run = client.get(f"/api/runs/{payload['run']['id']}", headers=HEADERS)
+    assert run.status_code == 200
+    assert run.json()["allow_web_search"] is True
+
+
+def test_build_context_base_includes_web_search_findings(client, tmp_path, monkeypatch):
+    from app.db.models import RunModel, TaskModel
+    from app.services.orchestration_service import OrchestrationService
+
+    project_id = client.post(
+        "/api/projects",
+        json={
+            "name": "Web Search Context Project",
+            "source_repo_spec": str(tmp_path),
+            "validation_profile": "python",
+        },
+        headers=HEADERS,
+    ).json()["id"]
+
+    created = client.post(
+        "/api/tasks",
+        json={
+            "project_id": project_id,
+            "description": "Check the latest provider docs and adjust the integration plan",
+            "validation_profile": "python",
+            "allow_web_search": True,
+        },
+        headers=HEADERS,
+    )
+    assert created.status_code == 200
+    run_id = created.json()["run"]["id"]
+
+    monkeypatch.setattr(
+        "app.services.orchestration_service.WebSearchService.build_context_block",
+        lambda self, query, limit=5: f"Web search findings for: {query}",
+    )
+
+    db = SessionLocal()
+    try:
+        run = db.get(RunModel, run_id)
+        task = db.get(TaskModel, run.task_id) if run else None
+        assert run is not None
+        assert task is not None
+        context = OrchestrationService()._build_context_base(db, run.id, run, task.description)
+    finally:
+        db.close()
+
+    assert "Web search findings for:" in context
+
+
 def test_run_workspace_excludes_runtime_db_files(tmp_path):
     from app.services.workspace_service import prepare_run_workspace
 
@@ -233,6 +312,49 @@ def test_run_workspace_excludes_runtime_db_files(tmp_path):
     assert not (workspace / "backend" / "app.db-wal").exists()
     assert not (workspace / "backend" / "app.db-shm").exists()
     assert (workspace / "frontend" / "index.ts").exists()
+
+
+def test_project_kanban_returns_real_run_columns(client, tmp_path):
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+
+    project_root = tmp_path / "kanban_project"
+    project_root.mkdir()
+    (project_root / "main.py").write_text("print('kanban')\n")
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="Kanban Project",
+            source_repo_spec=str(project_root),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+
+        task_active = TaskModel(project_id=project.id, description="Implement execution timeline", validation_profile="python")
+        task_done = TaskModel(project_id=project.id, description="Ship approval safety UI", validation_profile="python")
+        db.add_all([task_active, task_done])
+        db.flush()
+
+        active_run = RunModel(project_id=project.id, task_id=task_active.id, status="running", current_stage="coder")
+        done_run = RunModel(project_id=project.id, task_id=task_done.id, status="completed", current_stage="tester")
+        db.add_all([active_run, done_run])
+        db.commit()
+        project_id = project.id
+    finally:
+        db.close()
+
+    response = client.get(f"/api/projects/{project_id}/kanban", headers=HEADERS)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["project"]["id"] == project_id
+    assert body["summary"]["total_runs"] == 2
+    columns = {column["id"]: column for column in body["columns"]}
+    assert any(card["status"] == "running" for card in columns["active"]["items"])
+    assert any(card["status"] == "completed" for card in columns["completed"]["items"])
+    assert columns["active"]["items"][0]["title"].startswith("Implement execution timeline")
 
 
 def test_record_event_survives_poisoned_session(tmp_path):
@@ -1755,6 +1877,104 @@ def test_stage_tester_runs_profile_and_skips_forbidden_llm_commands(client, tmp_
     assert run.status == "running"
 
 
+def test_stage_tester_blocks_frontend_scaffold_missing(client, tmp_path):
+    import json as _json
+
+    from app.db.models import AppConfigModel, ProjectModel, RunEventModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.providers.fake import FakeProvider
+    from app.providers.registry import ProviderRegistry
+    from app.services.orchestration_service import OrchestrationService
+    from app.tools.lint_runner import FRONTEND_SCAFFOLD_MESSAGE
+
+    workspace = tmp_path / "scaffold_workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('ok')\n", encoding="utf-8")
+
+    registry = ProviderRegistry.get()
+    registry.fake_provider = FakeProvider(
+        responses={
+            "tester": _json.dumps(
+                {
+                    "passed": True,
+                    "summary": "Fullstack plan",
+                    "dry_run_steps": [
+                        {
+                            "command": "npm --prefix frontend run build",
+                            "description": "Frontend build",
+                        }
+                    ],
+                    "visual_checks": [],
+                    "visual_checks_skip_reason": "No UI implemented yet",
+                    "commands": [],
+                    "notes": [],
+                }
+            )
+        }
+    )
+    registry.reload({})
+
+    db = SessionLocal()
+    try:
+        profiles_row = (
+            db.query(AppConfigModel).filter(AppConfigModel.key == "validation_profiles_json").first()
+        )
+        profile_payload = _json.dumps(
+            {
+                "fullstack": [
+                    "ruff check .",
+                    "npm --prefix frontend run build",
+                ]
+            }
+        )
+        if profiles_row:
+            profiles_row.value = profile_payload
+        else:
+            db.add(AppConfigModel(key="validation_profiles_json", value=profile_payload))
+        db.commit()
+
+        project = ProjectModel(
+            name="ScaffoldTester",
+            source_repo_spec=str(workspace),
+            validation_profile="fullstack",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Validate backend change",
+            validation_profile="fullstack",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(project_id=project.id, task_id=task.id, status="running", workspace_path=str(workspace))
+        db.add(run)
+        db.commit()
+
+        service = OrchestrationService()
+        result = service._stage_tester(db, run.id, "Validate", workspace)
+        db.refresh(run)
+        events = (
+            db.query(RunEventModel)
+            .filter(RunEventModel.run_id == run.id)
+            .order_by(RunEventModel.id.asc())
+            .all()
+        )
+    finally:
+        db.close()
+
+    assert result is False
+    assert run.status == "blocked"
+    assert run.error_message == FRONTEND_SCAFFOLD_MESSAGE
+    event_types = [event.event_type for event in events]
+    assert "frontend_scaffold_missing" in event_types
+    assert "block_recorded" in event_types
+    scaffold_events = [event for event in events if event.event_type == "frontend_scaffold_missing"]
+    assert scaffold_events
+    assert "ENOENT" not in (scaffold_events[0].message or "")
+
+
 def test_stage_tester_blocks_frontend_without_visual_plan(client, tmp_path):
     import json as _json
 
@@ -2256,7 +2476,6 @@ def test_git_status_empty_repo(client, tmp_path):
 
 
 def test_retry_stores_operator_feedback(client, tmp_path):
-    import json as _json
 
     from app.core.enums import RunStatus
     from app.db.models import ProjectModel, RunModel, TaskModel
@@ -2363,6 +2582,68 @@ def test_retry_failed_run(client, tmp_path):
         assert run is not None
         assert run.status in (RunStatus.PENDING.value, RunStatus.RUNNING.value)
         assert run.error_message is None
+    finally:
+        db.close()
+
+
+def test_cleanup_failed_runs(client, tmp_path):
+    from app.core.enums import RunStatus
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+
+    workspace = tmp_path / "cleanup_failed"
+    workspace.mkdir()
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="CleanupFailed",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Ship feature",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        failed = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status=RunStatus.FAILED.value,
+            error_message="boom",
+        )
+        completed = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status=RunStatus.COMPLETED.value,
+        )
+        db.add_all([failed, completed])
+        db.commit()
+        failed_id = failed.id
+        completed_id = completed.id
+        project_id = project.id
+    finally:
+        db.close()
+
+    response = client.post("/api/runs/cleanup", headers=HEADERS)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["deleted_count"] == 1
+    assert failed_id in body["deleted_run_ids"]
+    assert completed_id not in body["deleted_run_ids"]
+
+    db = SessionLocal()
+    try:
+        assert db.get(RunModel, failed_id) is None
+        assert db.get(RunModel, completed_id) is not None
+        scoped = client.post(f"/api/runs/cleanup?project_id={project_id}", headers=HEADERS)
+        assert scoped.status_code == 200
+        assert scoped.json()["deleted_count"] == 0
     finally:
         db.close()
 
@@ -2948,7 +3229,7 @@ def test_deployment_readiness_endpoint(client, tmp_path):
     assert "ready" in body
 
 
-def test_project_tasks_and_metrics_stubs(client, tmp_path):
+def test_project_metrics_stub(client, tmp_path):
     from app.db.models import ProjectModel
     from app.db.session import SessionLocal
 
@@ -2967,11 +3248,6 @@ def test_project_tasks_and_metrics_stubs(client, tmp_path):
         pid = project.id
     finally:
         db.close()
-
-    tasks = client.get(f"/api/projects/{pid}/tasks", headers=HEADERS)
-    assert tasks.status_code == 200
-    assert isinstance(tasks.json(), list)
-    assert len(tasks.json()) >= 1
 
     metrics = client.get(f"/api/projects/{pid}/metrics", headers=HEADERS)
     assert metrics.status_code == 200

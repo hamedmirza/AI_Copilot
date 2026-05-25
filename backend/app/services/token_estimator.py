@@ -65,7 +65,8 @@ def _tool_calls_text(message: dict[str, Any]) -> str:
     for call in tool_calls:
         if not isinstance(call, dict):
             continue
-        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        function_value = call.get("function")
+        function = function_value if isinstance(function_value, dict) else {}
         parts.append(str(function.get("name") or ""))
         parts.append(str(function.get("arguments") or ""))
         if call.get("id"):

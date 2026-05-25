@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -15,6 +14,7 @@ from app.services.pipeline_bridge import PipelineBridge, pipeline_bridge
 from app.services.file_service import FileService
 from app.tools.command_runner import run_command
 from app.tools.lint_runner import run_profile_validation
+from app.services.web_search_service import WebSearchError, WebSearchService
 
 
 @dataclass
@@ -93,15 +93,12 @@ def _search_files(arguments: dict[str, Any], context: ToolExecutionContext) -> d
     workspace_root = context.workspace.resolve()
     if not str(root).startswith(str(workspace_root)) or not root.exists():
         return {"matches": []}
-    ignored = {".git", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
+    from app.services.workspace_walk import iter_workspace_files
+
     matches: list[dict[str, Any]] = []
-    for path in root.rglob("*"):
+    for path in iter_workspace_files(root):
         if len(matches) >= limit:
             break
-        if any(part in ignored for part in path.parts):
-            continue
-        if not path.is_file():
-            continue
         try:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
@@ -165,13 +162,26 @@ def _read_logs(arguments: dict[str, Any], context: ToolExecutionContext) -> dict
 def _spawn_pipeline_task(arguments: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
     description = str(arguments.get("description") or "").strip()
     validation_profile = arguments.get("validation_profile")
+    allow_web_search = bool(arguments.get("allow_web_search", context.session.allow_web_search))
     return context.pipeline_bridge.spawn(
         context.db,
         session_id=context.session.id,
         project_id=context.project.id,
         description=description,
         validation_profile=str(validation_profile) if validation_profile else None,
+        allow_web_search=allow_web_search,
     )
+
+
+def _web_search(arguments: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+    if not context.session.allow_web_search:
+        raise ValueError("Web search is disabled for this chat session")
+    query = str(arguments.get("query") or "").strip()
+    limit = max(1, min(int(arguments.get("limit") or 5), 8))
+    try:
+        return WebSearchService().search_payload(query, limit=limit)
+    except WebSearchError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _write_artifact(arguments: dict[str, Any], context: ToolExecutionContext, artifact_type: str) -> dict[str, Any]:
@@ -342,10 +352,24 @@ BUILTIN_CHAT_TOOLS: dict[str, ToolSpec] = {
             "properties": {
                 "description": {"type": "string"},
                 "validation_profile": {"type": "string"},
+                "allow_web_search": {"type": "boolean"},
             },
             "required": ["description"],
         },
         handler=_spawn_pipeline_task,
+    ),
+    "web_search": ToolSpec(
+        name="web_search",
+        description="Search the public web for current external information relevant to the task.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["query"],
+        },
+        handler=_web_search,
     ),
     "write_plan_artifact": ToolSpec(
         name="write_plan_artifact",

@@ -1,5 +1,4 @@
 from fastapi import Header, HTTPException, Request, WebSocket, WebSocketException, status
-from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.services.config_service import get_config_value

@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import ArtifactModel
-from app.services.browser_control_service import browser_control
+from app.services.browser_control_service import BROWSER_WAIT_POLL_S, browser_control
 from app.services.run_engine.event_bus import event_bus
 from app.services.workspace_dev_url import infer_dev_server_base
 
@@ -64,7 +64,7 @@ def _wait_for_browser_client(project_id: str) -> bool:
         return browser_control.has_client(project_id)
     future = asyncio.run_coroutine_threadsafe(browser_control.wait_for_client(project_id), loop)
     try:
-        return bool(future.result(timeout=browser_control.BROWSER_WAIT_POLL_S + 10))
+        return bool(future.result(timeout=BROWSER_WAIT_POLL_S + 10))
     except Exception:
         return browser_control.has_client(project_id)
 

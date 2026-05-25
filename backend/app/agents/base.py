@@ -6,6 +6,7 @@ from typing import Any, TypeVar, get_args, get_origin
 from pydantic import BaseModel
 
 from app.agents.payload_normalize import loads_agent_json, normalize_agent_payload
+from app.agents.tool_runtime import PipelineToolRuntime
 from app.agents.skill_loader import (
     load_integrity_charter,
     load_pipeline_framework,
@@ -24,9 +25,11 @@ _SOFT_PROMPT_SKILL_LIMIT_BYTES = 8 * 1024
 class BaseAgent:
     prompt_filename: str = ""
     skill_filename: str = ""
+    max_tool_rounds: int = 8
 
-    def __init__(self, provider: BaseProvider) -> None:
+    def __init__(self, provider: BaseProvider, *, tool_runtime: PipelineToolRuntime | None = None) -> None:
         self.provider = provider
+        self.tool_runtime = tool_runtime
 
     def _role_skill_key(self) -> str:
         if self.skill_filename:
@@ -130,7 +133,7 @@ class BaseAgent:
             "Return JSON matching this schema exactly:\n"
             f"{self._schema_instruction(schema)}"
         )
-        raw = self.provider.invoke_json(system_with_rules, user_with_schema)
+        raw = self._run_with_optional_tools(system_with_rules, user_with_schema)
         text = (raw or "").strip()
         if text.startswith("```"):
             text = text.strip("`")
@@ -140,3 +143,41 @@ class BaseAgent:
         if isinstance(payload, dict):
             payload = normalize_agent_payload(schema.__name__, payload)
         return schema.model_validate(payload)
+
+    def _run_with_optional_tools(self, system_prompt: str, user_prompt: str) -> str:
+        tool_runtime = self.tool_runtime
+        if tool_runtime is None:
+            return self.provider.invoke_json(system_prompt, user_prompt)
+        tool_schemas = tool_runtime.tool_schemas()
+        if not tool_schemas:
+            return self.provider.invoke_json(system_prompt, user_prompt)
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        for _ in range(max(1, self.max_tool_rounds)):
+            result = self.provider.invoke_chat(messages, tools=tool_schemas, stream=False)
+            if result.tool_calls:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {"id": call.id, "name": call.name, "arguments": call.arguments}
+                            for call in result.tool_calls
+                        ],
+                    }
+                )
+                for call in result.tool_calls:
+                    tool_output = tool_runtime.execute(call.name, call.arguments)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "name": call.name,
+                            "content": tool_output,
+                        }
+                    )
+                continue
+            return result.content
+        raise ValueError(f"{type(self).__name__} exceeded the maximum tool rounds ({self.max_tool_rounds})")

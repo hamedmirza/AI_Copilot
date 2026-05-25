@@ -4,14 +4,14 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
-
 from app.core.enums import PipelineStage, ProviderStatus
 from app.providers.base import BaseProvider
 from app.providers.fake import FakeProvider
 from app.providers.lmstudio import LMStudioProvider
 from app.providers.ollama import OllamaProvider, normalize_ollama_base_url, probe_ollama_endpoints
 from app.services.lmstudio_catalog import LMStudioCatalog, SETTINGS_ROLE_KEYS
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -86,7 +86,7 @@ class ProviderRegistry:
             return self.fake_provider  # type: ignore[return-value]
         if self._lmstudio is None:
             self._lmstudio = LMStudioProvider(
-                base_url=str(self._config.get("lmstudio_base_url", "http://127.0.0.1:1234/v1")),
+                base_url=str(self._config.get("lmstudio_base_url", "http://172.10.1.2:1234/v1")),
                 api_key=str(self._config.get("lmstudio_api_key", "lm-studio")),
                 model=str(self._config.get("lmstudio_model", "")),
                 timeout_seconds=self._timeout(),
@@ -127,6 +127,25 @@ class ProviderRegistry:
             or self._config.get(default_model_key, "")
         )
         selected = self._resolve_runnable_model(stage_key, selected)
+        if not self._config.get("ollama_enabled"):
+            provider = self._provider_for_model(selected)
+            if isinstance(provider, LMStudioProvider):
+                catalog = self.get_lmstudio_catalog()
+                prepared = provider.prepare_model(
+                    selected,
+                    self._stage_mode(stage_key),
+                    catalog=catalog,
+                    allow_unload=True,
+                )
+                if prepared != selected:
+                    logger.warning(
+                        "Adjusted stage %s model from %r to %r based on LM Studio catalog/load",
+                        stage_key,
+                        selected,
+                        prepared,
+                    )
+                    return provider.with_overrides(model_name=prepared)
+            return provider
         return self._provider_for_model(selected)
 
     def _stage_mode(self, stage_key: str) -> str:
@@ -240,7 +259,13 @@ class ProviderRegistry:
         if not self._config.get("ollama_enabled"):
             provider = self._provider_for_model(selected)
             if isinstance(provider, LMStudioProvider):
-                prepared = provider.prepare_model(selected, mode_key)
+                catalog = self.get_lmstudio_catalog()
+                prepared = provider.prepare_model(
+                    selected,
+                    mode_key,
+                    catalog=catalog,
+                    allow_unload=False,
+                )
                 if prepared != selected:
                     logger.warning(
                         "Adjusted chat model from %r to %r for mode %r based on LM Studio memory heuristics",
@@ -367,7 +392,7 @@ class ProviderRegistry:
                 timeout_seconds=self._timeout(),
             )
         return LMStudioProvider(
-            base_url=str(self._config.get("lmstudio_base_url", "http://127.0.0.1:1234/v1")),
+            base_url=str(self._config.get("lmstudio_base_url", "http://172.10.1.2:1234/v1")),
             api_key=str(self._config.get("lmstudio_api_key", "lm-studio")),
             model=selected,
             timeout_seconds=self._timeout(),

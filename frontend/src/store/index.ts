@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware'
 
 export type Panel = 'explorer' | 'search' | 'git' | 'agents' | 'settings'
 export type SidebarPanel = Exclude<Panel, 'settings'>
-export type CenterView = 'editor' | 'browser' | 'kanban' | 'reporting'
+export type CenterView = 'editor' | 'browser' | 'kanban'
 export type AgentPanelPlacement = 'sidebar' | 'right'
 export type RightPanelTab = 'chat' | 'runs' | 'agents'
 export type RunDrawerTab = 'conversation' | 'pipeline'
@@ -38,6 +38,7 @@ export interface ChatSession {
   mode: ChatMode | string
   model_override?: string | null
   nothink?: boolean | null
+  allow_web_search?: boolean
   message_count?: number
   last_message_preview?: string | null
   last_message_at?: string | null
@@ -291,7 +292,7 @@ export const useUIStore = create<UIState>()(
       browserAgentMode: false,
       browserAgentRunId: null,
       bottomTab: 'terminal',
-      agentPanelPlacement: 'sidebar',
+      agentPanelPlacement: 'right',
       rightPanelTab: 'chat',
       setActivePanel: (p) => set({ activePanel: p }),
       toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
@@ -383,6 +384,22 @@ export const useUIStore = create<UIState>()(
     }),
     {
       name: 'ai-copilot-ui',
+      version: 3,
+      migrate: (persisted, version) => {
+        const state = (persisted ?? {}) as Record<string, unknown>
+        if (version < 1) {
+          return { ...state, agentPanelPlacement: 'right' }
+        }
+        if (version < 3) {
+          if (state.activeCenterView === 'reporting' || state.activeCenterView === 'kanban') {
+            return { ...state, activeCenterView: 'kanban' }
+          }
+          if (state.activeCenterView !== 'editor' && state.activeCenterView !== 'browser') {
+            return { ...state, activeCenterView: 'editor' }
+          }
+        }
+        return persisted
+      },
       partialize: (state) => ({
         activePanel: state.activePanel,
         sidebarCollapsed: state.sidebarCollapsed,

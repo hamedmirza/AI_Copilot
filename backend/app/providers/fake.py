@@ -1,5 +1,4 @@
 import json
-from typing import Callable
 
 from app.core.enums import ProviderStatus
 from app.providers.base import BaseProvider, ChatCompletionResult, ChatStreamChunk, ChatToolCall
@@ -63,7 +62,9 @@ class FakeProvider(BaseProvider):
                 }
             )
         if schema_name == "UIDesignerOutput":
-            if "frontend" not in lower:
+            from app.services.run_truth_service import description_implies_frontend_ui
+
+            if not description_implies_frontend_ui(lower):
                 raise ValueError("skip_ui")
             return json.dumps(
                 {
@@ -149,12 +150,7 @@ class FakeProvider(BaseProvider):
         stream: bool = False,
         max_tokens: int | None = None,
     ) -> ChatCompletionResult:
-        system_prompt = "\n".join(
-            str(message.get("content") or "") for message in messages if message.get("role") == "system"
-        )
-        user_prompt = "\n".join(
-            str(message.get("content") or "") for message in messages if message.get("role") != "system"
-        )
+        system_prompt, user_prompt = self._build_react_prompt(messages, tools or [])
         parsed = self._parse_chat_json(self.invoke_json(system_prompt, user_prompt))
         return ChatCompletionResult(
             content=str(parsed.get("content") or ""),
@@ -168,6 +164,7 @@ class FakeProvider(BaseProvider):
                 if call.get("name")
             ],
             finish_reason=str(parsed.get("finish_reason") or "stop"),
+            raw={"text": parsed.get("content", "")},
         )
 
     def invoke_chat_stream(

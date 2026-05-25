@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.db.models import ChatMessageModel, ChatSessionModel
 from app.services.chat_orchestrator import ChatOrchestrator
 
 HEADERS = {"X-Api-Token": "dev-token"}
@@ -100,3 +99,23 @@ def test_settings_nothink_default_round_trip(client):
     )
     assert restored.status_code == 200
     assert restored.json()["nothink_default"] is True
+
+
+def test_update_chat_session_web_search_toggle(client, tmp_path: Path):
+    project_id = _create_project(client, tmp_path, "chat-web-search-project")
+    created = client.post(
+        "/api/chat/sessions",
+        json={"project_id": project_id, "title": "Web Search Chat", "mode": "general"},
+        headers=HEADERS,
+    )
+    assert created.status_code == 200
+    session_id = created.json()["id"]
+    assert created.json()["allow_web_search"] is False
+
+    updated = client.put(
+        f"/api/chat/sessions/{session_id}",
+        json={"allow_web_search": True},
+        headers=HEADERS,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["allow_web_search"] is True

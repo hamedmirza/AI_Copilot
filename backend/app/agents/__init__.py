@@ -33,10 +33,9 @@ class UIDesignerAgent(BaseAgent):
     prompt_filename = "ui_designer.md"
     skill_filename = "ui-designer"
 
-    def design(self, context: str) -> UIDesignerOutput | None:
-        if "frontend" not in context.lower():
-            return None
+    def design(self, context: str) -> UIDesignerOutput:
         result = self.run(context, UIDesignerOutput)
+        assert result is not None
         return result
 
 

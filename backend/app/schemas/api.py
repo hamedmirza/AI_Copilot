@@ -131,6 +131,7 @@ class TaskCreate(BaseModel):
     description: str = Field(min_length=10)
     validation_profile: str = "python"
     use_scout: bool = False
+    allow_web_search: bool = False
 
 
 class TaskResponse(BaseModel):
@@ -139,6 +140,7 @@ class TaskResponse(BaseModel):
     description: str
     validation_profile: str
     use_scout: bool
+    allow_web_search: bool = False
     created_at: str
 
 
@@ -170,6 +172,7 @@ class RunResponse(BaseModel):
     readiness: dict = Field(default_factory=dict)
     mismatch_classes: list[str] = Field(default_factory=list)
     approval_override: bool | None = None
+    allow_web_search: bool | None = None
     clarification_question: str | None = None
     clarification_stage: str | None = None
     recommended_assumption: str | None = None

@@ -99,7 +99,7 @@ export function RunDetailDrawer({
   useEffect(() => {
     if (!open || !runId) return
     setActiveTab(initialTab ?? (detail ? defaultDrawerTab(detail.status) : 'pipeline'))
-  }, [open, runId, initialTab])
+  }, [detail, initialTab, open, runId])
 
   useEffect(() => {
     if (!open || !runId || listOnly) return
@@ -230,22 +230,7 @@ export function RunDetailDrawer({
     }
   }, [hydrateRun, refreshThread, runId, setRunStatus])
 
-  const handleResume = useCallback(async () => {
-    if (!runId) return
-    setBusy(true)
-    try {
-      await api.runs.resume(runId)
-      setRunStatus('running')
-      showSuccess('Run re-queued')
-      await hydrateRun(runId, true)
-    } catch (e) {
-      showError(e)
-    } finally {
-      setBusy(false)
-    }
-  }, [hydrateRun, runId, setRunStatus])
-
-  const handleOpenChat = useCallback(() => {
+  const handleOpenChat = () => {
     if (!detail?.chat_session_id) {
       showError('No chat session linked to this run yet.')
       return
@@ -253,7 +238,7 @@ export function RunDetailDrawer({
     setCurrentSessionId(detail.chat_session_id)
     setRightPanelTab('chat')
     showSuccess('Opened linked chat session')
-  }, [detail?.chat_session_id, setCurrentSessionId, setRightPanelTab])
+  }
 
   const handleRollbackWorkspace = useCallback(async () => {
     if (!runId) return
@@ -466,8 +451,8 @@ export function RunDetailDrawer({
                           runId={runId}
                           artifacts={artifacts}
                           busy={busy}
-                          retryDisabled={!isRetryableStatus(status)}
-                          onRetryWithFeedback={handleRetry}
+                          retryDisabled={inline || !isRetryableStatus(status)}
+                          onRetryWithFeedback={inline ? undefined : handleRetry}
                         />
                       </div>
                     )}
@@ -519,7 +504,7 @@ export function RunDetailDrawer({
                         <VisualEvidencePanel
                           runId={runId}
                           evidence={resolvedVisualEvidence}
-                          showActions={needsBrowserClient}
+                          showActions={!inline && needsBrowserClient}
                           onContinueVisual={handleContinueVisual}
                           continueBusy={busy}
                         />
@@ -599,8 +584,9 @@ export function RunDetailDrawer({
                       artifacts={artifacts}
                       loading={loading}
                       runId={runId}
-                      onRetryWithFeedback={handleRetry}
+                      onRetryWithFeedback={inline ? undefined : handleRetry}
                       retryBusy={busy}
+                      retryDisabled={inline}
                     />
                   </div>
                 )}

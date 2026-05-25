@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from '@/api/client'
 import { EmptyState, Skeleton } from '@/components/ui/primitives'
 
@@ -8,19 +8,19 @@ export function LogViewer() {
   const [runId, setRunId] = useState('')
   const [loading, setLoading] = useState(true)
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const data = await api.logs({ limit: 200, level: level || undefined, run_id: runId || undefined })
       setLines(data.lines)
     } catch { /* ignore */ }
     finally { setLoading(false) }
-  }
+  }, [level, runId])
 
   useEffect(() => {
     load()
     const interval = setInterval(load, 2000)
     return () => clearInterval(interval)
-  }, [level, runId])
+  }, [load])
 
   if (loading) {
     return <div className="p-2 space-y-1">{[1, 2, 3].map((i) => <Skeleton key={i} className="h-4" />)}</div>

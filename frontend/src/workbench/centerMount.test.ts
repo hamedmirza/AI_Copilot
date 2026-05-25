@@ -8,13 +8,12 @@ const appTsx = readFileSync(join(srcRoot, 'App.tsx'), 'utf-8')
 const builtinsTsx = readFileSync(join(srcRoot, 'workbench', 'builtins.tsx'), 'utf-8')
 
 describe('center workbench mount', () => {
-  it('App mounts center panels via getContribution', () => {
-    expect(appTsx).toMatch(/getContribution\(['"]center['"]/)
+  it('App mounts center panels via getContributions', () => {
+    expect(appTsx).toMatch(/getContributions\(['"]center['"]\)/)
     expect(appTsx).not.toMatch(/activeCenterView === 'browser' && BrowserComponent/)
   })
 
-  it('builtins registers kanban and reporting as center panels', () => {
+  it('builtins registers kanban as a center panel', () => {
     expect(builtinsTsx).toMatch(/id:\s*['"]kanban['"][\s\S]*zone:\s*['"]center['"]|zone:\s*['"]center['"][\s\S]*id:\s*['"]kanban['"]/)
-    expect(builtinsTsx).toMatch(/id:\s*['"]reporting['"][\s\S]*zone:\s*['"]center['"]|zone:\s*['"]center['"][\s\S]*id:\s*['"]reporting['"]/)
   })
 })

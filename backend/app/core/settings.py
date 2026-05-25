@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     app_api_token: str = "dev-token"
     db_url: str = "sqlite:///./backend/app.db"
-    lmstudio_base_url: str = "http://192.168.128.70:1234/v1"
+    lmstudio_base_url: str = "http://172.10.1.2:1234/v1"
     lmstudio_api_key: str = "lm-studio"
     lmstudio_model: str = ""
     host: str = "0.0.0.0"
