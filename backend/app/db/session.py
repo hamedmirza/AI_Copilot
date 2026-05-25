@@ -3,7 +3,9 @@ import sqlite3
 from pathlib import Path
 
 from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.pool import NullPool, StaticPool
 
 from app.core.defaults import DEFAULT_VALIDATION_PROFILES
 from app.core.settings import get_settings
@@ -37,10 +39,18 @@ def _resolve_db_url(db_url: str) -> str:
 
 
 def _build_engine(db_url: str):
+    resolved_url = _resolve_db_url(db_url)
+    engine_kwargs = {
+        "echo": False,
+        "connect_args": {"check_same_thread": False, "timeout": 30},
+    }
+    if resolved_url == "sqlite:///:memory:":
+        engine_kwargs["poolclass"] = StaticPool
+    elif resolved_url.startswith("sqlite:///"):
+        engine_kwargs["poolclass"] = NullPool
     built = create_engine(
-        _resolve_db_url(db_url),
-        connect_args={"check_same_thread": False, "timeout": 30},
-        echo=False,
+        resolved_url,
+        **engine_kwargs,
     )
     event.listen(built, "connect", _set_sqlite_pragma)
     return built
@@ -79,6 +89,15 @@ def _table_exists(table: str) -> bool:
     return table in set(inspector.get_table_names())
 
 
+def _safe_execute_ddl(conn, statement: str) -> None:
+    try:
+        conn.execute(text(statement))
+    except OperationalError as exc:
+        if "duplicate column name" in str(exc).lower():
+            return
+        raise
+
+
 def run_migrations() -> None:
     """Lightweight additive migrations without Alembic."""
     inspector = inspect(engine)
@@ -90,70 +109,82 @@ def run_migrations() -> None:
     # Example additive column migration
     if "projects" in existing and not _column_exists("projects", "protected_files_json"):
         with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE projects ADD COLUMN protected_files_json TEXT DEFAULT '[]'"))
+            _safe_execute_ddl(conn, "ALTER TABLE projects ADD COLUMN protected_files_json TEXT DEFAULT '[]'")
 
     if _table_exists("chat_sessions"):
         with engine.begin() as conn:
             if not _column_exists("chat_sessions", "title"):
-                conn.execute(
-                    text("ALTER TABLE chat_sessions ADD COLUMN title VARCHAR(255) DEFAULT 'New Chat'")
-                )
+                _safe_execute_ddl(conn, "ALTER TABLE chat_sessions ADD COLUMN title VARCHAR(255) DEFAULT 'New Chat'")
             if not _column_exists("chat_sessions", "mode"):
-                conn.execute(
-                    text("ALTER TABLE chat_sessions ADD COLUMN mode VARCHAR(64) DEFAULT 'general'")
-                )
+                _safe_execute_ddl(conn, "ALTER TABLE chat_sessions ADD COLUMN mode VARCHAR(64) DEFAULT 'general'")
             if not _column_exists("chat_sessions", "model_override"):
-                conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN model_override VARCHAR(255)"))
+                _safe_execute_ddl(conn, "ALTER TABLE chat_sessions ADD COLUMN model_override VARCHAR(255)")
             if not _column_exists("chat_sessions", "nothink"):
-                conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN nothink BOOLEAN"))
+                _safe_execute_ddl(conn, "ALTER TABLE chat_sessions ADD COLUMN nothink BOOLEAN")
 
     if _table_exists("chat_messages"):
         with engine.begin() as conn:
             if not _column_exists("chat_messages", "tool_calls_json"):
-                conn.execute(
-                    text("ALTER TABLE chat_messages ADD COLUMN tool_calls_json TEXT DEFAULT '[]'")
-                )
+                _safe_execute_ddl(conn, "ALTER TABLE chat_messages ADD COLUMN tool_calls_json TEXT DEFAULT '[]'")
             if not _column_exists("chat_messages", "tool_call_id"):
-                conn.execute(text("ALTER TABLE chat_messages ADD COLUMN tool_call_id VARCHAR(255)"))
+                _safe_execute_ddl(conn, "ALTER TABLE chat_messages ADD COLUMN tool_call_id VARCHAR(255)")
             if not _column_exists("chat_messages", "metadata_json"):
-                conn.execute(text("ALTER TABLE chat_messages ADD COLUMN metadata_json TEXT DEFAULT '{}'"))
+                _safe_execute_ddl(conn, "ALTER TABLE chat_messages ADD COLUMN metadata_json TEXT DEFAULT '{}'")
 
     if _table_exists("runs"):
         with engine.begin() as conn:
             if not _column_exists("runs", "task_kind"):
-                conn.execute(text("ALTER TABLE runs ADD COLUMN task_kind VARCHAR(32)"))
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN task_kind VARCHAR(32)")
             if not _column_exists("runs", "operator_feedback"):
-                conn.execute(text("ALTER TABLE runs ADD COLUMN operator_feedback TEXT"))
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN operator_feedback TEXT")
             if not _column_exists("runs", "promote_snapshot_json"):
-                conn.execute(text("ALTER TABLE runs ADD COLUMN promote_snapshot_json TEXT"))
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN promote_snapshot_json TEXT")
             if not _column_exists("runs", "failure_class"):
-                conn.execute(text("ALTER TABLE runs ADD COLUMN failure_class VARCHAR(64)"))
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN failure_class VARCHAR(64)")
             if not _column_exists("runs", "failure_subclass"):
-                conn.execute(text("ALTER TABLE runs ADD COLUMN failure_subclass VARCHAR(128)"))
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN failure_subclass VARCHAR(128)")
             if not _column_exists("runs", "failure_signature"):
-                conn.execute(text("ALTER TABLE runs ADD COLUMN failure_signature VARCHAR(255)"))
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN failure_signature VARCHAR(255)")
             if not _column_exists("runs", "recovery_status"):
-                conn.execute(text("ALTER TABLE runs ADD COLUMN recovery_status VARCHAR(32)"))
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN recovery_status VARCHAR(32)")
             if not _column_exists("runs", "superseded_by_run_id"):
-                conn.execute(text("ALTER TABLE runs ADD COLUMN superseded_by_run_id VARCHAR(36)"))
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN superseded_by_run_id VARCHAR(36)")
+            if not _column_exists("runs", "terminal_success"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN terminal_success BOOLEAN")
+            if not _column_exists("runs", "terminal_status"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN terminal_status VARCHAR(64)")
+            if not _column_exists("runs", "retry_count"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN retry_count INTEGER DEFAULT 0")
+            if not _column_exists("runs", "schema_failure_count"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN schema_failure_count INTEGER DEFAULT 0")
+            if not _column_exists("runs", "reviewer_failure_count"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN reviewer_failure_count INTEGER DEFAULT 0")
+            if not _column_exists("runs", "tester_failure_count"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN tester_failure_count INTEGER DEFAULT 0")
+            if not _column_exists("runs", "operator_feedback_present"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN operator_feedback_present BOOLEAN DEFAULT 0")
+            if not _column_exists("runs", "approval_reached"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN approval_reached BOOLEAN DEFAULT 0")
+            if not _column_exists("runs", "promote_rolled_back"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN promote_rolled_back BOOLEAN DEFAULT 0")
+            if not _column_exists("runs", "primary_failure_class"):
+                _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN primary_failure_class VARCHAR(64)")
 
     if _table_exists("tasks"):
         with engine.begin() as conn:
             if not _column_exists("tasks", "task_kind"):
-                conn.execute(text("ALTER TABLE tasks ADD COLUMN task_kind VARCHAR(32)"))
+                _safe_execute_ddl(conn, "ALTER TABLE tasks ADD COLUMN task_kind VARCHAR(32)")
 
     if _table_exists("mcp_servers"):
         with engine.begin() as conn:
             if not _column_exists("mcp_servers", "enabled"):
-                conn.execute(text("ALTER TABLE mcp_servers ADD COLUMN enabled BOOLEAN DEFAULT 1"))
+                _safe_execute_ddl(conn, "ALTER TABLE mcp_servers ADD COLUMN enabled BOOLEAN DEFAULT 1")
             if not _column_exists("mcp_servers", "last_status"):
-                conn.execute(
-                    text("ALTER TABLE mcp_servers ADD COLUMN last_status VARCHAR(64) DEFAULT 'unknown'")
-                )
+                _safe_execute_ddl(conn, "ALTER TABLE mcp_servers ADD COLUMN last_status VARCHAR(64) DEFAULT 'unknown'")
             if not _column_exists("mcp_servers", "last_error"):
-                conn.execute(text("ALTER TABLE mcp_servers ADD COLUMN last_error TEXT"))
+                _safe_execute_ddl(conn, "ALTER TABLE mcp_servers ADD COLUMN last_error TEXT")
             if not _column_exists("mcp_servers", "tool_count"):
-                conn.execute(text("ALTER TABLE mcp_servers ADD COLUMN tool_count INTEGER DEFAULT 0"))
+                _safe_execute_ddl(conn, "ALTER TABLE mcp_servers ADD COLUMN tool_count INTEGER DEFAULT 0")
 
 
 def seed_app_config(db: Session) -> None:
@@ -201,6 +232,13 @@ def seed_app_config(db: Session) -> None:
         "onboarding_completed": False,
         "allowed_git_hosts_json": json.dumps(["github.com", "gitlab.com"]),
         "validation_profiles_json": json.dumps(DEFAULT_VALIDATION_PROFILES),
+        "learning_auto_trial_enabled": True,
+        "learning_auto_promote_enabled": True,
+        "learning_min_trial_runs": 3,
+        "learning_min_success_rate_delta_pct": 10.0,
+        "learning_max_harmful_rate_pct": 34.0,
+        "learning_min_confidence": 0.65,
+        "learning_unknown_failure_autopromote_enabled": False,
     }
     for key, value in defaults.items():
         db.add(AppConfigModel(key=key, value=str(value)))

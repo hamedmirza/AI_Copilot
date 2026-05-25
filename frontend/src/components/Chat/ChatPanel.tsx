@@ -3,6 +3,11 @@ import { Brain, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { api } from '@/api/client'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { applyModelsResponse } from '@/lib/lmstudioModels'
+import {
+  elementContextPayload,
+  formatElementForAgentTask,
+  inferValidationProfile,
+} from '@/lib/pageElementContext'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button, EmptyState } from '@/components/ui/primitives'
 import {
@@ -10,6 +15,7 @@ import {
   useEditorStore,
   useProjectStore,
   useSettingsStore,
+  useUIStore,
   type ChatMessage,
   type ChatMode,
   type ChatModelSelectionMode,
@@ -122,6 +128,8 @@ export function ChatPanel() {
   const setPendingRunId = useChatStore((state) => state.setPendingRunId)
   const setComposerPrefill = useChatStore((state) => state.setComposerPrefill)
   const resetChatState = useChatStore((state) => state.resetChatState)
+  const pageElementSelection = useUIStore((state) => state.pageElementSelection)
+  const setPageElementSelection = useUIStore((state) => state.setPageElementSelection)
 
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [loadingMessages, setLoadingMessages] = useState(false)
@@ -520,7 +528,12 @@ export function ChatPanel() {
           start_line: selection.startLineNumber,
           end_line: selection.endLineNumber,
         } : undefined,
+        page_element: pageElementSelection
+          ? elementContextPayload(pageElementSelection)
+          : undefined,
       }
+
+      setPageElementSelection(null)
 
       const result = await api.chat.messages.send(sessionId, {
         content,
@@ -564,6 +577,8 @@ export function ChatPanel() {
     projectId,
     selectedModel,
     selection,
+    pageElementSelection,
+    setPageElementSelection,
     setPendingToolCalls,
     setStreaming,
     setAssistantStatus,
@@ -617,14 +632,19 @@ export function ChatPanel() {
       }
       if (!sessionId || !projectId) return
       setComposerValue('')
+      const taskDescription = pageElementSelection
+        ? formatElementForAgentTask(pageElementSelection, command.description)
+        : command.description
+      const validationProfile = inferValidationProfile(treeItems.map((item) => item.path))
+      setPageElementSelection(null)
       try {
         let runId = ''
         let taskId = ''
         let runDisplayName = ''
         try {
           const result = await api.chat.spawnTask(sessionId, {
-            description: command.description,
-            mode: activeMode,
+            description: taskDescription,
+            validation_profile: validationProfile,
           }) as Record<string, unknown>
           runId = String(result.run_id || (result.run as Record<string, unknown> | undefined)?.id || '')
           taskId = String(result.task_id || (result.task as Record<string, unknown> | undefined)?.id || '')
@@ -632,8 +652,8 @@ export function ChatPanel() {
         } catch {
           const fallback = await api.tasks.create({
             project_id: projectId,
-            description: command.description,
-            validation_profile: 'react',
+            description: taskDescription,
+            validation_profile: validationProfile,
           }) as Record<string, unknown>
           const runObj = fallback.run as Record<string, unknown> | undefined
           runId = String(runObj?.id || '')
@@ -674,9 +694,12 @@ export function ChatPanel() {
     currentSessionId,
     handleManualModelChange,
     persistModeChange,
+    pageElementSelection,
     projectId,
     refreshCurrentSessionSummary,
     sendMessage,
+    setPageElementSelection,
+    treeItems,
   ])
 
   const onChatEvent = useCallback((payload: unknown) => {
@@ -1096,6 +1119,8 @@ export function ChatPanel() {
             disabled={submitting || loadingSessions}
             submitting={submitting}
             pendingRunId={pendingRunId}
+            pageElement={pageElementSelection}
+            onClearPageElement={() => setPageElementSelection(null)}
             onChange={setComposerValue}
             onModeChange={(mode) => void persistModeChange(mode)}
             onCommand={handleCommand}

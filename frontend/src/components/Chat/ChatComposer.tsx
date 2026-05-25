@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ChatMode, TreeItem } from '@/store'
+import { X } from 'lucide-react'
+import type { ChatMode, PageElementSelection, TreeItem } from '@/store'
 import { Button } from '@/components/ui/primitives'
 import { showError } from '@/lib/toast'
 import { ModeSelector } from './ModeSelector'
@@ -20,6 +21,8 @@ interface ChatComposerProps {
   disabled?: boolean
   submitting?: boolean
   pendingRunId?: string | null
+  pageElement?: PageElementSelection | null
+  onClearPageElement?: () => void
   onChange: (value: string) => void
   onModeChange: (mode: ChatMode) => void
   onCommand: (command: ComposerCommand) => void | Promise<void>
@@ -33,6 +36,8 @@ export function ChatComposer({
   disabled,
   submitting,
   pendingRunId,
+  pageElement,
+  onClearPageElement,
   onChange,
   onModeChange,
   onCommand,
@@ -138,6 +143,28 @@ export function ChatComposer({
           `/mode`, `/task`, `/clear`, `/mcp list`, `/model`
         </span>
       </div>
+
+      {pageElement && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span
+            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-[var(--accent)]/40 bg-[var(--accent)]/10 text-[var(--accent)]"
+            title={pageElement.selector}
+          >
+            <span className="font-medium">{pageElement.tagName}</span>
+            <span className="opacity-80 truncate max-w-[200px]">{pageElement.selector}</span>
+            {onClearPageElement && (
+              <button
+                type="button"
+                className="hover:text-white"
+                onClick={onClearPageElement}
+                aria-label="Remove element context"
+              >
+                <X size={12} />
+              </button>
+            )}
+          </span>
+        </div>
+      )}
 
       <div className="relative">
         <textarea

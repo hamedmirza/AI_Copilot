@@ -17,6 +17,9 @@ BOOL_KEYS = {
     "auto_resume_enabled",
     "stop_on_first_failure",
     "editor_auto_save",
+    "learning_auto_trial_enabled",
+    "learning_auto_promote_enabled",
+    "learning_unknown_failure_autopromote_enabled",
 }
 JSON_DICT_KEYS = {
     "lmstudio_role_models_json",
@@ -32,6 +35,12 @@ INT_KEYS = {
     "editor_font_size",
     "editor_tab_size",
     "editor_auto_save_delay_ms",
+    "learning_min_trial_runs",
+}
+FLOAT_KEYS = {
+    "learning_min_success_rate_delta_pct",
+    "learning_max_harmful_rate_pct",
+    "learning_min_confidence",
 }
 
 
@@ -40,6 +49,8 @@ def _parse_value(key: str, value: str) -> Any:
         return value.lower() in ("true", "1", "yes")
     if key in INT_KEYS:
         return int(value)
+    if key in FLOAT_KEYS:
+        return float(value)
     if key in JSON_DICT_KEYS:
         try:
             data = json.loads(value or "{}")
@@ -96,6 +107,13 @@ class ConfigService:
         "git_author_email": "copilot@local.dev",
         "api_token": "dev-token",
         "validation_profiles_json": json.dumps(DEFAULT_VALIDATION_PROFILES),
+        "learning_auto_trial_enabled": True,
+        "learning_auto_promote_enabled": True,
+        "learning_min_trial_runs": 3,
+        "learning_min_success_rate_delta_pct": 10.0,
+        "learning_max_harmful_rate_pct": 34.0,
+        "learning_min_confidence": 0.65,
+        "learning_unknown_failure_autopromote_enabled": False,
     }
 
     def get_settings(self) -> SettingsResponse:
@@ -129,6 +147,18 @@ class ConfigService:
             )
         if "chat_history_limit" in payload:
             payload["chat_history_limit"] = max(1, min(500, int(payload["chat_history_limit"])))
+        if "learning_min_trial_runs" in payload:
+            payload["learning_min_trial_runs"] = max(1, min(100, int(payload["learning_min_trial_runs"])))
+        if "learning_min_success_rate_delta_pct" in payload:
+            payload["learning_min_success_rate_delta_pct"] = max(
+                0.0, min(100.0, float(payload["learning_min_success_rate_delta_pct"]))
+            )
+        if "learning_max_harmful_rate_pct" in payload:
+            payload["learning_max_harmful_rate_pct"] = max(
+                0.0, min(100.0, float(payload["learning_max_harmful_rate_pct"]))
+            )
+        if "learning_min_confidence" in payload:
+            payload["learning_min_confidence"] = max(0.0, min(1.0, float(payload["learning_min_confidence"])))
         if "ollama_base_url" in payload and payload["ollama_base_url"] is not None:
             from app.providers.ollama import normalize_ollama_base_url
 

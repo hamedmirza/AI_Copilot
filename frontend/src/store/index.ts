@@ -76,6 +76,20 @@ export interface RunEvent {
   [key: string]: unknown
 }
 
+export interface PageElementSelection {
+  url: string
+  title: string
+  selector: string
+  tagName: string
+  id?: string
+  classNames: string[]
+  textPreview: string
+  outerHtmlSnippet: string
+  rect: { x: number; y: number; width: number; height: number }
+  computedStyles?: Record<string, string>
+  capturedAt: string
+}
+
 interface UIState {
   activePanel: Panel
   sidebarCollapsed: boolean
@@ -86,6 +100,10 @@ interface UIState {
   bottomPanelCollapsed: boolean
   activeCenterView: CenterView
   browserUrlByProject: Record<string, string>
+  pickerBridgeInstalledByProject: Record<string, boolean>
+  browserPickerActive: boolean
+  pageElementSelection: PageElementSelection | null
+  browserBridgeReady: boolean
   bottomTab: 'terminal' | 'git' | 'problems'
   rightPanelTab: RightPanelTab
   setActivePanel: (p: Panel) => void
@@ -99,6 +117,11 @@ interface UIState {
   setActiveCenterView: (view: CenterView) => void
   toggleCenterView: (view: CenterView) => void
   setBrowserUrlForProject: (projectId: string, url: string) => void
+  setBrowserPickerActive: (active: boolean) => void
+  setPageElementSelection: (sel: PageElementSelection | null) => void
+  setBrowserBridgeReady: (ready: boolean) => void
+  setPickerBridgeInstalled: (projectId: string, installed: boolean) => void
+  resetBrowserPickerForProjectSwitch: () => void
   setBottomTab: (t: 'terminal' | 'git' | 'problems') => void
   setRightPanelTab: (t: RightPanelTab) => void
 }
@@ -250,6 +273,10 @@ export const useUIStore = create<UIState>()(
       bottomPanelCollapsed: false,
       activeCenterView: 'editor',
       browserUrlByProject: {},
+      pickerBridgeInstalledByProject: {},
+      browserPickerActive: false,
+      pageElementSelection: null,
+      browserBridgeReady: false,
       bottomTab: 'terminal',
       rightPanelTab: 'chat',
       setActivePanel: (p) => set({ activePanel: p }),
@@ -269,10 +296,42 @@ export const useUIStore = create<UIState>()(
         set((s) => ({
           browserUrlByProject: { ...s.browserUrlByProject, [projectId]: url },
         })),
+      setBrowserPickerActive: (browserPickerActive) => set({ browserPickerActive }),
+      setPageElementSelection: (pageElementSelection) => set({ pageElementSelection }),
+      setBrowserBridgeReady: (browserBridgeReady) => set({ browserBridgeReady }),
+      setPickerBridgeInstalled: (projectId, installed) =>
+        set((s) => ({
+          pickerBridgeInstalledByProject: {
+            ...s.pickerBridgeInstalledByProject,
+            [projectId]: installed,
+          },
+        })),
+      resetBrowserPickerForProjectSwitch: () =>
+        set({
+          browserPickerActive: false,
+          pageElementSelection: null,
+          browserBridgeReady: false,
+        }),
       setBottomTab: (t) => set({ bottomTab: t }),
       setRightPanelTab: (t) => set({ rightPanelTab: t }),
     }),
-    { name: 'ai-copilot-ui' }
+    {
+      name: 'ai-copilot-ui',
+      partialize: (state) => ({
+        activePanel: state.activePanel,
+        sidebarCollapsed: state.sidebarCollapsed,
+        sidebarWidth: state.sidebarWidth,
+        rightPanelWidth: state.rightPanelWidth,
+        bottomPanelHeight: state.bottomPanelHeight,
+        rightPanelCollapsed: state.rightPanelCollapsed,
+        bottomPanelCollapsed: state.bottomPanelCollapsed,
+        activeCenterView: state.activeCenterView,
+        browserUrlByProject: state.browserUrlByProject,
+        pickerBridgeInstalledByProject: state.pickerBridgeInstalledByProject,
+        bottomTab: state.bottomTab,
+        rightPanelTab: state.rightPanelTab,
+      }),
+    },
   )
 )
 

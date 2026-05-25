@@ -24,24 +24,19 @@ class FakeProvider(BaseProvider):
     def set_response_for_keyword(self, keyword: str, payload: dict) -> None:
         self.responses[keyword.lower()] = json.dumps(payload)
 
-    def invoke_json(self, system_prompt: str, user_prompt: str) -> str:
-        self.call_log.append((system_prompt, user_prompt))
+    @staticmethod
+    def _schema_name_from_user_prompt(user_prompt: str) -> str:
+        marker = '"schema_name": "'
+        idx = user_prompt.find(marker)
+        if idx < 0:
+            return ""
+        start = idx + len(marker)
+        end = user_prompt.find('"', start)
+        return user_prompt[start:end] if end > start else ""
+
+    def _default_payload_for_schema(self, schema_name: str, user_prompt: str) -> str | None:
         lower = user_prompt.lower()
-        for key, response in self.responses.items():
-            if key in lower or key in system_prompt.lower():
-                return response
-        if "reviewer" in system_prompt.lower():
-            self._review_attempt += 1
-            approved = self._review_attempt >= 3
-            return json.dumps(
-                {
-                    "approved": approved,
-                    "summary": "Review complete",
-                    "issues": [] if approved else [{"severity": "warn", "file_path": "a.py", "message": "fix"}],
-                    "suggestions": [],
-                }
-            )
-        if "planner" in system_prompt.lower():
+        if schema_name == "PlannerOutput":
             return json.dumps(
                 {
                     "summary": "Plan for task",
@@ -56,7 +51,7 @@ class FakeProvider(BaseProvider):
                     "risks": [],
                 }
             )
-        if "architect" in system_prompt.lower():
+        if schema_name == "ArchitectOutput":
             return json.dumps(
                 {
                     "overview": "Architecture",
@@ -67,7 +62,7 @@ class FakeProvider(BaseProvider):
                     "dependencies": [],
                 }
             )
-        if "ui designer" in system_prompt.lower() or "ui_designer" in system_prompt.lower():
+        if schema_name == "UIDesignerOutput":
             if "frontend" not in lower:
                 raise ValueError("skip_ui")
             return json.dumps(
@@ -78,7 +73,7 @@ class FakeProvider(BaseProvider):
                     "accessibility_notes": ["aria labels"],
                 }
             )
-        if "coder" in system_prompt.lower():
+        if schema_name == "CoderOutput":
             return json.dumps(
                 {
                     "summary": "Applied changes",
@@ -91,16 +86,39 @@ class FakeProvider(BaseProvider):
                     "requires_operator_approval": False,
                 }
             )
-        if "tester" in system_prompt.lower():
+        if schema_name == "ReviewerOutput":
+            self._review_attempt += 1
+            approved = self._review_attempt >= 3
+            return json.dumps(
+                {
+                    "approved": approved,
+                    "summary": "Review complete",
+                    "issues": [] if approved else [{"severity": "warn", "file_path": "a.py", "message": "fix"}],
+                    "suggestions": [],
+                }
+            )
+        if schema_name == "TesterOutput":
             return json.dumps(
                 {
                     "passed": True,
                     "summary": "Validation plan",
+                    "dry_run_steps": [{"command": "python3 -m compileall .", "description": "Dry-run syntax check"}],
+                    "visual_checks": [],
+                    "visual_checks_skip_reason": None,
                     "commands": [{"command": "python3 -m compileall .", "description": "Syntax check"}],
                     "notes": [],
                 }
             )
-        if "supervisor" in system_prompt.lower() or "playbook" in system_prompt.lower():
+        if schema_name == "SupervisorOutput":
+            return json.dumps(
+                {
+                    "approved": True,
+                    "summary": "Deployment matches plan",
+                    "plan_gaps": [],
+                    "doc_updates": [],
+                }
+            )
+        if schema_name == "PlaybookSupervisorOutput":
             return json.dumps(
                 {
                     "approved": True,
@@ -109,6 +127,19 @@ class FakeProvider(BaseProvider):
                     "required_changes": [],
                 }
             )
+        return None
+
+    def invoke_json(self, system_prompt: str, user_prompt: str) -> str:
+        self.call_log.append((system_prompt, user_prompt))
+        lower = user_prompt.lower()
+        for key, response in self.responses.items():
+            if key in lower:
+                return response
+        schema_name = self._schema_name_from_user_prompt(user_prompt)
+        if schema_name:
+            payload = self._default_payload_for_schema(schema_name, user_prompt)
+            if payload is not None:
+                return payload
         return self.default_response
 
     def invoke_chat(

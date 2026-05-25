@@ -299,6 +299,7 @@ export function RunDetailDrawer({
                     runId={runId}
                     artifacts={artifacts}
                     busy={busy}
+                    retryDisabled={!isRetryableStatus(status)}
                     onRetryWithFeedback={handleRetry}
                   />
                 </div>

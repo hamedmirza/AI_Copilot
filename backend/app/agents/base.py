@@ -1,25 +1,63 @@
 import json
+import logging
 from pathlib import Path
 from typing import Any, TypeVar, get_args, get_origin
 
 from pydantic import BaseModel
 
 from app.agents.payload_normalize import normalize_agent_payload
+from app.agents.skill_loader import (
+    load_integrity_charter,
+    load_pipeline_framework,
+    load_role_skill,
+    skill_key_from_prompt_filename,
+)
 from app.providers.base import BaseProvider
+
+logger = logging.getLogger(__name__)
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+_SOFT_PROMPT_SKILL_LIMIT_BYTES = 8 * 1024
 
 
 class BaseAgent:
     prompt_filename: str = ""
+    skill_filename: str = ""
 
     def __init__(self, provider: BaseProvider) -> None:
         self.provider = provider
 
+    def _role_skill_key(self) -> str:
+        if self.skill_filename:
+            key = self.skill_filename.strip()
+            return key.removesuffix(".md") if key.endswith(".md") else key
+        return skill_key_from_prompt_filename(self.prompt_filename)
+
     def load_system_prompt(self) -> str:
         path = PROMPTS_DIR / self.prompt_filename
-        return path.read_text(encoding="utf-8").strip()
+        prompt = path.read_text(encoding="utf-8").strip()
+        parts = [prompt]
+        skill_key = self._role_skill_key()
+        skill = load_role_skill(skill_key) if skill_key else ""
+        if skill:
+            parts.append(skill)
+        framework = load_pipeline_framework()
+        if framework:
+            parts.append(framework)
+        integrity = load_integrity_charter()
+        if integrity:
+            parts.append(integrity)
+        combined = "\n\n".join(parts)
+        size = len(combined.encode("utf-8"))
+        if size > _SOFT_PROMPT_SKILL_LIMIT_BYTES:
+            logger.warning(
+                "Agent %s system prompt+skill is %s bytes (soft limit %s)",
+                type(self).__name__,
+                size,
+                _SOFT_PROMPT_SKILL_LIMIT_BYTES,
+            )
+        return combined
 
     def _example_for_annotation(self, annotation: Any) -> Any:
         origin = get_origin(annotation)

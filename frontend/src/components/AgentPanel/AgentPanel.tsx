@@ -1,22 +1,38 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '@/api/client'
 import { useRunDetail } from '@/hooks/useRunDetail'
-import { useEditorStore, useProjectStore, useRunStore } from '@/store'
+import { formatElementForAgentTask } from '@/lib/pageElementContext'
+import { useEditorStore, useProjectStore, useRunStore, useUIStore } from '@/store'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button, EmptyState, Skeleton } from '@/components/ui/primitives'
-import type { FailureSummaryResponse, GlobalSkillRecord, LessonRecord, RunSummary } from '@/types/runs'
+import type { FailureSummaryResponse, GlobalSkillRecord, ImprovementRecord, LessonRecord, RunSummary } from '@/types/runs'
+import { isRetryableStatus } from '@/types/runs'
 import { ApproveDialog } from './ApproveDialog'
 import { ArtifactViewer } from './ArtifactViewer'
 import { RunDetailDrawer } from './RunDetailDrawer'
-import { RunHistoryList } from './RunHistoryList'
 import { RunLogPanel } from '@/components/shared/RunLogPanel'
 import { normalizeRunEvents } from '@/lib/runEvents'
 
 const STAGES = ['planner', 'architect', 'ui_designer', 'coder', 'reviewer', 'tester', 'supervisor']
 
+function improvementEvidenceLine(improvement: ImprovementRecord): string {
+  const baselineSize = Number(improvement.baseline_metrics?.sample_size ?? 0)
+  const trialSize = Number(improvement.trial_metrics?.sample_size ?? 0)
+  if (trialSize <= 0 && Number(improvement.exposure_count ?? 0) <= 0) {
+    if (baselineSize > 0) {
+      return `Awaiting comparable trial runs. Baseline cohort: ${baselineSize} run${baselineSize === 1 ? '' : 's'}.`
+    }
+    return 'Awaiting comparable trial runs.'
+  }
+  const delta = Number(improvement.decision_metadata?.success_rate_delta_pct ?? 0)
+  return `Baseline ${improvement.baseline_metrics?.success_rate ?? 0}% → Trial ${improvement.trial_metrics?.success_rate ?? 0}% (${delta >= 0 ? '+' : ''}${delta}%)`
+}
+
 export function AgentPanel() {
   const projectId = useProjectStore((s) => s.currentProjectId)
+  const pageElementSelection = useUIStore((s) => s.pageElementSelection)
+  const setPageElementSelection = useUIStore((s) => s.setPageElementSelection)
   const { currentRunId, runStatus, events, runs, setCurrentRun, setRunStatus, addEvent, setRuns } = useRunStore()
   const { artifacts, loading: detailLoading, hydrateRun } = useRunDetail()
   const [description, setDescription] = useState('')
@@ -36,6 +52,7 @@ export function AgentPanel() {
   const [failureSummary, setFailureSummary] = useState<FailureSummaryResponse | null>(null)
   const [projectLessons, setProjectLessons] = useState<LessonRecord[]>([])
   const [globalSkills, setGlobalSkills] = useState<GlobalSkillRecord[]>([])
+  const [improvements, setImprovements] = useState<ImprovementRecord[]>([])
   const [learningBusy, setLearningBusy] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
@@ -93,18 +110,21 @@ export function AgentPanel() {
       setFailureSummary(null)
       setProjectLessons([])
       setGlobalSkills([])
+      setImprovements([])
       return
     }
     setLearningBusy(true)
     try {
-      const [summary, lessons, skills] = await Promise.all([
+      const [summary, lessons, skills, nextImprovements] = await Promise.all([
         api.runs.failureSummary(projectId) as Promise<FailureSummaryResponse>,
         api.projects.lessons(projectId) as Promise<LessonRecord[]>,
         api.skills.listGlobal() as Promise<GlobalSkillRecord[]>,
+        api.projects.improvements(projectId) as Promise<ImprovementRecord[]>,
       ])
       setFailureSummary(summary)
       setProjectLessons(lessons)
       setGlobalSkills(skills)
+      setImprovements(nextImprovements)
     } catch (e) {
       showError(e)
     } finally {
@@ -214,8 +234,24 @@ export function AgentPanel() {
     }
   }, [loadLearning])
 
+  const handleImprovementOverride = useCallback(async (improvementId: string, status: string, scope?: string) => {
+    setLearningBusy(true)
+    try {
+      await api.improvements.override(improvementId, { status, scope })
+      showSuccess(`Improvement marked ${status}`)
+      await loadLearning()
+    } catch (e) {
+      showError(e)
+    } finally {
+      setLearningBusy(false)
+    }
+  }, [loadLearning])
+
   const submitTask = async () => {
-    if (description.trim().length < 10) {
+    const taskBody = pageElementSelection
+      ? formatElementForAgentTask(pageElementSelection, description)
+      : description.trim()
+    if (taskBody.length < 10) {
       setDescError('Description must be at least 10 characters')
       return
     }
@@ -226,9 +262,10 @@ export function AgentPanel() {
     try {
       const result = await api.tasks.create({
         project_id: projectId,
-        description,
+        description: taskBody,
         validation_profile: validationProfile,
       }) as { run: { id: string; status: string } }
+      setPageElementSelection(null)
       const run = result.run
       setCurrentRun(run.id)
       setRunStatus(run.status)
@@ -259,6 +296,20 @@ export function AgentPanel() {
   return (
     <div className="h-full flex flex-col p-3 overflow-hidden">
       <div className="mb-3">
+        {pageElementSelection && (
+          <div className="mb-2 flex items-center gap-2 text-xs px-2 py-1.5 rounded border border-[var(--accent)]/40 bg-[var(--accent)]/10">
+            <span className="text-[var(--accent)] truncate flex-1" title={pageElementSelection.selector}>
+              Attached: {pageElementSelection.tagName} · {pageElementSelection.selector}
+            </span>
+            <button
+              type="button"
+              className="text-[var(--text-secondary)] hover:text-white shrink-0"
+              onClick={() => setPageElementSelection(null)}
+            >
+              Remove
+            </button>
+          </div>
+        )}
         <textarea
           className="w-full h-20 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded p-2 text-sm resize-none"
           placeholder="Describe your task (min 10 chars)..."
@@ -317,7 +368,7 @@ export function AgentPanel() {
         </Button>
         <Button
           variant="secondary"
-          disabled={!['blocked', 'changes_requested'].includes(runStatus)}
+          disabled={!isRetryableStatus(runStatus)}
           onClick={() => void handleRetryWithFeedback('')}
         >
           Retry
@@ -361,22 +412,8 @@ export function AgentPanel() {
           runId={currentRunId}
           onRetryWithFeedback={handleRetryWithFeedback}
           retryBusy={retryBusy}
+          retryDisabled={!isRetryableStatus(runStatus)}
         />
-      </div>
-
-      <div className="border-t border-[var(--border)] pt-2 shrink-0">
-        <p className="text-xs text-[var(--text-secondary)] mb-1">Run History</p>
-        {loading ? (
-          <Skeleton className="h-20 w-full" />
-        ) : (
-          <RunHistoryList
-            runs={runSummaries}
-            currentRunId={currentRunId}
-            onSelect={(id) => void selectRun(id)}
-            onOpenDetails={(id) => openDrawer(id)}
-            onViewAll={() => openDrawer(runSummaries[0]?.id || currentRunId || '', 'list')}
-          />
-        )}
       </div>
 
       <div className="border-t border-[var(--border)] pt-2 mt-2 shrink-0 space-y-3">
@@ -396,6 +433,61 @@ export function AgentPanel() {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <p className="text-xs text-[var(--text-secondary)] mb-1">Improvements</p>
+          {improvements.length === 0 ? (
+            <p className="text-xs text-[var(--text-secondary)]">No structured improvements yet.</p>
+          ) : (
+            <div className="space-y-1 max-h-36 overflow-auto">
+              {improvements.slice(0, 5).map((improvement) => {
+                return (
+                  <div key={improvement.id} className="rounded border border-[var(--border)] px-2 py-1.5 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="font-medium truncate">{improvement.display_title || improvement.title}</p>
+                          <span className="rounded bg-[var(--bg-tertiary)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
+                            {improvement.status}
+                          </span>
+                          <span className="text-[var(--text-secondary)]">{improvement.exposure_count ?? 0} exposures</span>
+                        </div>
+                        <p className="text-[var(--text-secondary)] mt-0.5 line-clamp-2">
+                          {improvement.content.summary || improvement.content.guidance || improvement.hypothesis}
+                        </p>
+                        <p className="text-[var(--text-secondary)] mt-0.5">
+                          {improvementEvidenceLine(improvement)}
+                        </p>
+                      </div>
+                      <div className="flex gap-1 shrink-0">
+                        {improvement.status !== 'approved' && (
+                          <Button
+                            variant="ghost"
+                            className="h-6 px-2 text-[10px]"
+                            disabled={learningBusy}
+                            onClick={() => void handleImprovementOverride(improvement.id, 'approved', 'global')}
+                          >
+                            Approve
+                          </Button>
+                        )}
+                        {improvement.status !== 'deprecated' && (
+                          <Button
+                            variant="ghost"
+                            className="h-6 px-2 text-[10px]"
+                            disabled={learningBusy}
+                            onClick={() => void handleImprovementOverride(improvement.id, 'deprecated')}
+                          >
+                            Deprecate
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>

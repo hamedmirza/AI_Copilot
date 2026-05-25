@@ -4,7 +4,7 @@ import { api } from '@/api/client'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { ActivityBar } from '@/components/ActivityBar/ActivityBar'
 import { EditorPanel } from '@/components/Editor/EditorPanel'
-import { AgentPanel } from '@/components/AgentPanel/AgentPanel'
+import { RunsPanel } from '@/components/AgentPanel/RunsPanel'
 import { ChatPanel } from '@/components/Chat/ChatPanel'
 import { GitPanel } from '@/components/GitPanel/GitPanel'
 import { TerminalPanel } from '@/components/Terminal/TerminalPanel'
@@ -15,6 +15,7 @@ import { ProjectManagerDialog } from '@/components/Project/ProjectManagerDialog'
 import { StatusBar } from '@/components/StatusBar/StatusBar'
 import { useAppStore, useChatStore, useEditorStore, useProjectStore, useRunStore, useSettingsStore, useUIStore } from '@/store'
 import { Button, EmptyState } from '@/components/ui/primitives'
+import { dispatchBrowserRefresh } from '@/lib/browserRefresh'
 import { showError } from '@/lib/toast'
 import { getContribution } from '@/workbench/registry'
 
@@ -158,6 +159,9 @@ export default function App() {
     if (['run_completed', 'code_patch_applied', 'awaiting_approval'].includes(type)) {
       window.setTimeout(() => bumpTreeRefresh(), 3000)
     }
+    if (type === 'run_completed' && useUIStore.getState().activeCenterView === 'browser') {
+      dispatchBrowserRefresh()
+    }
   }, [addRunEvent, bumpTreeRefresh, currentRunId, setRunStatus, setWsConnections, spawnedRunIds, trackedRunEvents]), true)
 
   useEffect(() => {
@@ -182,6 +186,7 @@ export default function App() {
     useEditorStore.getState().clearWorkspace()
     useRunStore.getState().resetRunForProjectSwitch()
     useChatStore.getState().resetChatForProjectSwitch()
+    useUIStore.getState().resetBrowserPickerForProjectSwitch()
     startTransition(() => {
       setCurrentProject(id)
       useUIStore.getState().openSidebarPanel('explorer')
@@ -338,7 +343,7 @@ export default function App() {
                 ))}
               </div>
               <div className="flex-1 overflow-hidden">
-                {rightPanelTab === 'chat' ? <ChatPanel /> : <AgentPanel />}
+                {rightPanelTab === 'chat' ? <ChatPanel /> : <RunsPanel />}
               </div>
             </div>
           </>

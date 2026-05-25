@@ -141,9 +141,28 @@ def test_projects_endpoint_migrates_old_schema_db(tmp_path):
     finally:
         check.close()
 
-    assert {"task_kind", "failure_class", "failure_subclass", "failure_signature", "recovery_status", "superseded_by_run_id"} <= run_columns
+    assert {
+        "task_kind",
+        "failure_class",
+        "failure_subclass",
+        "failure_signature",
+        "recovery_status",
+        "superseded_by_run_id",
+        "terminal_success",
+        "terminal_status",
+        "retry_count",
+        "schema_failure_count",
+        "reviewer_failure_count",
+        "tester_failure_count",
+        "operator_feedback_present",
+        "approval_reached",
+        "promote_rolled_back",
+        "primary_failure_class",
+    } <= run_columns
     assert "task_kind" in task_columns
     assert "global_skills" in tables
+    assert "improvements" in tables
+    assert "improvement_exposures" in tables
 
 
 def test_run_workspace_isolation(client, tmp_path):
@@ -650,6 +669,40 @@ def test_reviewer_context_includes_changed_file_snapshot(client, tmp_path):
         db.add(
             ArtifactModel(
                 run_id=run.id,
+                artifact_type="plan",
+                content_json=_json.dumps(
+                    {
+                        "summary": "Update main",
+                        "steps": [
+                            {
+                                "step_id": "1",
+                                "title": "Update main.py",
+                                "description": "Change greeting",
+                                "acceptance_criteria": ["main.py prints hello reviewer"],
+                            }
+                        ],
+                        "risks": [],
+                    }
+                ),
+            )
+        )
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="architect",
+                content_json=_json.dumps(
+                    {
+                        "overview": "Touch main.py",
+                        "file_changes": [{"path": "main.py", "action": "modify", "rationale": "Update print"}],
+                        "modules": [],
+                        "dependencies": [],
+                    }
+                ),
+            )
+        )
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
                 artifact_type="coder",
                 content_json=_json.dumps(
                     {
@@ -670,7 +723,7 @@ def test_reviewer_context_includes_changed_file_snapshot(client, tmp_path):
         db.commit()
 
         service = OrchestrationService()
-        review_context, changed_files, structural_summaries = service._build_reviewer_context(
+        review_context, changed_files, structural_summaries, file_details = service._build_reviewer_context(
             db,
             run.id,
             "Review the patch",
@@ -681,12 +734,142 @@ def test_reviewer_context_includes_changed_file_snapshot(client, tmp_path):
         db.close()
 
     assert changed_files == ["main.py"]
+    assert "Planner acceptance criteria:" in review_context
+    assert "main.py prints hello reviewer" in review_context
+    assert "Architect blueprint paths:" in review_context
     assert "FILE: main.py" in review_context
     assert "Declared coder change:" in review_context
     assert "Original file snapshot:" in review_context
     assert "Current file snapshot:" in review_context
     assert "print('hello reviewer')" in review_context
     assert len(structural_summaries) == 1
+    assert len(file_details) == 1
+
+
+def test_coder_context_includes_acceptance_criteria_and_blueprint(client, tmp_path):
+    import json as _json
+
+    from app.db.models import ArtifactModel, ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.file_service import FileService
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "coder_context_workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('hello')\n")
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="CoderContext",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json='["secret.txt"]',
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(project_id=project.id, description="Implement change", validation_profile="python")
+        db.add(task)
+        db.flush()
+        run = RunModel(project_id=project.id, task_id=task.id, status="running", workspace_path=str(workspace))
+        db.add(run)
+        db.flush()
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="plan",
+                content_json=_json.dumps(
+                    {
+                        "summary": "Plan",
+                        "steps": [
+                            {
+                                "step_id": "1",
+                                "title": "Update",
+                                "description": "Change main",
+                                "acceptance_criteria": ["main.py updated"],
+                            }
+                        ],
+                        "risks": [],
+                    }
+                ),
+            )
+        )
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="architect",
+                content_json=_json.dumps(
+                    {
+                        "overview": "Modify main.py",
+                        "file_changes": [{"path": "main.py", "action": "modify", "rationale": "Task requirement"}],
+                        "modules": [],
+                        "dependencies": [],
+                    }
+                ),
+            )
+        )
+        db.commit()
+
+        context = OrchestrationService()._build_coder_context(
+            db,
+            run.id,
+            "Implement change",
+            FileService(workspace, project.protected_files),
+            workspace,
+        )
+    finally:
+        db.close()
+
+    assert "Acceptance criteria checklist:" in context
+    assert "main.py updated" in context
+    assert "Architect blueprint paths:" in context
+    assert "Protected files (never patch):" in context
+    assert "secret.txt" in context
+
+
+def test_stage_context_includes_protected_files_for_planner_and_architect(client, tmp_path):
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "stage_context_protected"
+    workspace.mkdir()
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="StageContextProtected",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json='["secret.txt", "config/locked.json"]',
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Plan and design around protected assets",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status="running",
+            workspace_path=str(workspace),
+        )
+        db.add(run)
+        db.commit()
+
+        service = OrchestrationService()
+        context_base = service._build_context_base(run, task.description)
+        for stage in ("planner", "architect"):
+            stage_context = service._stage_context(db, run, stage, context_base)
+            assert "Protected files (never patch):" in stage_context
+            assert "- secret.txt" in stage_context
+            assert "- config/locked.json" in stage_context
+    finally:
+        db.close()
 
 
 def test_coder_guard_rejects_destructive_full_file_replacement(tmp_path):
@@ -735,6 +918,7 @@ def test_coder_guard_rejects_destructive_full_file_replacement(tmp_path):
 
 
 def test_reviewer_guard_detects_structural_regression():
+    from app.db.session import SessionLocal
     from app.services.change_guard import summarize_structure
     from app.services.orchestration_service import OrchestrationService
 
@@ -761,9 +945,17 @@ def test_reviewer_guard_detects_structural_regression():
         True,
     )
 
-    issues = OrchestrationService()._deterministic_review_issues([summary])
+    issues = OrchestrationService()._deterministic_review_issues(
+        SessionLocal(),
+        "run-test",
+        [summary],
+        [{"path": summary["path"], "before": before, "after": after}],
+        [summary["path"]],
+        "implementation",
+    )
     assert issues
     assert any("Structural regression" in issue["message"] for issue in issues)
+    assert issues[0]["severity"] in {"important", "critical"}
 
 
 def test_tester_enforces_frontend_build_for_frontend_changes(client, tmp_path, monkeypatch):
@@ -995,6 +1187,124 @@ def test_stage_coder_retries_after_guard_rejection(client, tmp_path, monkeypatch
     assert calls["count"] == 2
     assert "hasRecoveryMetadata" in content
     assert "item19" in content
+
+
+def test_pipeline_block_protect_resolve_learning_events(client, tmp_path, monkeypatch):
+    """Protected-path coder guard → block_recorded → retry → code_patch_applied → block_resolved + lesson."""
+    from types import SimpleNamespace
+
+    import app.services.orchestration_service as orchestration_module
+    from app.db.models import ImprovementModel, LessonModel, ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.file_service import FileService
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "block_resolve_workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('before')\n")
+    (workspace / "secret.txt").write_text("protected\n")
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="BlockResolve",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json='["secret.txt"]',
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Avoid protected secret.txt",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(project_id=project.id, task_id=task.id, status="running", workspace_path=str(workspace))
+        db.add(run)
+        db.commit()
+        run_id = run.id
+
+        calls = {"count": 0}
+
+        class FakeRegistry:
+            def active_provider(self):
+                return "ollama"
+
+            def resolve_stage(self, stage):
+                return object()
+
+        class FakeCoderAgent:
+            def __init__(self, provider):
+                self.provider = provider
+
+            def code(self, context):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    return SimpleNamespace(
+                        file_changes=[{"path": "secret.txt", "full_content": "tampered\n"}],
+                        model_dump=lambda: {
+                            "summary": "bad protected patch",
+                            "file_changes": [{"path": "secret.txt", "full_content": "tampered\n"}],
+                            "requires_operator_approval": False,
+                        },
+                    )
+                return SimpleNamespace(
+                    file_changes=[
+                        {
+                            "path": "main.py",
+                            "line_changes": [
+                                {"start_line": 1, "end_line": 1, "new_content": "print('after')\n"}
+                            ],
+                        }
+                    ],
+                    model_dump=lambda: {
+                        "summary": "good patch",
+                        "file_changes": [
+                            {
+                                "path": "main.py",
+                                "line_changes": [
+                                    {"start_line": 1, "end_line": 1, "new_content": "print('after')\n"}
+                                ],
+                            }
+                        ],
+                        "requires_operator_approval": False,
+                    },
+                )
+
+        monkeypatch.setattr(orchestration_module.ProviderRegistry, "get", staticmethod(lambda: FakeRegistry()))
+        monkeypatch.setattr(orchestration_module, "CoderAgent", FakeCoderAgent)
+
+        service = OrchestrationService()
+        fs = FileService(workspace, project.protected_files)
+        assert service._stage_coder(db, run_id, "Patch main.py only", fs) is True
+
+        events = client.get(f"/api/runs/{run_id}/events", headers=HEADERS).json()
+        event_types = [event["event_type"] for event in events]
+
+        assert "block_recorded" in event_types
+        assert "code_patch_applied" in event_types
+        assert "block_resolved" in event_types
+        assert event_types.index("block_recorded") < event_types.index("block_resolved")
+        assert event_types.index("block_resolved") < event_types.index("code_patch_applied")
+
+        lesson = db.query(LessonModel).filter(LessonModel.run_id == run_id).first()
+        improvement = (
+            db.query(ImprovementModel)
+            .filter(ImprovementModel.source_run_id == run_id)
+            .order_by(ImprovementModel.id.desc())
+            .first()
+        )
+        assert lesson is not None
+        assert improvement is not None
+        assert improvement.title == "Avoid repeat repository safety block"
+    finally:
+        db.close()
+
+    assert calls["count"] == 2
+    assert (workspace / "main.py").read_text() == "print('after')\n"
+    assert (workspace / "secret.txt").read_text() == "protected\n"
 
 
 def test_running_run_resumes_from_current_stage(client, tmp_path):
@@ -1298,6 +1608,196 @@ def test_stage_tester_runs_profile_and_skips_forbidden_llm_commands(client, tmp_
     assert run.status == "running"
 
 
+def test_stage_tester_blocks_frontend_without_visual_plan(client, tmp_path):
+    import json as _json
+
+    from app.db.models import ArtifactModel, ProjectModel, RunEventModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.providers.fake import FakeProvider
+    from app.providers.registry import ProviderRegistry
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "tester_visual_workspace"
+    workspace.mkdir()
+    frontend_dir = workspace / "frontend" / "src"
+    frontend_dir.mkdir(parents=True)
+    (frontend_dir / "App.tsx").write_text("export default function App(){return null}\n")
+
+    registry = ProviderRegistry.get()
+    registry.fake_provider = FakeProvider(
+        responses={
+            "tester": _json.dumps(
+                {
+                    "passed": True,
+                    "summary": "Missing visual plan",
+                    "dry_run_steps": [],
+                    "visual_checks": [],
+                    "commands": [],
+                    "notes": [],
+                }
+            )
+        }
+    )
+    registry.reload({})
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="TesterVisual",
+            source_repo_spec=str(workspace),
+            validation_profile="react",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(project_id=project.id, description="UI tweak", validation_profile="react")
+        db.add(task)
+        db.flush()
+        run = RunModel(project_id=project.id, task_id=task.id, status="running", workspace_path=str(workspace))
+        db.add(run)
+        db.flush()
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="coder",
+                content_json=_json.dumps(
+                    {
+                        "summary": "Updated App.tsx",
+                        "file_changes": [{"path": "frontend/src/App.tsx", "line_changes": []}],
+                        "requires_operator_approval": False,
+                    }
+                ),
+            )
+        )
+        db.commit()
+
+        service = OrchestrationService()
+        result = service._stage_tester(db, run.id, "Validate UI", workspace)
+        db.refresh(run)
+        events = (
+            db.query(RunEventModel)
+            .filter(RunEventModel.run_id == run.id)
+            .order_by(RunEventModel.id.asc())
+            .all()
+        )
+    finally:
+        db.close()
+
+    assert result is False
+    assert run.status == "blocked"
+    assert "visual_checks" in (run.error_message or "").lower()
+    assert "visual_checks_missing" in [event.event_type for event in events]
+
+
+def test_stage_tester_accepts_visual_skip_reason_for_frontend(client, tmp_path):
+    import json as _json
+
+    from app.db.models import ArtifactModel, ProjectModel, RunEventModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.providers.fake import FakeProvider
+    from app.providers.registry import ProviderRegistry
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "tester_visual_skip_workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('ok')\n")
+
+    registry = ProviderRegistry.get()
+    registry.fake_provider = FakeProvider(
+        responses={
+            "validate ui": _json.dumps(
+                {
+                    "passed": True,
+                    "summary": "Deferred visual plan",
+                    "dry_run_steps": [],
+                    "visual_checks": [],
+                    "visual_checks_skip_reason": "Headless CI — operator will verify in IDE browser panel",
+                    "commands": [],
+                    "notes": [],
+                }
+            )
+        }
+    )
+    registry.reload({})
+
+    db = SessionLocal()
+    try:
+        from app.db.models import AppConfigModel
+
+        profiles_row = (
+            db.query(AppConfigModel).filter(AppConfigModel.key == "validation_profiles_json").first()
+        )
+        if profiles_row:
+            profiles_row.value = _json.dumps({"python": ["python3 -m compileall ."]})
+        else:
+            db.add(
+                AppConfigModel(
+                    key="validation_profiles_json",
+                    value=_json.dumps({"python": ["python3 -m compileall ."]}),
+                )
+            )
+        db.commit()
+
+        project = ProjectModel(
+            name="TesterVisualSkip",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(project_id=project.id, description="UI tweak", validation_profile="python")
+        db.add(task)
+        db.flush()
+        run = RunModel(project_id=project.id, task_id=task.id, status="running", workspace_path=str(workspace))
+        db.add(run)
+        db.flush()
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="ui_design",
+                content_json=_json.dumps(
+                    {
+                        "layout_description": "Dashboard",
+                        "components": [{"name": "App", "component_type": "page", "props": {}}],
+                        "styling_notes": "tailwind",
+                        "accessibility_notes": [],
+                    }
+                ),
+            )
+        )
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="coder",
+                content_json=_json.dumps(
+                    {
+                        "summary": "Updated main.py",
+                        "file_changes": [{"path": "main.py", "line_changes": []}],
+                        "requires_operator_approval": False,
+                    }
+                ),
+            )
+        )
+        db.commit()
+
+        service = OrchestrationService()
+        result = service._stage_tester(db, run.id, "Validate UI", workspace)
+        db.refresh(run)
+        events = (
+            db.query(RunEventModel)
+            .filter(RunEventModel.run_id == run.id)
+            .order_by(RunEventModel.id.asc())
+            .all()
+        )
+    finally:
+        db.close()
+
+    assert result is True
+    assert run.status == "running"
+    assert "visual_checks_skipped" in [event.event_type for event in events]
+
+
 def test_stage_tester_optional_command_failure_does_not_block(client, tmp_path, monkeypatch):
     import json as _json
 
@@ -1359,9 +1859,11 @@ def test_stage_tester_optional_command_failure_does_not_block(client, tmp_path, 
 
         class FakePlan:
             commands = [type("Cmd", (), {"command": "rg missing_symbol main.py"})()]
+            dry_run_steps = []
+            visual_checks = []
 
             def model_dump(self):
-                return {"passed": True, "summary": "plan", "commands": [], "notes": []}
+                return {"passed": True, "summary": "plan", "commands": [], "dry_run_steps": [], "notes": []}
 
         monkeypatch.setattr(
             "app.services.orchestration_service.TesterAgent",
@@ -1667,6 +2169,138 @@ def test_retry_stores_operator_feedback(client, tmp_path):
         db.close()
 
 
+def test_retry_failed_run(client, tmp_path):
+    from app.core.enums import RunStatus
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+
+    workspace = tmp_path / "retry_failed"
+    workspace.mkdir()
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="RetryFailed",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Fix the bug",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status=RunStatus.FAILED.value,
+            workspace_path=str(workspace),
+            error_message="Provider timeout",
+        )
+        db.add(run)
+        db.commit()
+        run_id = run.id
+    finally:
+        db.close()
+
+    response = client.post(f"/api/runs/{run_id}/retry", json={}, headers=HEADERS)
+    assert response.status_code == 200
+
+    db = SessionLocal()
+    try:
+        run = db.get(RunModel, run_id)
+        assert run is not None
+        assert run.status in (RunStatus.PENDING.value, RunStatus.RUNNING.value)
+        assert run.error_message is None
+    finally:
+        db.close()
+
+
+def test_learning_settings_round_trip(client):
+    response = client.put(
+        "/api/settings",
+        json={
+            "learning_auto_trial_enabled": False,
+            "learning_min_trial_runs": 5,
+            "learning_min_success_rate_delta_pct": 12.5,
+            "learning_max_harmful_rate_pct": 20.0,
+            "learning_min_confidence": 0.7,
+        },
+        headers=HEADERS,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["learning_auto_trial_enabled"] is False
+    assert body["learning_min_trial_runs"] == 5
+    assert body["learning_min_success_rate_delta_pct"] == 12.5
+    assert body["learning_max_harmful_rate_pct"] == 20.0
+    assert body["learning_min_confidence"] == 0.7
+
+
+def test_project_improvements_endpoint_and_override(client, tmp_path):
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.learning_service import LearningService
+
+    workspace = tmp_path / "improvements_api"
+    workspace.mkdir()
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="ImprovementsAPI",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Fix validation issue",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status="blocked",
+            current_stage="tester",
+            error_message="Validation failed",
+            workspace_path=str(workspace),
+        )
+        db.add(run)
+        db.commit()
+        LearningService(db).finalize_terminal_run(run.id)
+        project_id = project.id
+    finally:
+        db.close()
+
+    improvements = client.get(f"/api/projects/{project_id}/improvements", headers=HEADERS)
+    assert improvements.status_code == 200
+    body = improvements.json()
+    assert len(body) == 1
+    improvement_id = body[0]["id"]
+    assert body[0]["status"] in {"candidate", "trialing"}
+
+    detail = client.get(f"/api/improvements/{improvement_id}", headers=HEADERS)
+    assert detail.status_code == 200
+
+    override = client.post(
+        f"/api/improvements/{improvement_id}/override",
+        json={"status": "approved", "scope": "global"},
+        headers=HEADERS,
+    )
+    assert override.status_code == 200
+    assert override.json()["status"] == "approved"
+    assert override.json()["scope"] == "global"
+
+
 def test_rollback_workspace_recreates_from_source(client, tmp_path):
     from app.core.enums import RunStatus
     from app.db.models import ProjectModel, RunModel, TaskModel
@@ -1788,6 +2422,134 @@ def test_approve_snapshot_and_rollback_promote(client, tmp_path):
     run_body = client.get(f"/api/runs/{run_id}", headers=HEADERS).json()
     assert run_body["status"] == RunStatus.CHANGES_REQUESTED.value
     assert run_body["promote_snapshot"] is None
+
+
+def test_approve_runs_supervisor_and_writes_docs(client, tmp_path):
+    import json as _json
+
+    from app.core.enums import RunStatus
+    from app.db.models import ArtifactModel, ProjectModel, RunEventModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.providers.fake import FakeProvider
+    from app.providers.registry import ProviderRegistry
+    from app.services.workspace_service import runs_root
+
+    source = tmp_path / "supervisor_source"
+    source.mkdir()
+    (source / "main.py").write_text("original\n")
+
+    doc_path = ".ai-copilot/plans/deployed.md"
+    doc_content = "# Deployed\n\nSynced after promotion.\n"
+
+    registry = ProviderRegistry.get()
+    registry.fake_provider = FakeProvider(
+        default_response='{"content":"ok","tool_calls":[],"finish_reason":"stop"}',
+        responses={
+            "post-deployment": _json.dumps(
+                {
+                    "approved": True,
+                    "summary": "Plan reconciled with deployment",
+                    "plan_gaps": [],
+                    "doc_updates": [
+                        {
+                            "path": doc_path,
+                            "content": doc_content,
+                            "rationale": "Keep plan artifact aligned with promoted code",
+                        }
+                    ],
+                }
+            )
+        },
+    )
+    registry.reload({})
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="SupervisorApprove",
+            source_repo_spec=str(source),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(project_id=project.id, description="Ship feature", validation_profile="python")
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status=RunStatus.AWAITING_APPROVAL.value,
+            task_kind="implementation",
+        )
+        db.add(run)
+        db.flush()
+        workspace = runs_root() / run.id
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "main.py").write_text("promoted content\n")
+        run.workspace_path = str(workspace)
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="plan",
+                content_json=_json.dumps(
+                    {
+                        "summary": "Plan",
+                        "steps": [
+                            {
+                                "step_id": "1",
+                                "title": "Ship",
+                                "description": "Update main.py",
+                                "acceptance_criteria": ["main.py updated"],
+                            }
+                        ],
+                        "risks": [],
+                    }
+                ),
+            )
+        )
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="coder",
+                content_json=_json.dumps(
+                    {
+                        "summary": "Change main.py",
+                        "file_changes": [{"path": "main.py", "line_changes": []}],
+                        "requires_operator_approval": False,
+                    }
+                ),
+            )
+        )
+        db.commit()
+        run_id = run.id
+    finally:
+        db.close()
+
+    approve = client.post(f"/api/runs/{run_id}/approve", json={"comment": "ship it"}, headers=HEADERS)
+    assert approve.status_code == 200
+    assert (source / "main.py").read_text() == "promoted content\n"
+    assert (source / doc_path).read_text() == doc_content
+
+    db = SessionLocal()
+    try:
+        supervisor = (
+            db.query(ArtifactModel)
+            .filter(ArtifactModel.run_id == run_id, ArtifactModel.artifact_type == "supervisor")
+            .one()
+        )
+        payload = _json.loads(supervisor.content_json)
+        assert payload["approved"] is True
+        assert doc_path in payload.get("written_paths", [])
+
+        events = (
+            db.query(RunEventModel)
+            .filter(RunEventModel.run_id == run_id, RunEventModel.event_type == "supervisor_complete")
+            .all()
+        )
+        assert events
+    finally:
+        db.close()
 
 
 def test_read_run_workspace_file(client, tmp_path):

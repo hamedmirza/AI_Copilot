@@ -15,7 +15,13 @@ from app.db.models import ChatMessageModel
 from app.db.session import SessionLocal
 from app.providers.base import ChatCompletionResult, ChatStreamChunk, ChatToolCall
 from app.providers.registry import ProviderRegistry
-from app.services.chat_mode_registry import ChatModeRegistry
+from app.agents.skill_loader import (
+    chat_mode_skill_key,
+    load_integrity_charter,
+    load_pipeline_framework,
+    load_role_skill,
+)
+from app.services.chat_mode_registry import ChatModeDefinition, ChatModeRegistry
 from app.services.chat_service import ChatService
 from app.services.config_service import ConfigService
 from app.services.project_service import ProjectService
@@ -116,10 +122,11 @@ class ChatOrchestrator:
         max_output_tokens = max(256, min(int(config.get("chat_max_output_tokens", 4096) or 4096), 32_768))
 
         use_nothink = self._resolve_use_nothink(session.nothink, config)
+        mode_prompt = self._mode_prompt_with_skill(mode)
         messages = self._build_provider_messages(
             chat_service.list_recent_messages(session_id, limit=history_limit),
             project_path=project.source_repo_spec,
-            mode_prompt=mode.system_prompt,
+            mode_prompt=mode_prompt,
             context={**context, "git_branch": git_branch},
             use_nothink=use_nothink,
         )
@@ -264,6 +271,21 @@ class ChatOrchestrator:
         )
 
     @staticmethod
+    def _mode_prompt_with_skill(mode: ChatModeDefinition) -> str:
+        parts = [mode.system_prompt]
+        skill_key = chat_mode_skill_key(mode.key, getattr(mode, "skill_key", None))
+        skill_text = load_role_skill(skill_key) if skill_key else ""
+        if skill_text:
+            parts.append(skill_text)
+        framework = load_pipeline_framework()
+        if framework:
+            parts.append(framework)
+        integrity = load_integrity_charter()
+        if integrity:
+            parts.append(integrity)
+        return "\n\n".join(parts)
+
+    @staticmethod
     def _resolve_use_nothink(session_nothink: bool | None, config: dict[str, Any]) -> bool:
         if session_nothink is not None:
             return bool(session_nothink)
@@ -286,9 +308,17 @@ class ChatOrchestrator:
         if len(system_context_json) > _MAX_SYSTEM_CONTEXT_TEXT:
             system_context["editor_context"] = {"notice": "editor context truncated for size"}
             system_context_json = json.dumps(system_context, indent=2, default=str)
-        system_content = f"{mode_prompt}\n\nCurrent context:\n{system_context_json}"
+        page_element_hint = ""
+        page_element = context.get("page_element") if isinstance(context, dict) else None
+        if isinstance(page_element, dict) and page_element.get("selector"):
+            page_element_hint = (
+                "\n\nThe user selected a DOM element in the browser preview (see editor_context.page_element). "
+                "Use search_files to locate matching components by class names, ids, or visible text before editing. "
+                "Prefer the project's component/source files over editing raw HTML snippets."
+            )
+        system_content = f"{mode_prompt}{page_element_hint}\n\nCurrent context:\n{system_context_json}"
         if use_nothink:
-            system_content = f"{mode_prompt}\n/nothink\n\nCurrent context:\n{system_context_json}"
+            system_content = f"{mode_prompt}{page_element_hint}\n/nothink\n\nCurrent context:\n{system_context_json}"
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",

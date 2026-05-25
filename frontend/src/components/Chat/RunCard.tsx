@@ -3,7 +3,7 @@ import { api } from '@/api/client'
 import { Button } from '@/components/ui/primitives'
 import { RunLogPanel } from '@/components/shared/RunLogPanel'
 import { filterSignificantRunEvents, normalizeRunEvent, runStatusFromEvents, stageStatusFromEvents } from '@/lib/runEvents'
-import { runDisplayLabel } from '@/types/runs'
+import { isRetryableStatus, runDisplayLabel } from '@/types/runs'
 import type { RunEvent } from '@/store'
 import { STAGES } from './types'
 
@@ -104,7 +104,7 @@ export function RunCard({ runId, displayName, events, busy, onApprove, onReject,
         <Button variant="danger" disabled={runStatus !== 'awaiting_approval' || busy} onClick={() => onReject(runId)}>
           Reject
         </Button>
-        <Button variant="secondary" disabled={!['blocked', 'changes_requested'].includes(runStatus) || busy} onClick={() => onRetry(runId)}>
+        <Button variant="secondary" disabled={!isRetryableStatus(runStatus) || busy} onClick={() => onRetry(runId)}>
           Retry
         </Button>
       </div>

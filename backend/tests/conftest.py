@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import close_all_sessions
 
 # Isolate API tests from production app.db (engine binds at import time).
 os.environ["DB_URL"] = "sqlite:///./backend/test_app.db"
@@ -18,12 +19,20 @@ TEST_DB = Path(__file__).resolve().parents[1] / "test_app.db"
 TEST_DB_URL = f"sqlite:///{TEST_DB}"
 
 
+def _remove_test_db_files() -> None:
+    for suffix in ("", "-wal", "-shm"):
+        candidate = Path(f"{TEST_DB}{suffix}")
+        if candidate.exists():
+            candidate.unlink()
+
+
 @pytest.fixture(autouse=True)
 def _reset_backend_state():
     chat_orchestrator.wait_for_idle()
     run_engine.wait_for_idle()
-    if TEST_DB.exists():
-        TEST_DB.unlink()
+    close_all_sessions()
+    reconfigure_engine("sqlite:///:memory:")
+    _remove_test_db_files()
     reconfigure_engine(TEST_DB_URL)
     run_migrations()
     db = SessionLocal()
@@ -37,9 +46,10 @@ def _reset_backend_state():
     registry = ProviderRegistry.get()
     registry.fake_provider = None
     registry.reload({})
+    close_all_sessions()
+    reconfigure_engine("sqlite:///:memory:")
+    _remove_test_db_files()
     reconfigure_engine(TEST_DB_URL)
-    if TEST_DB.exists():
-        TEST_DB.unlink()
 
 
 @pytest.fixture()

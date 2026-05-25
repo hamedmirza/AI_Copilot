@@ -40,6 +40,13 @@ class SettingsResponse(BaseModel):
     git_author_email: str
     api_token: str
     validation_profiles_json: str
+    learning_auto_trial_enabled: bool
+    learning_auto_promote_enabled: bool
+    learning_min_trial_runs: int
+    learning_min_success_rate_delta_pct: float
+    learning_max_harmful_rate_pct: float
+    learning_min_confidence: float
+    learning_unknown_failure_autopromote_enabled: bool
 
 
 class SettingsUpdate(BaseModel):
@@ -82,6 +89,13 @@ class SettingsUpdate(BaseModel):
     git_author_email: str | None = None
     api_token: str | None = None
     validation_profiles_json: str | None = None
+    learning_auto_trial_enabled: bool | None = None
+    learning_auto_promote_enabled: bool | None = None
+    learning_min_trial_runs: int | None = None
+    learning_min_success_rate_delta_pct: float | None = None
+    learning_max_harmful_rate_pct: float | None = None
+    learning_min_confidence: float | None = None
+    learning_unknown_failure_autopromote_enabled: bool | None = None
 
 
 class ProjectCreate(BaseModel):
@@ -139,6 +153,16 @@ class RunResponse(BaseModel):
     error_message: str | None
     operator_feedback: str | None = None
     promote_snapshot: dict | None = None
+    terminal_success: bool | None = None
+    terminal_status: str | None = None
+    retry_count: int | None = None
+    schema_failure_count: int | None = None
+    reviewer_failure_count: int | None = None
+    tester_failure_count: int | None = None
+    operator_feedback_present: bool | None = None
+    approval_reached: bool | None = None
+    promote_rolled_back: bool | None = None
+    primary_failure_class: str | None = None
     created_at: str
     updated_at: str
 

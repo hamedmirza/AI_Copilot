@@ -64,14 +64,17 @@ async def block_path_traversal(request: Request, call_next):
 
 @app.middleware("http")
 async def verify_token(request: Request, call_next):
-    from app.api.deps import verify_api_token
-
     if request.url.path.startswith("/api/ws/"):
         return await call_next(request)
 
     if request.url.path.startswith("/api/") and not request.url.path.endswith("/health"):
+        token = request.headers.get("X-Api-Token")
+        if not token and request.url.path == "/api/browser/preview":
+            token = request.query_params.get("token")
         try:
-            verify_api_token(request, request.headers.get("X-Api-Token"))
+            from app.api.deps import verify_api_token_value
+
+            verify_api_token_value(token)
         except Exception as exc:
             from fastapi import HTTPException
 

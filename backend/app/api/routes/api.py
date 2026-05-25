@@ -12,7 +12,7 @@ from starlette.concurrency import run_in_threadpool
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.orm import Session
 
@@ -45,6 +45,7 @@ from app.schemas.api import (
 from app.services.config_service import ConfigService
 from app.services.file_service import FileService
 from app.services.git_service import GitService
+from app.services.browser_preview_service import BrowserPreviewError, BrowserPreviewService
 from app.services.learning_service import LearningService
 from app.services.orchestration_service import create_task_and_run, run_engine
 from app.services.run_approval_service import approve_run_sync
@@ -108,6 +109,16 @@ def _run_to_response(run, task_description: str, run_number: int | None = None) 
         "failure_signature": getattr(run, "failure_signature", None),
         "recovery_status": getattr(run, "recovery_status", None),
         "superseded_by_run_id": getattr(run, "superseded_by_run_id", None),
+        "terminal_success": getattr(run, "terminal_success", None),
+        "terminal_status": getattr(run, "terminal_status", None),
+        "retry_count": getattr(run, "retry_count", None),
+        "schema_failure_count": getattr(run, "schema_failure_count", None),
+        "reviewer_failure_count": getattr(run, "reviewer_failure_count", None),
+        "tester_failure_count": getattr(run, "tester_failure_count", None),
+        "operator_feedback_present": getattr(run, "operator_feedback_present", None),
+        "approval_reached": getattr(run, "approval_reached", None),
+        "promote_rolled_back": getattr(run, "promote_rolled_back", None),
+        "primary_failure_class": getattr(run, "primary_failure_class", None),
         "created_at": run.created_at.isoformat(),
         "updated_at": run.updated_at.isoformat(),
     }
@@ -207,6 +218,22 @@ async def pick_directory_dialog(body: dict | None = None):
     return {"cancelled": result.cancelled, "path": result.path, "error": result.error}
 
 
+@router.get("/browser/preview")
+def browser_preview(url: str, project_id: str, db: Session = Depends(get_db)):
+    ProjectService(db).get(project_id)
+    try:
+        preview = BrowserPreviewService().fetch_preview(url)
+    except BrowserPreviewError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, f"Preview fetch failed: {exc}") from exc
+
+    if preview.content_type.startswith("text/html"):
+        return HTMLResponse(content=preview.body, status_code=preview.status_code)
+
+    return Response(content=preview.body, media_type=preview.content_type, status_code=preview.status_code)
+
+
 @router.get("/projects")
 def list_projects(db: Session = Depends(get_db)):
     svc = ProjectService(db)
@@ -253,6 +280,17 @@ def release_readiness(project_id: str, db: Session = Depends(get_db)):
 def project_lessons(project_id: str, db: Session = Depends(get_db)):
     ProjectService(db).get(project_id)
     return LearningService(db).list_project_lessons(project_id)
+
+
+@router.get("/projects/{project_id}/improvements")
+def project_improvements(
+    project_id: str,
+    status: str | None = None,
+    scope: str | None = None,
+    db: Session = Depends(get_db),
+):
+    ProjectService(db).get(project_id)
+    return LearningService(db).list_improvements(project_id=project_id, status=status, scope=scope)
 
 
 @router.post("/projects/{project_id}/lessons/from-run/{run_id}")
@@ -390,6 +428,22 @@ def get_failure_summary(project_id: str | None = None, db: Session = Depends(get
     return LearningService(db).failure_summary(project_id)
 
 
+@router.get("/improvements/{improvement_id}")
+def get_improvement(improvement_id: str, db: Session = Depends(get_db)):
+    try:
+        return LearningService(db).get_improvement(improvement_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/improvements/{improvement_id}/exposures")
+def list_improvement_exposures(improvement_id: str, db: Session = Depends(get_db)):
+    try:
+        return LearningService(db).list_improvement_exposures(improvement_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @router.get("/runs/{run_id}")
 def get_run(run_id: str, db: Session = Depends(get_db)):
     from app.db.models import RunModel, TaskModel
@@ -397,6 +451,7 @@ def get_run(run_id: str, db: Session = Depends(get_db)):
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
     if not run:
         raise HTTPException(404, "Run not found")
+    LearningService(db).ensure_run_learning_state(run)
     task = db.get(TaskModel, run.task_id)
     task_description = task.description if task else ""
     sibling_runs = (
@@ -447,6 +502,7 @@ def get_run_postmortem(run_id: str, db: Session = Depends(get_db)):
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
     if not run:
         raise HTTPException(404, "Run not found")
+    LearningService(db).ensure_run_learning_state(run)
     artifact = (
         db.query(ArtifactModel)
         .filter(ArtifactModel.run_id == run_id, ArtifactModel.artifact_type == "postmortem")
@@ -501,6 +557,9 @@ def project_runs(project_id: str, db: Session = Depends(get_db)):
     )
     if not runs:
         return []
+    learner = LearningService(db)
+    for run in runs:
+        learner.ensure_run_learning_state(run)
     task_ids = {r.task_id for r in runs}
     tasks = {t.id: t for t in db.query(TaskModel).filter(TaskModel.id.in_(task_ids)).all()}
     numbers = run_numbers_for_task(runs)
@@ -559,13 +618,27 @@ def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depen
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
     if not run:
         raise HTTPException(404, "Run not found")
-    if run.status not in (RunStatus.BLOCKED, RunStatus.CHANGES_REQUESTED):
+    if run.status not in (
+        RunStatus.BLOCKED.value,
+        RunStatus.CHANGES_REQUESTED.value,
+        RunStatus.FAILED.value,
+    ):
         raise HTTPException(400, "Run not retryable")
     if body and body.feedback:
         run.operator_feedback = body.feedback.strip()
+    run.retry_count = int(getattr(run, "retry_count", 0) or 0) + 1
     run.status = RunStatus.PENDING
     run.error_message = None
     run.review_attempts = 0
+    run.terminal_success = None
+    run.terminal_status = None
+    run.schema_failure_count = 0
+    run.reviewer_failure_count = 0
+    run.tester_failure_count = 0
+    run.operator_feedback_present = bool((run.operator_feedback or "").strip())
+    run.approval_reached = False
+    run.promote_rolled_back = False
+    run.primary_failure_class = None
     if hasattr(run, "failure_class"):
         run.failure_class = None
         run.failure_subclass = None
@@ -654,6 +727,7 @@ def rollback_run_promote(run_id: str, db: Session = Depends(get_db)):
     restored = restore_promoted_files(run_id, Path(project.source_repo_spec), snapshot_meta)
     run.promote_snapshot_json = None
     run.status = RunStatus.CHANGES_REQUESTED.value
+    run.promote_rolled_back = True
     run.error_message = f"Promoted changes rolled back ({restored} file(s) restored)"
     db.commit()
     LearningService(db).finalize_terminal_run(run_id)
@@ -674,6 +748,16 @@ def promote_lesson_global(lesson_id: int, db: Session = Depends(get_db)):
         return LearningService(db).promote_lesson_to_global(lesson_id)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/improvements/{improvement_id}/override")
+def override_improvement(improvement_id: str, body: dict, db: Session = Depends(get_db)):
+    status = str(body.get("status") or "").strip()
+    scope = str(body.get("scope") or "").strip() or None
+    try:
+        return LearningService(db).override_improvement_status(improvement_id, status, scope=scope)
+    except ValueError as exc:
+        raise HTTPException(400 if "Invalid" in str(exc) else 404, str(exc)) from exc
 
 
 @router.get("/skills/global")

@@ -102,6 +102,7 @@ export function RunFollowUpCard({ runId, events, runStatus, busy, onRetry }: Run
           runId={runId}
           artifacts={artifacts}
           busy={busy}
+          retryDisabled={!isRetryableStatus(status)}
           onRetryWithFeedback={(feedback) => onRetry(runId, feedback)}
         />
       )}

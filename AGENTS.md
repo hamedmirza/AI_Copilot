@@ -38,6 +38,12 @@ npm --prefix frontend run build
 
 First-time setup: `cp .env.example .env`, then `npm --prefix frontend install`. The venv is created automatically by `server.sh` on first start.
 
+## Agent behavior
+
+- **Static role skills** — curated operational guidance for pipeline agents and chat modes lives in [`backend/app/agents/skills/`](backend/app/agents/skills/). Loaded at runtime via [`skill_loader.py`](backend/app/agents/skill_loader.py) and appended to system prompts.
+- **Integrity charter + pipeline framework** — every agent prompt also receives [`_integrity.md`](backend/app/agents/skills/_integrity.md) (universal rules, task-kind addendum, verification doc links) and [`pipeline-framework.md`](backend/app/agents/skills/pipeline-framework.md) (stage handoff contract). Resolved pipeline blocks (`record_block` → `retire_block_on_resolution`) become project learnings automatically and are injected into retry context and future runs via `LearningService`.
+- **Dynamic learned skills** — approved entries in the `global_skills` table are injected per run by `LearningService.build_learning_context()` (top-4 scored items). These improve from run history; role skill markdown files are version-controlled and edited deliberately.
+
 ## Conventions
 
 - **Minimal diffs** — match existing patterns; don't refactor unrelated code.

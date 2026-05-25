@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ChatMessage, RunEvent } from '@/store'
-import { formatAnswerDuration, formatChatTimestamp, resolveAnswerDurationMs } from './types'
+import { parsePageElementContext } from '@/lib/pageElementContext'
+import { parseUnknownObject, formatAnswerDuration, formatChatTimestamp, resolveAnswerDurationMs } from './types'
 import { ToolCallCard } from './ToolCallCard'
 import { RunCard } from './RunCard'
 import { RunFollowUpCard } from './RunFollowUpCard'
@@ -51,6 +52,10 @@ export function MessageBubble({
   const isRunSummary = metaType === 'run_summary' && !!runId
   const runEvents = runId ? (runEventsById[runId] || []) : []
   const runStatus = String(message.metadata?.run_status || message.metadata?.status || '')
+  const contextMeta = parseUnknownObject(message.metadata?.context)
+  const pageElement = parsePageElementContext(contextMeta?.page_element)
+  const elementSelector = pageElement?.selector ?? null
+  const elementTag = pageElement?.tag_name ?? null
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -72,6 +77,15 @@ export function MessageBubble({
             </span>
           )}
         </div>
+
+        {elementSelector && isUser && (
+          <div className="mb-2 text-[11px] px-2 py-1 rounded border border-white/20 bg-white/10">
+            <span className="opacity-80">Element: </span>
+            <span className="font-mono">{elementTag || 'node'}</span>
+            <span className="opacity-70"> · </span>
+            <span className="font-mono truncate">{elementSelector}</span>
+          </div>
+        )}
 
         {message.content && (
           <div className="whitespace-pre-wrap break-words text-sm">{message.content}</div>

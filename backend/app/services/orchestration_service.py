@@ -27,6 +27,8 @@ from app.services.config_service import ConfigService
 from app.services.file_service import FileService
 from app.services.learning_service import LearningService, infer_task_kind
 from app.services.project_service import ProjectService
+from app.services.scope_guard import scope_issues
+from app.services.source_validation import frontend_structure_issues
 from app.services.run_engine.event_bus import event_bus
 from app.services.workspace_service import clone_for_run
 from app.core.exceptions import CommandRejectedError, PatchGuardError
@@ -351,7 +353,18 @@ class OrchestrationService:
                 payload,
             )
             self._emit(run.id, "lessons_applied", stage, "Lessons applied", payload)
-        return str(learning["context"])
+        context = str(learning["context"])
+        protected_files = self._protected_files_for_run(db, run.id)
+        if protected_files:
+            context = "\n".join(
+                [
+                    context,
+                    "",
+                    "Protected files (never patch):",
+                    "\n".join(f"- {path}" for path in protected_files),
+                ]
+            )
+        return context
 
     def _finalize_terminal_state(self, db: Session, run_id: str) -> None:
         run = db.get(RunModel, run_id)
@@ -413,16 +426,44 @@ class OrchestrationService:
                 self._run_frontend_patch_check(fs.workspace, applied)
             except PatchGuardError as exc:
                 last_exc = exc
+                exc_text = str(exc)
+                is_protected = "protected" in exc_text.lower()
+                is_frontend_tsc = "frontend patch validation failed" in exc_text.lower()
+                block_source = "protected_path" if is_protected else ("frontend_tsc" if is_frontend_tsc else "change_guard")
+                block_type = (
+                    "protected_path"
+                    if is_protected
+                    else ("frontend_tsc" if is_frontend_tsc else "structural_guard")
+                )
+                target_stages = ["planner", "architect"] if is_protected else ["coder"]
+                self._record_pipeline_block(
+                    db,
+                    run_id,
+                    block_type=block_type,
+                    stage="coder",
+                    source=block_source,
+                    message=exc_text,
+                    guidance=(
+                        "Do not patch protected files; update planner/architect scope instead."
+                        if is_protected
+                        else (
+                            "Fix TypeScript errors with surgical line_changes; preserve unrelated imports and exports."
+                            if is_frontend_tsc
+                            else "Revise using line_changes only; preserve imports, exports, props, and helper functions."
+                        )
+                    ),
+                    target_stages=target_stages,
+                )
                 self._record_event(
                     db,
                     run_id,
                     "coder_guard_rejected",
                     "coder",
                     "warning",
-                    str(exc),
-                    {"attempt": attempt},
+                    exc_text,
+                    {"attempt": attempt, "source": block_source},
                 )
-                self._emit(run_id, "coder_guard_rejected", "coder", str(exc), {"attempt": attempt})
+                self._emit(run_id, "coder_guard_rejected", "coder", exc_text, {"attempt": attempt})
                 if attempt >= max_attempts:
                     raise
                 attempt_context = "\n".join(
@@ -430,7 +471,7 @@ class OrchestrationService:
                         context,
                         "",
                         "Deterministic patch guard rejected the previous attempt:",
-                        str(exc),
+                        exc_text,
                         "",
                         "Revise the patch using line_changes only for existing source files. Preserve all unrelated imports, exports, props, interfaces, and helper functions.",
                         "Place imports only in the import block at the top of the file. Place JSX only inside the existing render tree.",
@@ -438,11 +479,15 @@ class OrchestrationService:
                         self._build_coder_context(db, run_id, "", fs, source_root),
                     ]
                 )
+                retired_guidance = LearningService(db).get_retired_block_guidance(run_id, max_entries=2)
+                if retired_guidance:
+                    attempt_context += "\n\nResolved block guidance:\n" + "\n".join(f"- {g}" for g in retired_guidance)
                 continue
             payload = output.model_dump()
             payload["applied_changes"] = applied
             payload["coder_attempt"] = attempt
             self._save_artifact(db, run_id, "coder", payload)
+            self._resolve_pipeline_blocks(db, run_id, resolved_by_stage="coder", stage="coder")
             self._record_event(db, run_id, "code_patch_applied", "coder", "info", "Patch applied")
             self._emit(run_id, "code_patch_applied", "coder", "Patch applied")
             return True
@@ -476,6 +521,11 @@ class OrchestrationService:
                 changed_files.append(rel_path)
         return changed_files
 
+    def _tester_requires_visual_plan(self, db: Session, run_id: str, changed_files: list[str]) -> bool:
+        if any(is_frontend_code_path(path) for path in changed_files):
+            return True
+        return self._latest_artifact(db, run_id, "ui_design") is not None
+
     def _profile_commands_for_changed_files(self, profile: str, commands: list[str], changed_files: list[str]) -> list[str]:
         if not commands or not changed_files:
             return commands
@@ -490,6 +540,97 @@ class OrchestrationService:
         if any(path.endswith(suffixes) for path in changed_files):
             return commands
         return []
+
+    def _protected_files_for_run(self, db: Session, run_id: str) -> list[str]:
+        run = db.get(RunModel, run_id)
+        if not run:
+            return []
+        project = ProjectService(db).get(run.project_id)
+        return list(project.protected_files or [])
+
+    def _plan_acceptance_criteria_lines(self, plan: dict) -> list[str]:
+        lines: list[str] = []
+        for step in plan.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            step_id = str(step.get("step_id") or "").strip()
+            title = str(step.get("title") or "").strip()
+            for criterion in step.get("acceptance_criteria") or []:
+                text = str(criterion or "").strip()
+                if text:
+                    label = f"Step {step_id}" if step_id else "Step"
+                    if title:
+                        label = f"{label} ({title})"
+                    lines.append(f"- {label}: {text}")
+        return lines
+
+    def _blueprint_paths(self, architect: dict) -> list[str]:
+        paths: list[str] = []
+        for raw_change in architect.get("file_changes") or []:
+            if not isinstance(raw_change, dict):
+                continue
+            rel_path = str(raw_change.get("path") or "").strip()
+            if rel_path:
+                paths.append(rel_path)
+        return paths
+
+    def _record_pipeline_block(
+        self,
+        db: Session,
+        run_id: str,
+        *,
+        block_type: str,
+        stage: str,
+        source: str,
+        message: str,
+        guidance: str,
+        target_stages: list[str],
+    ) -> str:
+        signature = LearningService(db).record_block(
+            run_id,
+            block_type=block_type,
+            stage=stage,
+            source=source,
+            message=message,
+            guidance=guidance,
+            target_stages=target_stages,
+        )
+        self._record_event(
+            db,
+            run_id,
+            "block_recorded",
+            stage,
+            "warning",
+            message,
+            {"signature": signature, "source": source, "block_type": block_type},
+        )
+        self._emit(run_id, "block_recorded", stage, message, {"signature": signature, "source": source})
+        return signature
+
+    def _resolve_pipeline_blocks(
+        self,
+        db: Session,
+        run_id: str,
+        *,
+        resolved_by_stage: str,
+        stage: str | None = None,
+    ) -> None:
+        retired = LearningService(db).retire_pending_blocks(
+            run_id,
+            resolved_by_stage=resolved_by_stage,
+            stage=stage,
+        )
+        for item in retired:
+            self._record_event(
+                db,
+                run_id,
+                "block_resolved",
+                resolved_by_stage,
+                "info",
+                f"Block resolved: {item.get('signature')}",
+                item,
+            )
+            self._emit(run_id, "block_resolved", resolved_by_stage, "Block resolved", item)
 
     def _truncate(self, value: object, limit: int) -> str:
         text = str(value or "")
@@ -530,8 +671,24 @@ class OrchestrationService:
         fs: FileService,
         source_root: Path,
     ) -> str:
+        plan = self._latest_artifact(db, run_id, "plan") or {}
         architect = self._latest_artifact(db, run_id, "architect") or {}
+        protected_files = self._protected_files_for_run(db, run_id)
+        blueprint_paths = self._blueprint_paths(architect)
         sections = [context]
+        criteria_lines = self._plan_acceptance_criteria_lines(plan)
+        if criteria_lines:
+            sections.extend(["", "Acceptance criteria checklist:", *criteria_lines])
+        if blueprint_paths:
+            sections.extend(["", "Architect blueprint paths:", "\n".join(f"- {path}" for path in blueprint_paths)])
+        if protected_files:
+            sections.extend(
+                [
+                    "",
+                    "Protected files (never patch):",
+                    "\n".join(f"- {path}" for path in protected_files),
+                ]
+            )
         file_sections: list[str] = []
         for raw_change in (architect.get("file_changes") or [])[: self._REVIEW_FILE_LIMIT]:
             if not isinstance(raw_change, dict):
@@ -588,14 +745,18 @@ class OrchestrationService:
         context: str,
         fs: FileService,
         source_root: Path,
-    ) -> tuple[str, list[str], list[dict]]:
+    ) -> tuple[str, list[str], list[dict], list[dict]]:
         plan = self._latest_artifact(db, run_id, "plan") or {}
         architect = self._latest_artifact(db, run_id, "architect") or {}
         coder = self._latest_artifact(db, run_id, "coder") or {}
+        ui_design = self._latest_artifact(db, run_id, "ui_design")
+        protected_files = self._protected_files_for_run(db, run_id)
+        blueprint_paths = self._blueprint_paths(architect)
 
         changed_files: list[str] = []
         file_sections: list[str] = []
         structural_summaries: list[dict] = []
+        file_details: list[dict] = []
         for raw_file_change in (coder.get("file_changes") or [])[: self._REVIEW_FILE_LIMIT]:
             if not isinstance(raw_file_change, dict):
                 continue
@@ -613,10 +774,12 @@ class OrchestrationService:
                 file_snapshot = f"[unavailable: {exc}]"
             before_path = source_root / rel_path
             before_snapshot = before_path.read_text(encoding="utf-8") if before_path.is_file() else ""
+            after_text = file_snapshot if isinstance(file_snapshot, str) else ""
+            file_details.append({"path": rel_path, "before": before_snapshot, "after": after_text})
             structural_summary = summarize_structure(
                 rel_path,
                 before_snapshot,
-                file_snapshot if isinstance(file_snapshot, str) else "",
+                after_text,
                 before_path.exists(),
                 bool(raw_file_change.get("full_content") is not None),
             )
@@ -635,37 +798,106 @@ class OrchestrationService:
                 )
             )
 
+        criteria_lines = self._plan_acceptance_criteria_lines(plan)
         sections = [
             "Task acceptance context:",
             context,
             "",
             "Planner summary:",
             self._truncate(plan.get("summary") or "", self._REVIEW_ARTIFACT_LIMIT),
-            "",
-            "Architect overview:",
-            self._truncate(architect.get("overview") or "", self._REVIEW_ARTIFACT_LIMIT),
-            "",
-            "Coder summary:",
-            self._truncate(coder.get("summary") or "", self._REVIEW_ARTIFACT_LIMIT),
-            "",
-            "Changed files:",
-            "\n".join(changed_files) if changed_files else "[none recorded]",
         ]
+        if criteria_lines:
+            sections.extend(["", "Planner acceptance criteria:", *criteria_lines])
+        sections.extend(
+            [
+                "",
+                "Architect overview:",
+                self._truncate(architect.get("overview") or "", self._REVIEW_ARTIFACT_LIMIT),
+            ]
+        )
+        if blueprint_paths:
+            sections.extend(["", "Architect blueprint paths:", "\n".join(f"- {path}" for path in blueprint_paths)])
+        if ui_design:
+            sections.extend(
+                [
+                    "",
+                    "UI design summary:",
+                    self._truncate(ui_design.get("layout_description") or "", self._REVIEW_ARTIFACT_LIMIT),
+                    self._truncate(json.dumps(ui_design.get("components") or [], ensure_ascii=True), self._REVIEW_ARTIFACT_LIMIT),
+                ]
+            )
+        if protected_files:
+            sections.extend(
+                [
+                    "",
+                    "Protected files:",
+                    "\n".join(f"- {path}" for path in protected_files),
+                ]
+            )
+        sections.extend(
+            [
+                "",
+                "Coder summary:",
+                self._truncate(coder.get("summary") or "", self._REVIEW_ARTIFACT_LIMIT),
+                "",
+                "Changed files:",
+                "\n".join(changed_files) if changed_files else "[none recorded]",
+            ]
+        )
         if file_sections:
             sections.extend(["", "Changed file details:", "\n\n".join(file_sections)])
-        return "\n".join(sections), changed_files, structural_summaries
+        return "\n".join(sections), changed_files, structural_summaries, file_details
 
-    def _deterministic_review_issues(self, summaries: list[dict]) -> list[dict]:
+    def _deterministic_review_issues(
+        self,
+        db: Session,
+        run_id: str,
+        summaries: list[dict],
+        file_details: list[dict],
+        changed_files: list[str],
+        task_kind: str | None,
+    ) -> list[dict]:
         issues: list[dict] = []
         for summary in summaries:
             for message in reviewer_guard_issues(summary):
                 issues.append(
                     {
-                        "severity": "high",
+                        "severity": "important",
                         "file_path": summary["path"],
                         "message": message,
+                        "source": "deterministic_guard",
                     }
                 )
+        for detail in file_details:
+            path = str(detail.get("path") or "")
+            before = str(detail.get("before") or "")
+            after = str(detail.get("after") or "")
+            for item in frontend_structure_issues(path, before, after):
+                issues.append(
+                    {
+                        "severity": "important",
+                        "file_path": path,
+                        "message": str(item.get("message") or ""),
+                        "source": "deterministic_guard",
+                    }
+                )
+        architect = self._latest_artifact(db, run_id, "architect") or {}
+        blueprint_paths = self._blueprint_paths(architect)
+        for scope_issue in scope_issues(blueprint_paths, changed_files, task_kind):
+            issues.append(dict(scope_issue))
+        ui_design = self._latest_artifact(db, run_id, "ui_design")
+        if any(is_frontend_code_path(path) for path in changed_files) and not ui_design:
+            issues.append(
+                {
+                    "severity": "important",
+                    "file_path": changed_files[0] if changed_files else "",
+                    "message": (
+                        "Frontend files changed but no ui_design artifact exists. "
+                        "Add a UI design spec or justify the edit as a non-UI tweak in the coder summary."
+                    ),
+                    "source": "deterministic_guard",
+                }
+            )
         return issues
 
     def _review_failed_for_missing_context(self, summary: str, issues: list[dict], changed_files: list[str]) -> bool:
@@ -690,7 +922,7 @@ class OrchestrationService:
             return True
         return bool(issue_paths) and not any(path in changed_files for path in issue_paths)
 
-    def _build_coder_retry_context(self, context: str, review: dict) -> str:
+    def _build_coder_retry_context(self, db: Session, run_id: str, context: str, review: dict) -> str:
         feedback_lines = [
             context,
             "",
@@ -705,6 +937,11 @@ class OrchestrationService:
             )
         for suggestion in review.get("suggestions") or []:
             feedback_lines.append(f"- Suggestion: {suggestion}")
+        retired_guidance = LearningService(db).get_retired_block_guidance(run_id, max_entries=2)
+        if retired_guidance:
+            feedback_lines.extend(["", "Resolved block guidance for this retry:"])
+            for guidance in retired_guidance:
+                feedback_lines.append(f"- {guidance}")
         return "\n".join(feedback_lines)
 
     def _mark_changes_requested(
@@ -743,13 +980,14 @@ class OrchestrationService:
             run = db.get(RunModel, run_id)
             run.review_attempts = attempt
             db.commit()
-            review_context, changed_files, structural_summaries = self._build_reviewer_context(
+            review_context, changed_files, structural_summaries, file_details = self._build_reviewer_context(
                 db,
                 run_id,
                 context,
                 fs,
                 source_root,
             )
+            task_kind = run.task_kind if run else None
             diff_text = self._workspace_diff(workspace)
             if diff_text:
                 review_context = f"{review_context}\n\nGit diff (if available):\n{diff_text}"
@@ -769,8 +1007,20 @@ class OrchestrationService:
                 f"Reviewer attempt {attempt}/{max_retries}",
                 {"attempt": attempt, "max_retries": max_retries, "changed_files": changed_files},
             )
-            deterministic_issues = self._deterministic_review_issues(structural_summaries)
-            if deterministic_issues:
+            deterministic_issues = self._deterministic_review_issues(
+                db,
+                run_id,
+                structural_summaries,
+                file_details,
+                changed_files,
+                task_kind,
+            )
+            blocking_issues = [
+                issue
+                for issue in deterministic_issues
+                if str(issue.get("severity") or "") in {"critical", "important"}
+            ]
+            if blocking_issues:
                 summary = "Deterministic reviewer guard rejected structural regression."
                 review_payload = {
                     "approved": False,
@@ -782,6 +1032,19 @@ class OrchestrationService:
                     ],
                 }
                 self._save_artifact(db, run_id, f"review_{attempt}", review_payload)
+                issue_guidance = "; ".join(
+                    str(issue.get("message") or "") for issue in blocking_issues[:3] if isinstance(issue, dict)
+                )
+                self._record_pipeline_block(
+                    db,
+                    run_id,
+                    block_type="review_rejection",
+                    stage="reviewer",
+                    source=str(blocking_issues[0].get("source") or "deterministic_guard"),
+                    message=summary,
+                    guidance=issue_guidance or summary,
+                    target_stages=["coder", "architect"],
+                )
                 self._record_event(
                     db,
                     run_id,
@@ -799,7 +1062,7 @@ class OrchestrationService:
                     {"attempt": attempt, "issues": deterministic_issues, "source": "deterministic_guard"},
                 )
                 if attempt < max_retries:
-                    retry_context = self._build_coder_retry_context(context, review_payload)
+                    retry_context = self._build_coder_retry_context(db, run_id, context, review_payload)
                     self._record_event(
                         db,
                         run_id,
@@ -826,10 +1089,19 @@ class OrchestrationService:
                     {"attempt": attempt, "issues": deterministic_issues, "source": "deterministic_guard"},
                 )
                 return False
+            if deterministic_issues:
+                review_context = (
+                    f"{review_context}\n\nScope advisory notes:\n"
+                    + "\n".join(
+                        f"- [{issue.get('severity')}] {issue.get('file_path')}: {issue.get('message')}"
+                        for issue in deterministic_issues
+                    )
+                )
             output = agent.review(review_context)
             review_payload = output.model_dump()
             self._save_artifact(db, run_id, f"review_{attempt}", review_payload)
             if output.approved:
+                self._resolve_pipeline_blocks(db, run_id, resolved_by_stage="reviewer", stage="reviewer")
                 self._record_event(
                     db,
                     run_id,
@@ -847,6 +1119,21 @@ class OrchestrationService:
                     {"attempt": attempt, "issues": review_payload.get("issues", [])},
                 )
                 return True
+            issue_guidance = "; ".join(
+                str(issue.get("message") or "")
+                for issue in (review_payload.get("issues") or [])[:3]
+                if isinstance(issue, dict)
+            )
+            self._record_pipeline_block(
+                db,
+                run_id,
+                block_type="review_rejection",
+                stage="reviewer",
+                source="reviewer",
+                message=str(output.summary or "Reviewer requested changes"),
+                guidance=issue_guidance or str(output.summary or ""),
+                target_stages=["coder"],
+            )
             self._record_event(
                 db,
                 run_id,
@@ -873,7 +1160,7 @@ class OrchestrationService:
                 )
                 return False
             if attempt < max_retries:
-                retry_context = self._build_coder_retry_context(context, review_payload)
+                retry_context = self._build_coder_retry_context(db, run_id, context, review_payload)
                 self._record_event(
                     db,
                     run_id,
@@ -902,6 +1189,74 @@ class OrchestrationService:
                 return False
         return True
 
+    def _execute_tester_command_batch(
+        self,
+        db: Session,
+        run_id: str,
+        workspace,
+        commands: list[str],
+        *,
+        event_prefix: str,
+        required: bool,
+    ) -> bool:
+        if not commands:
+            return True
+        started_event = f"{event_prefix}_started"
+        result_event = f"{event_prefix}_result"
+        rejected_event = f"{event_prefix}_rejected"
+        all_passed = True
+        executed = 0
+        for command in commands:
+            try:
+                validate_command(command)
+            except CommandRejectedError as exc:
+                self._record_event(
+                    db,
+                    run_id,
+                    rejected_event,
+                    "tester",
+                    "warning",
+                    str(exc),
+                    {"required": required},
+                )
+                self._emit(run_id, rejected_event, "tester", str(exc))
+                if required:
+                    all_passed = False
+                continue
+
+            self._record_event(db, run_id, started_event, "tester", "info", command, {"required": required})
+            self._emit(run_id, started_event, "tester", command, {"required": required})
+            try:
+                code, stdout, stderr = run_command(command, workspace)
+                passed = code == 0
+                if required:
+                    executed += 1
+                    all_passed = all_passed and passed
+                self._record_event(
+                    db,
+                    run_id,
+                    result_event,
+                    "tester",
+                    "info" if passed else "error",
+                    f"exit={code}",
+                    {"stdout": stdout[:2000], "stderr": stderr[:2000], "required": required},
+                )
+            except Exception as exc:
+                if required:
+                    all_passed = False
+                self._record_event(
+                    db,
+                    run_id,
+                    rejected_event,
+                    "tester",
+                    "error",
+                    str(exc),
+                    {"required": required},
+                )
+        if required and executed == 0:
+            return False
+        return all_passed
+
     def _stage_tester(self, db: Session, run_id: str, context: str, workspace):
         run = db.get(RunModel, run_id)
         task_kind = run.task_kind if run else None
@@ -927,6 +1282,7 @@ class OrchestrationService:
                 {"profile": profile, "changed_files": changed_files},
             )
         llm_commands: list[str] = []
+        dry_run_commands: list[str] = []
 
         if task_kind == "validation":
             self._record_event(
@@ -944,6 +1300,8 @@ class OrchestrationService:
                 {
                     "passed": True,
                     "summary": "Validation task detected; using deterministic validation commands only.",
+                    "dry_run_steps": [],
+                    "visual_checks": [],
                     "commands": [{"command": command, "description": "Validation profile command"} for command in profile_commands],
                     "notes": ["Tester LLM planning skipped for validation-only task."],
                 },
@@ -953,8 +1311,68 @@ class OrchestrationService:
             self._log_provider(db, run_id, "tester", provider)
             agent = TesterAgent(provider)
             output = agent.test_plan(context)
+            if self._tester_requires_visual_plan(db, run_id, changed_files):
+                skip_reason = (output.visual_checks_skip_reason or "").strip()
+                if not output.visual_checks and not skip_reason:
+                    run = db.get(RunModel, run_id)
+                    run.status = RunStatus.BLOCKED.value
+                    run.error_message = (
+                        "Frontend/UI work requires visual_checks[] or visual_checks_skip_reason"
+                    )
+                    db.commit()
+                    self._record_event(
+                        db,
+                        run_id,
+                        "visual_checks_missing",
+                        "tester",
+                        "error",
+                        run.error_message,
+                        {"changed_files": changed_files},
+                    )
+                    self._emit(run_id, "run_blocked", "tester", run.error_message)
+                    return False
+                if skip_reason and not output.visual_checks:
+                    self._record_event(
+                        db,
+                        run_id,
+                        "visual_checks_skipped",
+                        "tester",
+                        "info",
+                        skip_reason,
+                        {"changed_files": changed_files},
+                    )
+                    self._emit(run_id, "visual_checks_skipped", "tester", skip_reason)
             self._save_artifact(db, run_id, "test_plan", output.model_dump())
             llm_commands = [cmd.command for cmd in output.commands]
+            dry_run_commands = [cmd.command for cmd in output.dry_run_steps]
+            for check in output.visual_checks:
+                payload = check.model_dump()
+                self._record_event(
+                    db,
+                    run_id,
+                    "visual_check_required",
+                    "tester",
+                    "info",
+                    check.description,
+                    payload,
+                )
+                self._emit(run_id, "visual_check_required", "tester", check.description, payload)
+
+        dry_run_passed = self._execute_tester_command_batch(
+            db,
+            run_id,
+            workspace,
+            dry_run_commands,
+            event_prefix="dry_run",
+            required=True,
+        )
+        if not dry_run_passed:
+            run = db.get(RunModel, run_id)
+            run.status = RunStatus.BLOCKED.value
+            run.error_message = "Dry-run verification failed"
+            db.commit()
+            self._emit(run_id, "run_blocked", "tester", "Dry-run verification failed")
+            return False
 
         required_commands: list[str] = []
         optional_commands: list[str] = []
@@ -974,57 +1392,26 @@ class OrchestrationService:
             optional_commands.append(command)
 
         commands: list[tuple[str, bool]] = [(cmd, True) for cmd in required_commands] + [(cmd, False) for cmd in optional_commands]
-        required_passed = True
-        required_executed = 0
-        for command, is_required in commands:
-            from_profile = is_required
-            try:
-                validate_command(command)
-            except CommandRejectedError as exc:
-                self._record_event(
+        required_passed = self._execute_tester_command_batch(
+            db,
+            run_id,
+            workspace,
+            [cmd for cmd, is_required in commands if is_required],
+            event_prefix="validation",
+            required=True,
+        )
+        if required_passed:
+            for command in [cmd for cmd, is_required in commands if not is_required]:
+                self._execute_tester_command_batch(
                     db,
                     run_id,
-                    "validation_rejected",
-                    "tester",
-                    "warning",
-                    str(exc),
-                    {"required": is_required, "from_profile": from_profile},
-                )
-                self._emit(run_id, "validation_rejected", "tester", str(exc))
-                if is_required:
-                    required_passed = False
-                continue
-
-            self._record_event(db, run_id, "validation_started", "tester", "info", command, {"required": is_required})
-            self._emit(run_id, "validation_started", "tester", command, {"required": is_required})
-            try:
-                code, stdout, stderr = run_command(command, workspace)
-                passed = code == 0
-                if is_required:
-                    required_executed += 1
-                    required_passed = required_passed and passed
-                self._record_event(
-                    db,
-                    run_id,
-                    "validation_result",
-                    "tester",
-                    "info" if passed else "error",
-                    f"exit={code}",
-                    {"stdout": stdout[:2000], "stderr": stderr[:2000], "required": is_required, "from_profile": from_profile},
-                )
-            except Exception as exc:
-                if is_required:
-                    required_passed = False
-                self._record_event(
-                    db,
-                    run_id,
-                    "validation_rejected",
-                    "tester",
-                    "error",
-                    str(exc),
-                    {"required": is_required, "from_profile": from_profile},
+                    workspace,
+                    [command],
+                    event_prefix="validation",
+                    required=False,
                 )
 
+        required_executed = len([cmd for cmd, is_required in commands if is_required])
         if required_commands and required_executed == 0:
             required_passed = False
             self._record_event(
@@ -1037,6 +1424,17 @@ class OrchestrationService:
             )
 
         if not required_passed:
+            run = db.get(RunModel, run_id)
+            self._record_pipeline_block(
+                db,
+                run_id,
+                block_type="validation_failure",
+                stage="tester",
+                source="validation_profile",
+                message="Validation failed",
+                guidance="Fix failing validation profile commands before retrying; check stderr from validation_result events.",
+                target_stages=["coder", "tester"],
+            )
             run = db.get(RunModel, run_id)
             run.status = RunStatus.BLOCKED.value
             run.error_message = "Validation failed"

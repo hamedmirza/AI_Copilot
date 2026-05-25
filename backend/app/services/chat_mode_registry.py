@@ -14,6 +14,7 @@ class ChatModeDefinition:
     allow_mcp: bool = False
     model_key: str = "model_chat"
     read_only: bool = True
+    skill_key: str | None = None
 
 
 class ChatModeRegistry:
@@ -139,6 +140,7 @@ class ChatModeRegistry:
             key = str(item.get("key") or item.get("name") or "").strip().lower()
             if not key:
                 continue
+            raw_skill_key = str(item.get("skill_key") or "").strip()
             custom[key] = ChatModeDefinition(
                 key=key,
                 label=str(item.get("label") or key.title()),
@@ -149,5 +151,6 @@ class ChatModeRegistry:
                 allow_mcp=bool(item.get("allow_mcp", False)),
                 model_key=str(item.get("model_key") or "model_chat"),
                 read_only=bool(item.get("read_only", True)),
+                skill_key=raw_skill_key or None,
             )
         return custom

@@ -13,6 +13,7 @@ from app.services.learning_service import LearningService
 from app.services.project_service import ProjectService
 from app.services.run_engine.event_bus import event_bus
 from app.services.snapshot_service import snapshot_promoted_files
+from app.services.supervisor_service import run_post_deploy_supervisor
 from app.services.workspace_service import cleanup_run_workspace, is_promotable_path, promote_to_source
 
 
@@ -87,9 +88,43 @@ def approve_run_sync(run_id: str, comment: str = "") -> dict:
             run.promote_snapshot_json = json.dumps(snapshot_meta)
         if run.workspace_path:
             promote_to_source(Path(run.workspace_path), source)
+        supervisor_payload = None
+        if paths:
+            try:
+                supervisor_payload = run_post_deploy_supervisor(db, run_id, paths)
+            except Exception as exc:
+                _record_run_event(
+                    db,
+                    run_id,
+                    "supervisor_failed",
+                    "supervisor",
+                    "warning",
+                    f"Post-deploy supervisor failed: {exc}",
+                )
+                db.commit()
         run.status = RunStatus.COMPLETED.value
         run.operator_feedback = comment or None
         db.commit()
+        if supervisor_payload:
+            gaps = supervisor_payload.get("plan_gaps") or []
+            _record_run_event(
+                db,
+                run_id,
+                "supervisor_complete",
+                "supervisor",
+                "info" if supervisor_payload.get("approved") else "warning",
+                supervisor_payload.get("summary") or "Supervisor attestation complete",
+            )
+            if gaps:
+                _record_run_event(
+                    db,
+                    run_id,
+                    "supervisor_plan_gaps",
+                    "supervisor",
+                    "warning",
+                    f"{len(gaps)} plan gap(s) recorded after deployment",
+                )
+            db.commit()
         _record_run_event(db, run_id, "run_completed", "", "info", "Run approved and promoted")
         db.commit()
         LearningService(db).finalize_terminal_run(run_id)

@@ -97,18 +97,43 @@ class TestCommand(BaseModel):
     description: str = Field(min_length=1)
 
 
+class VisualCheck(BaseModel):
+    url: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    expected: str = Field(min_length=1)
+
+
 class TesterOutput(BaseModel):
     passed: bool
     summary: str = Field(min_length=1)
-    commands: list[TestCommand] = Field(min_length=1)
+    dry_run_steps: list[TestCommand] = Field(default_factory=list)
+    visual_checks: list[VisualCheck] = Field(default_factory=list)
+    visual_checks_skip_reason: str | None = None
+    commands: list[TestCommand] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
     @field_validator("commands")
     @classmethod
     def validate_commands(cls, v: list[TestCommand]) -> list[TestCommand]:
-        if not v:
-            raise ValueError("At least one test command is required")
         return v
+
+
+class PlanGap(BaseModel):
+    step_id: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+
+
+class DocUpdate(BaseModel):
+    path: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+
+
+class SupervisorOutput(BaseModel):
+    approved: bool
+    summary: str = Field(min_length=1)
+    plan_gaps: list[PlanGap] = Field(default_factory=list)
+    doc_updates: list[DocUpdate] = Field(default_factory=list)
 
 
 class PlaybookSupervisorOutput(BaseModel):

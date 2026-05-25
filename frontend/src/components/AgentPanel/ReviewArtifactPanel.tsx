@@ -18,6 +18,7 @@ interface ReviewArtifactPanelProps {
   runId?: string | null
   artifacts?: RunArtifact[]
   onRetryWithFeedback: (feedback: string) => void | Promise<void>
+  retryDisabled?: boolean
 }
 
 export function ReviewArtifactPanel({
@@ -27,6 +28,7 @@ export function ReviewArtifactPanel({
   runId,
   artifacts,
   onRetryWithFeedback,
+  retryDisabled = false,
 }: ReviewArtifactPanelProps) {
   const projectId = useProjectStore((s) => s.currentProjectId)
   const openTab = useEditorStore((s) => s.openTab)
@@ -186,14 +188,14 @@ export function ReviewArtifactPanel({
       <div className="flex flex-wrap gap-2">
         <Button
           variant="secondary"
-          disabled={busy || selectedItems.length === 0}
+          disabled={busy || retryDisabled || selectedItems.length === 0}
           onClick={() => void onRetryWithFeedback(buildFeedback(selectedItems))}
         >
           Retry with selected ({selectedItems.length})
         </Button>
         <Button
           variant="secondary"
-          disabled={busy || allFeedbackItems.length === 0}
+          disabled={busy || retryDisabled || allFeedbackItems.length === 0}
           onClick={() => void onRetryWithFeedback(buildFeedback(allFeedbackItems))}
         >
           Retry with all feedback

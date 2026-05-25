@@ -9,6 +9,7 @@ from app.agents import (
     PlannerAgent,
     PlaybookSupervisorAgent,
     ReviewerAgent,
+    SupervisorAgent,
     TesterAgent,
     UIDesignerAgent,
 )
@@ -19,6 +20,7 @@ from app.schemas.agent_outputs import (
     PlannerOutput,
     PlaybookSupervisorOutput,
     ReviewerOutput,
+    SupervisorOutput,
     TesterOutput,
     UIDesignerOutput,
 )
@@ -157,12 +159,19 @@ def test_tester_agent(provider: FakeProvider):
     agent = TesterAgent(provider)
     result = agent.test_plan("Validate project")
     assert isinstance(result, TesterOutput)
-    assert len(result.commands) >= 1
+    assert result.commands or result.dry_run_steps
+
+
+def test_supervisor_agent(provider: FakeProvider):
+    agent = SupervisorAgent(provider)
+    result = agent.attest("Reconcile deployment against plan")
+    assert isinstance(result, SupervisorOutput)
+    assert result.summary
 
 
 def test_playbook_supervisor_agent(provider: FakeProvider):
     agent = PlaybookSupervisorAgent(provider)
-    result = agent.supervise("Review playbook deployment steps")
+    result = agent.supervise_playbook("Review playbook deployment steps")
     assert isinstance(result, PlaybookSupervisorOutput)
     assert result.summary
 

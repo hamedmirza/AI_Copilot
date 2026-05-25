@@ -5,6 +5,7 @@ from app.schemas.agent_outputs import (
     PlannerOutput,
     PlaybookSupervisorOutput,
     ReviewerOutput,
+    SupervisorOutput,
     TesterOutput,
     UIDesignerOutput,
 )
@@ -30,6 +31,7 @@ class ArchitectAgent(BaseAgent):
 
 class UIDesignerAgent(BaseAgent):
     prompt_filename = "ui_designer.md"
+    skill_filename = "ui-designer"
 
     def design(self, context: str) -> UIDesignerOutput | None:
         if "frontend" not in context.lower():
@@ -65,10 +67,20 @@ class TesterAgent(BaseAgent):
         return result
 
 
+class SupervisorAgent(BaseAgent):
+    prompt_filename = "supervisor.md"
+
+    def attest(self, context: str) -> SupervisorOutput:
+        result = self.run(context, SupervisorOutput)
+        assert result is not None
+        return result
+
+
 class PlaybookSupervisorAgent(BaseAgent):
     prompt_filename = "playbook_supervisor.md"
+    skill_filename = "playbook-supervisor"
 
-    def supervise(self, context: str) -> PlaybookSupervisorOutput:
+    def supervise_playbook(self, context: str) -> PlaybookSupervisorOutput:
         result = self.run(context, PlaybookSupervisorOutput)
         assert result is not None
         return result

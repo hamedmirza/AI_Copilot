@@ -51,6 +51,16 @@ export interface RunDetail {
   failure_signature?: string | null
   recovery_status?: string | null
   superseded_by_run_id?: string | null
+  terminal_success?: boolean | null
+  terminal_status?: string | null
+  retry_count?: number | null
+  schema_failure_count?: number | null
+  reviewer_failure_count?: number | null
+  tester_failure_count?: number | null
+  operator_feedback_present?: boolean | null
+  approval_reached?: boolean | null
+  promote_rolled_back?: boolean | null
+  primary_failure_class?: string | null
   created_at: string
   updated_at: string
 }
@@ -120,6 +130,70 @@ export interface GlobalSkillRecord {
   times_harmful: number
   created_at: string
   updated_at: string
+}
+
+export interface ImprovementMetrics {
+  sample_size?: number
+  success_rate?: number
+  avg_retry_count?: number
+  schema_failure_rate?: number
+  reviewer_failure_rate?: number
+  tester_failure_rate?: number
+  rollback_rate?: number
+  successful_runs?: number
+  harmful_runs?: number
+}
+
+export interface ImprovementRecord {
+  id: string
+  project_id?: string | null
+  source_run_id?: string | null
+  source_lesson_id?: number | null
+  source_skill_id?: string | null
+  title: string
+  display_title?: string
+  status: 'candidate' | 'trialing' | 'approved' | 'deprecated' | 'rejected' | string
+  scope: 'project' | 'global' | string
+  kind: string
+  hypothesis: string
+  failure_class?: string | null
+  failure_subclass?: string | null
+  task_kind?: string | null
+  comparable_task_signature: string
+  cohort_key: string
+  confidence: number
+  content: {
+    summary?: string
+    guidance?: string
+    stages?: string[]
+    tags?: string[]
+    machine_guidance?: Record<string, unknown>
+  }
+  baseline_metrics?: ImprovementMetrics
+  trial_metrics?: ImprovementMetrics
+  decision_metadata?: Record<string, unknown>
+  exposure_count?: number
+  created_at: string
+  updated_at: string
+  trial_started_at?: string | null
+  approved_at?: string | null
+  deprecated_at?: string | null
+  rejected_at?: string | null
+}
+
+export interface ImprovementExposureRecord {
+  id: number
+  improvement_id: string
+  run_id: string
+  stage: string
+  status_at_application: string
+  scope: string
+  cohort_key: string
+  task_signature: string
+  task_kind?: string | null
+  exposure_kind: string
+  applied_context: Record<string, unknown>
+  created_at: string
 }
 
 export interface PostmortemRecord {
@@ -235,7 +309,7 @@ export function latestReviewArtifact(artifacts: RunArtifact[]): RunArtifact | nu
 }
 
 export function isRetryableStatus(status: string): boolean {
-  return ['blocked', 'changes_requested'].includes(status)
+  return ['blocked', 'changes_requested', 'failed'].includes(status)
 }
 
 export function isResumableStatus(status: string): boolean {

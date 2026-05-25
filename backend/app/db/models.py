@@ -89,6 +89,16 @@ class RunModel(Base):
     failure_signature: Mapped[str | None] = mapped_column(String(255), nullable=True)
     recovery_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     superseded_by_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    terminal_success: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    terminal_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    schema_failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    reviewer_failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    tester_failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    operator_feedback_present: Mapped[bool] = mapped_column(Boolean, default=False)
+    approval_reached: Mapped[bool] = mapped_column(Boolean, default=False)
+    promote_rolled_back: Mapped[bool] = mapped_column(Boolean, default=False)
+    primary_failure_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UtcDateTime(), default=utc_now, onupdate=utc_now
@@ -100,6 +110,9 @@ class RunModel(Base):
         back_populates="run", cascade="all, delete-orphan", order_by="RunEventModel.created_at"
     )
     artifacts: Mapped[list["ArtifactModel"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
+    improvement_exposures: Mapped[list["ImprovementExposureModel"]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
 
@@ -174,6 +187,82 @@ class GlobalSkillModel(Base):
         except json.JSONDecodeError:
             return []
         return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+
+class ImprovementModel(Base):
+    __tablename__ = "improvements"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), index=True, nullable=True)
+    source_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    source_lesson_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_skill_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    title: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
+    scope: Mapped[str] = mapped_column(String(32), default="project", index=True)
+    kind: Mapped[str] = mapped_column(String(64), default="repo_convention")
+    hypothesis: Mapped[str] = mapped_column(Text, default="")
+    failure_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    failure_subclass: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    task_kind: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    comparable_task_signature: Mapped[str] = mapped_column(String(255), index=True)
+    cohort_key: Mapped[str] = mapped_column(String(255), index=True)
+    confidence: Mapped[float] = mapped_column(default=0.5)
+    machine_guidance_json: Mapped[str] = mapped_column(Text, default="{}")
+    stages_json: Mapped[str] = mapped_column(Text, default="[]")
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    baseline_metrics_json: Mapped[str] = mapped_column(Text, default="{}")
+    trial_metrics_json: Mapped[str] = mapped_column(Text, default="{}")
+    decision_metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    trial_started_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    deprecated_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime(), default=utc_now, onupdate=utc_now
+    )
+
+    project: Mapped[ProjectModel | None] = relationship()
+    exposures: Mapped[list["ImprovementExposureModel"]] = relationship(
+        back_populates="improvement", cascade="all, delete-orphan"
+    )
+
+    @property
+    def stages(self) -> list[str]:
+        try:
+            parsed = json.loads(self.stages_json)
+        except json.JSONDecodeError:
+            return []
+        return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+    @property
+    def tags(self) -> list[str]:
+        try:
+            parsed = json.loads(self.tags_json)
+        except json.JSONDecodeError:
+            return []
+        return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+
+class ImprovementExposureModel(Base):
+    __tablename__ = "improvement_exposures"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    improvement_id: Mapped[str] = mapped_column(ForeignKey("improvements.id"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    stage: Mapped[str] = mapped_column(String(64), index=True)
+    status_at_application: Mapped[str] = mapped_column(String(32))
+    scope: Mapped[str] = mapped_column(String(32), default="project")
+    cohort_key: Mapped[str] = mapped_column(String(255), index=True)
+    task_signature: Mapped[str] = mapped_column(String(255), index=True)
+    task_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    exposure_kind: Mapped[str] = mapped_column(String(32), default="trial")
+    applied_context_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
+
+    improvement: Mapped[ImprovementModel] = relationship(back_populates="exposures")
+    run: Mapped[RunModel] = relationship(back_populates="improvement_exposures")
 
     @property
     def tags(self) -> list[str]:

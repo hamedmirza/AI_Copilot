@@ -124,6 +124,13 @@ export const api = {
     tree: (id: string) => request<{ items: Array<{ path: string; type: string; size: number }> }>(`/api/projects/${id}/tree`),
     runs: (id: string) => request(`/api/projects/${id}/runs`),
     lessons: (id: string) => request(`/api/projects/${id}/lessons`),
+    improvements: (id: string, params?: { status?: string; scope?: string }) =>
+      request(
+        `/api/projects/${id}/improvements${buildQuery({
+          status: params?.status,
+          scope: params?.scope,
+        })}`,
+      ),
     createLessonFromRun: (projectId: string, runId: string) =>
       request(`/api/projects/${projectId}/lessons/from-run/${runId}`, { method: 'POST' }),
   },
@@ -218,6 +225,15 @@ export const api = {
   lessons: {
     promoteGlobal: (lessonId: number) =>
       request(`/api/lessons/${lessonId}/promote-global`, { method: 'POST' }),
+  },
+  improvements: {
+    get: (id: string) => request(`/api/improvements/${id}`),
+    exposures: (id: string) => request(`/api/improvements/${id}/exposures`),
+    override: (id: string, body: { status: string; scope?: string }) =>
+      request(`/api/improvements/${id}/override`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
   },
   skills: {
     listGlobal: () => request('/api/skills/global'),

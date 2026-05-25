@@ -31,6 +31,7 @@ interface ArtifactViewerProps {
   runId?: string | null
   onRetryWithFeedback?: (feedback: string) => void | Promise<void>
   retryBusy?: boolean
+  retryDisabled?: boolean
 }
 
 // --- helpers --------------------------------------------------------------
@@ -739,12 +740,14 @@ function ArtifactBody({
   artifacts,
   onRetryWithFeedback,
   retryBusy,
+  retryDisabled,
 }: {
   artifact: RunArtifact
   runId?: string | null
   artifacts?: RunArtifact[]
   onRetryWithFeedback?: (feedback: string) => void | Promise<void>
   retryBusy?: boolean
+  retryDisabled?: boolean
 }) {
   const [showRaw, setShowRaw] = useState(false)
 
@@ -757,6 +760,7 @@ function ArtifactBody({
           artifacts={artifacts}
           onRetryWithFeedback={onRetryWithFeedback || (() => {})}
           busy={retryBusy}
+          retryDisabled={retryDisabled}
         />
         <RawJsonToggle showRaw={showRaw} onToggle={() => setShowRaw(!showRaw)} content={artifact.content} />
       </div>
@@ -805,6 +809,7 @@ export function ArtifactViewer({
   runId,
   onRetryWithFeedback,
   retryBusy,
+  retryDisabled,
 }: ArtifactViewerProps) {
   const [expanded, setExpanded] = useState<Record<number, boolean>>({})
 
@@ -874,6 +879,7 @@ export function ArtifactViewer({
                     artifacts={artifacts}
                     onRetryWithFeedback={onRetryWithFeedback}
                     retryBusy={retryBusy}
+                    retryDisabled={retryDisabled}
                   />
                 </div>
               )}
