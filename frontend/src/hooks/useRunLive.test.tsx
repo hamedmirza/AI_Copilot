@@ -1,7 +1,9 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { api } from '@/api/client'
 import { useRunLive } from '@/hooks/useRunLive'
+import { dispatchGlobalRunEvent } from '@/lib/globalRunEvents'
 import { useRunStore } from '@/store'
 
 type MockHandler = (() => void) | null
@@ -100,7 +102,7 @@ describe('useRunLive', () => {
     vi.unstubAllGlobals()
   })
 
-  it('hydrates events and grows on websocket message', async () => {
+  it('hydrates events and grows on global run event dispatch', async () => {
     await act(async () => {
       root.render(<Probe runId="run-1" />)
     })
@@ -108,11 +110,10 @@ describe('useRunLive', () => {
       await new Promise((r) => setTimeout(r, 50))
     })
     expect(container.querySelector('[data-testid="count"]')?.textContent).toBe('1')
+    expect(MockWebSocket.instances.some((ws) => ws.url.includes('/api/ws/runs/'))).toBe(false)
 
-    const runSocket = MockWebSocket.instances.find((ws) => ws.url.includes('/api/ws/runs/run-1'))
-    expect(runSocket).toBeTruthy()
     await act(async () => {
-      runSocket?.emit({
+      dispatchGlobalRunEvent({
         run_id: 'run-1',
         type: 'pipeline_tool_start',
         message: '',
@@ -123,5 +124,29 @@ describe('useRunLive', () => {
     })
     expect(Number(container.querySelector('[data-testid="count"]')?.textContent)).toBe(2)
     expect(container.querySelector('[data-testid="line"]')?.textContent).toContain('list_files')
+  })
+
+  it('does not poll when run status is changes_requested', async () => {
+    const events = vi.mocked(api.runs.events)
+    vi.mocked(api.runs.get).mockResolvedValue({
+      id: 'run-1',
+      status: 'changes_requested',
+      current_stage: 'documentation',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:01Z',
+    } as never)
+    events.mockClear()
+
+    await act(async () => {
+      root.render(<Probe runId="run-1" />)
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+    const callsAfterHydrate = events.mock.calls.length
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 2500))
+    })
+    expect(events.mock.calls.length).toBe(callsAfterHydrate)
   })
 })

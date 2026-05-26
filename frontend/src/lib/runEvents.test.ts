@@ -5,9 +5,12 @@ import {
   dedupeRunEvents,
   formatRunActivityLine,
   formatRunEventLine,
+  MAX_RUN_EVENTS_PER_RUN,
   patchRunsFromEvent,
   runEventDedupeKey,
+  shouldPollRunStatus,
   shouldRefreshRunThread,
+  trimRunEvents,
 } from './runEvents'
 import type { RunEvent } from '@/types/runs'
 
@@ -36,6 +39,29 @@ describe('formatExitMessage', () => {
   it('leaves unrelated messages unchanged', () => {
     expect(formatExitMessage('validation failed')).toBe('validation failed')
     expect(parseExitCodeFromMessage('exit=127 extra')).toBeNull()
+  })
+})
+
+describe('shouldPollRunStatus', () => {
+  it('polls only in-progress statuses', () => {
+    expect(shouldPollRunStatus('running')).toBe(true)
+    expect(shouldPollRunStatus('awaiting_approval')).toBe(true)
+    expect(shouldPollRunStatus('changes_requested')).toBe(false)
+    expect(shouldPollRunStatus('blocked')).toBe(false)
+    expect(shouldPollRunStatus('completed')).toBe(false)
+  })
+})
+
+describe('trimRunEvents', () => {
+  it('keeps the newest events when over cap', () => {
+    const events = Array.from({ length: MAX_RUN_EVENTS_PER_RUN + 10 }, (_, i) => ({
+      type: 'stage_progress',
+      message: String(i),
+      created_at: `2020-01-01T00:00:${String(i).padStart(2, '0')}Z`,
+    }))
+    const trimmed = trimRunEvents(events)
+    expect(trimmed).toHaveLength(MAX_RUN_EVENTS_PER_RUN)
+    expect(trimmed[0]?.message).toBe('10')
   })
 })
 

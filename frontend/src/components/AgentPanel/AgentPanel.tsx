@@ -60,11 +60,15 @@ export function AgentPanel() {
     hydrateRun,
     refreshThread,
   } = useRunDetail()
+  const runLive = useRunLive(currentRunId, { syncPanel: true, enabled: Boolean(currentRunId) })
   const {
     events: liveEvents,
     status: liveStatus,
     currentStage,
-  } = useRunLive(currentRunId, { syncPanel: true, enabled: Boolean(currentRunId) })
+    detail: liveDetail,
+    elapsedMs: liveElapsedMs,
+    latestActivityLine: liveLatestActivityLine,
+  } = runLive
   const [description, setDescription] = useState('')
   const [validationProfile, setValidationProfile] = useState('python')
   const [allowWebSearch, setAllowWebSearch] = useState(false)
@@ -343,6 +347,14 @@ export function AgentPanel() {
             displayName={displayName}
             status={effectiveStatus}
             showViewLink={false}
+            live={{
+              events: liveEvents,
+              detail: liveDetail,
+              status: liveStatus,
+              currentStage,
+              elapsedMs: liveElapsedMs,
+              latestActivityLine: liveLatestActivityLine,
+            }}
           />
           <PipelineTimeline
             events={normalizedEvents}

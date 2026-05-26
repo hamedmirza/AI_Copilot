@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '@/api/client'
 import { useRunDetail } from '@/hooks/useRunDetail'
 import { latestActivityLineFromEvents, patchRunsFromEvent } from '@/lib/runEvents'
 import { useProjectStore, useRunStore, useUIStore } from '@/store'
-import { useWebSocket } from '@/hooks/useWebSocket'
+import { subscribeGlobalRunEvents } from '@/lib/globalRunEvents'
 import { showError } from '@/lib/toast'
 import { EmptyState, Skeleton } from '@/components/ui/primitives'
 import {
@@ -46,6 +46,8 @@ export function RunsPanel() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
+  const runsRef = useRef(runs)
+  runsRef.current = runs
   const runDrawerRequest = useUIStore((s) => s.runDrawerRequest)
   const clearRunDrawerRequest = useUIStore((s) => s.clearRunDrawerRequest)
   const rightPanelTab = useUIStore((s) => s.rightPanelTab)
@@ -110,40 +112,42 @@ export function RunsPanel() {
     }
   }, [filteredRuns, selectedRunId])
 
-  useWebSocket('/api/ws/events', useCallback((data: unknown) => {
-    const ev = data as Record<string, unknown>
-    const type = String(ev.type || '')
-    const runId = String(ev.run_id || '')
+  useEffect(() => {
     if (!projectId) return
-    if (runId) {
-      appendRunEvent(runId, ev)
-      const patched = patchRunsFromEvent(
-        runs.map((r) => ({
-          id: String(r.id),
-          status: String(r.status || 'pending'),
-          current_stage: r.current_stage != null ? String(r.current_stage) : null,
-        })),
-        { run_id: runId, type, stage: ev.stage != null ? String(ev.stage) : null },
-      )
-      if (patched) {
-        setRuns(patched.map((row) => {
-          const existing = runs.find((r) => String(r.id) === row.id)
-          return existing ? { ...existing, ...row } : row
-        }) as Array<Record<string, unknown>>)
+    return subscribeGlobalRunEvents((ev) => {
+      const type = String(ev.type || '')
+      const runId = String(ev.run_id || '')
+      const currentRuns = runsRef.current
+      if (runId) {
+        appendRunEvent(runId, ev)
+        const patched = patchRunsFromEvent(
+          currentRuns.map((r) => ({
+            id: String(r.id),
+            status: String(r.status || 'pending'),
+            current_stage: r.current_stage != null ? String(r.current_stage) : null,
+          })),
+          { run_id: runId, type, stage: ev.stage != null ? String(ev.stage) : null },
+        )
+        if (patched) {
+          setRuns(patched.map((row) => {
+            const existing = currentRuns.find((r) => String(r.id) === row.id)
+            return existing ? { ...existing, ...row } : row
+          }) as Array<Record<string, unknown>>)
+        }
       }
-    }
-    const refreshList = [
-      'run_completed',
-      'run_failed',
-      'run_blocked',
-      'run_changes_requested',
-      'awaiting_approval',
-    ].includes(type)
-    const patchStage = type.endsWith('_started') || type.startsWith('pipeline_tool_')
-    if (refreshList || patchStage) {
-      void loadRuns()
-    }
-  }, [appendRunEvent, loadRuns, projectId, runs, setRuns]), Boolean(projectId))
+      const refreshList = [
+        'run_completed',
+        'run_failed',
+        'run_blocked',
+        'run_changes_requested',
+        'awaiting_approval',
+      ].includes(type)
+      const patchStage = type.endsWith('_started') || type.startsWith('pipeline_tool_')
+      if (refreshList || patchStage) {
+        void loadRuns()
+      }
+    })
+  }, [appendRunEvent, loadRuns, projectId, setRuns])
 
   const selectRun = useCallback(async (runId: string) => {
     setSelectedRunId(runId)

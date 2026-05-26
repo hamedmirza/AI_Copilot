@@ -6,6 +6,7 @@ import {
   runStatusBadgeClass,
   runStatusLabel,
 } from '@/types/runs'
+import type { RunDetail, RunEvent } from '@/types/runs'
 import { RunActivityFeed } from './RunActivityFeed'
 import { RunOutcomeSummary } from './RunOutcomeSummary'
 
@@ -17,6 +18,15 @@ function formatElapsed(ms: number): string {
   return `${sec}s`
 }
 
+export type RunProgressLiveSnapshot = {
+  events: RunEvent[]
+  detail: RunDetail | null
+  status: string
+  currentStage: string | null
+  elapsedMs: number
+  latestActivityLine: string
+}
+
 interface RunProgressCardProps {
   runId: string
   displayName?: string | null
@@ -24,6 +34,8 @@ interface RunProgressCardProps {
   showViewLink?: boolean
   onOpen?: () => void
   className?: string
+  /** When provided, skips a nested `useRunLive` subscription (parent should own one). */
+  live?: RunProgressLiveSnapshot
 }
 
 export function RunProgressCard({
@@ -33,7 +45,11 @@ export function RunProgressCard({
   showViewLink = true,
   onOpen,
   className = '',
+  live: liveFromParent,
 }: RunProgressCardProps) {
+  const ownLive = useRunLive(runId, { enabled: !liveFromParent })
+  const live = liveFromParent ?? ownLive
+
   const {
     events,
     detail,
@@ -41,7 +57,7 @@ export function RunProgressCard({
     currentStage,
     elapsedMs,
     latestActivityLine,
-  } = useRunLive(runId)
+  } = live
 
   const status = statusProp || liveStatus
   const active = isActiveRunStatus(status)

@@ -16,6 +16,8 @@ import { showError } from '@/lib/toast'
 import { isRightPanelTabMounted, rightPanelPanelClass, type RightPanelTab } from '@/lib/rightPanelLayout'
 import { getContribution, getContributions } from '@/workbench/registry'
 import { useBrowserAgentDriver } from '@/hooks/useBrowserAgentDriver'
+import { dispatchGlobalRunEvent } from '@/lib/globalRunEvents'
+import { applyRunEventToStatus } from '@/lib/runEvents'
 
 const EditorPanel = lazy(async () => ({ default: (await import('@/components/Editor/EditorPanel')).EditorPanel }))
 const AgentPanel = lazy(async () => ({ default: (await import('@/components/AgentPanel/AgentPanel')).AgentPanel }))
@@ -259,15 +261,11 @@ export default function App() {
     const type = String(ev.type || '')
     if (type === 'ping' && typeof ev.connections === 'number') {
       setWsConnections(ev.connections)
+      return
     }
     const runId = String(ev.run_id || '')
-    if (type === 'run_clarification_requested') setRunStatus('awaiting_clarification', String(ev.stage || ''))
-    else if (type === 'awaiting_approval') setRunStatus('awaiting_approval', String(ev.stage || ''))
-    else if (type === 'run_blocked') setRunStatus('blocked', String(ev.stage || ''))
-    else if (type === 'run_failed') setRunStatus('failed', String(ev.stage || ''))
-    else if (type === 'run_completed') setRunStatus('completed', String(ev.stage || ''))
-    else if (type.endsWith('_started') && ev.run_id === currentRunId) {
-      setRunStatus('running', type.replace('_started', ''))
+    if (runId === currentRunId) {
+      applyRunEventToStatus(setRunStatus, ev)
     }
     const trackedRunIds = new Set([
       ...spawnedRunIds,
@@ -277,6 +275,7 @@ export default function App() {
     if (runId && trackedRunIds.has(runId)) {
       appendRunEvent(runId, ev)
     }
+    dispatchGlobalRunEvent(ev)
     if (['run_completed', 'code_patch_applied', 'awaiting_approval'].includes(type)) {
       window.setTimeout(() => bumpTreeRefresh(), 3000)
     }
