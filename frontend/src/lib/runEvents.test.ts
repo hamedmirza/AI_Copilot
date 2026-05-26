@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { formatExitMessage, getExitCodeHelp, parseExitCodeFromMessage } from './exitCodeHelp'
-import { formatRunEventLine, patchRunsFromEvent } from './runEvents'
+import {
+  appendRunEventDeduped,
+  dedupeRunEvents,
+  formatRunActivityLine,
+  formatRunEventLine,
+  patchRunsFromEvent,
+  runEventDedupeKey,
+  shouldRefreshRunThread,
+} from './runEvents'
+import type { RunEvent } from '@/types/runs'
 
 describe('getExitCodeHelp', () => {
   it('maps common shell exit codes', () => {
@@ -45,6 +54,69 @@ describe('patchRunsFromEvent', () => {
 
   it('returns null for unrelated events', () => {
     expect(patchRunsFromEvent(runs, { run_id: 'run-1', type: 'code_patch_applied' })).toBeNull()
+  })
+})
+
+describe('shouldRefreshRunThread', () => {
+  it('includes schema and guard rejection events', () => {
+    expect(shouldRefreshRunThread('coder_schema_rejected')).toBe(true)
+    expect(shouldRefreshRunThread('architect_schema_rejected')).toBe(true)
+    expect(shouldRefreshRunThread('coder_guard_rejected')).toBe(true)
+    expect(shouldRefreshRunThread('coder_started')).toBe(false)
+  })
+})
+
+describe('run event dedupe', () => {
+  it('dedupes by id or type/message/created_at', () => {
+    const events: RunEvent[] = [
+      { id: 1, type: 'coder_started', message: 'x', created_at: '2020-01-01T00:00:00Z' },
+      { id: 1, type: 'coder_started', message: 'x', created_at: '2020-01-01T00:00:00Z' },
+      { type: 'pipeline_tool_start', message: 'list', created_at: '2020-01-01T00:00:01Z' },
+    ]
+    expect(dedupeRunEvents(events)).toHaveLength(2)
+    expect(runEventDedupeKey(events[0])).toBe('id:1')
+  })
+
+  it('appendRunEventDeduped skips duplicates', () => {
+    const base: RunEvent[] = [{ type: 'coder_started', message: 'go', created_at: 't1' }]
+    const next = appendRunEventDeduped(base, { type: 'coder_started', message: 'go', created_at: 't1' })
+    expect(next).toHaveLength(1)
+    const added = appendRunEventDeduped(next, { type: 'pipeline_tool_end', message: 'done', created_at: 't2' })
+    expect(added).toHaveLength(2)
+  })
+})
+
+describe('formatRunActivityLine', () => {
+  it('formats pipeline tool events', () => {
+    expect(
+      formatRunActivityLine({
+        type: 'pipeline_tool_start',
+        payload: { tool: 'list_files', path: 'backend/app' },
+      }),
+    ).toContain('list_files')
+  })
+
+  it('formats stage progress heartbeats', () => {
+    expect(
+      formatRunActivityLine({
+        type: 'stage_progress',
+        stage: 'coder',
+        message: 'Still working on coder… (45s)',
+      }),
+    ).toContain('Still working')
+  })
+})
+
+describe('patchRunsFromEvent pipeline tools', () => {
+  const runs = [{ id: 'run-1', status: 'running', current_stage: 'planner' }]
+
+  it('keeps stage current on pipeline_tool events', () => {
+    const next = patchRunsFromEvent(runs, {
+      run_id: 'run-1',
+      type: 'pipeline_tool_start',
+      stage: 'coder',
+    })
+    expect(next?.[0]).toMatchObject({ current_stage: 'coder', status: 'running' })
   })
 })
 

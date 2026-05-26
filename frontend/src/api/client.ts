@@ -322,6 +322,8 @@ export const api = {
     status: (projectId: string) => request(`/api/projects/${projectId}/git/status`),
     stage: (projectId: string, paths: string[]) =>
       request(`/api/projects/${projectId}/git/stage`, { method: 'POST', body: JSON.stringify({ paths }) }),
+    stageAll: (projectId: string) =>
+      request(`/api/projects/${projectId}/git/stage-all`, { method: 'POST' }),
     unstage: (projectId: string, paths: string[]) =>
       request(`/api/projects/${projectId}/git/unstage`, { method: 'POST', body: JSON.stringify({ paths }) }),
     commit: (projectId: string, message: string) =>
@@ -332,8 +334,10 @@ export const api = {
       request(`/api/projects/${projectId}/git/checkout`, { method: 'POST', body: JSON.stringify({ branch }) }),
     diff: (projectId: string, path: string) =>
       request<{ diff: string; original: string; path: string }>(`/api/projects/${projectId}/git/diff/${path}`),
-    push: (projectId: string) => request(`/api/projects/${projectId}/git/push`, { method: 'POST' }),
-    pull: (projectId: string) => request(`/api/projects/${projectId}/git/pull`, { method: 'POST' }),
+    push: (projectId: string) =>
+      request<{ remote: string; branch: string }>(`/api/projects/${projectId}/git/push`, { method: 'POST' }),
+    pull: (projectId: string) =>
+      request<{ remote: string; branch: string }>(`/api/projects/${projectId}/git/pull`, { method: 'POST' }),
   },
   logs: (params?: { limit?: number; level?: string; run_id?: string }) => {
     const q = new URLSearchParams()

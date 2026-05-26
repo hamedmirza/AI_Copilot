@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '@/api/client'
 import { useRunDetail } from '@/hooks/useRunDetail'
+import { latestActivityLineFromEvents, patchRunsFromEvent } from '@/lib/runEvents'
 import { useProjectStore, useRunStore, useUIStore } from '@/store'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { showError } from '@/lib/toast'
@@ -39,7 +40,7 @@ const FILTER_OPTIONS: { id: StatusFilter; label: string }[] = [
 
 export function RunsPanel() {
   const projectId = useProjectStore((s) => s.currentProjectId)
-  const { currentRunId, runs, setRuns, setCurrentRun } = useRunStore()
+  const { currentRunId, runs, setRuns, setCurrentRun, appendRunEvent, runEventsByRunId } = useRunStore()
   const { hydrateRun } = useRunDetail()
   const [loadingRuns, setLoadingRuns] = useState(false)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
@@ -61,6 +62,8 @@ export function RunsPanel() {
     error_message: r.error_message != null ? String(r.error_message) : null,
     created_at: String(r.created_at || ''),
     updated_at: r.updated_at != null ? String(r.updated_at) : undefined,
+    last_event_at: r.last_event_at != null ? String(r.last_event_at) : null,
+    stale_running: Boolean(r.stale_running),
   })), [runs])
 
   const filteredRuns = useMemo(() => {
@@ -110,11 +113,37 @@ export function RunsPanel() {
   useWebSocket('/api/ws/events', useCallback((data: unknown) => {
     const ev = data as Record<string, unknown>
     const type = String(ev.type || '')
+    const runId = String(ev.run_id || '')
     if (!projectId) return
-    if (['run_completed', 'run_failed', 'run_blocked', 'run_changes_requested', 'awaiting_approval'].includes(type)) {
+    if (runId) {
+      appendRunEvent(runId, ev)
+      const patched = patchRunsFromEvent(
+        runs.map((r) => ({
+          id: String(r.id),
+          status: String(r.status || 'pending'),
+          current_stage: r.current_stage != null ? String(r.current_stage) : null,
+        })),
+        { run_id: runId, type, stage: ev.stage != null ? String(ev.stage) : null },
+      )
+      if (patched) {
+        setRuns(patched.map((row) => {
+          const existing = runs.find((r) => String(r.id) === row.id)
+          return existing ? { ...existing, ...row } : row
+        }) as Array<Record<string, unknown>>)
+      }
+    }
+    const refreshList = [
+      'run_completed',
+      'run_failed',
+      'run_blocked',
+      'run_changes_requested',
+      'awaiting_approval',
+    ].includes(type)
+    const patchStage = type.endsWith('_started') || type.startsWith('pipeline_tool_')
+    if (refreshList || patchStage) {
       void loadRuns()
     }
-  }, [loadRuns, projectId]), Boolean(projectId))
+  }, [appendRunEvent, loadRuns, projectId, runs, setRuns]), Boolean(projectId))
 
   const selectRun = useCallback(async (runId: string) => {
     setSelectedRunId(runId)
@@ -170,6 +199,8 @@ export function RunsPanel() {
           ) : (
             filteredRuns.map((run) => {
               const selected = selectedRunId === run.id
+              const activity = latestActivityLineFromEvents(runEventsByRunId[run.id] || [])
+              const isRunning = ['pending', 'running', 'awaiting_clarification', 'awaiting_approval'].includes(run.status) && !run.stale_running
               return (
                 <button
                   key={run.id}
@@ -178,7 +209,7 @@ export function RunsPanel() {
                     selected
                       ? 'border-[var(--accent)] bg-[var(--accent)]/10'
                       : 'border-transparent hover:bg-[var(--bg-tertiary)]'
-                  }`}
+                  } ${isRunning ? 'animate-pulse' : ''}`}
                   onClick={() => void selectRun(run.id)}
                 >
                   <div className="flex items-center gap-2 flex-wrap">
@@ -196,7 +227,9 @@ export function RunsPanel() {
                       const elapsed = formatRunElapsed(run.created_at, run.updated_at, run.status)
                       return elapsed ? <span>{elapsed}</span> : null
                     })()}
+                    {run.stale_running && <span className="text-amber-400">stalled</span>}
                     {run.current_stage && <span className="truncate">{run.current_stage}</span>}
+                    {activity && <span className="truncate text-[var(--accent)]">{activity}</span>}
                   </div>
                 </button>
               )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -11,6 +12,7 @@ from app.core.enums import RunStatus
 from app.core.exceptions import NotFoundError, ValidationError
 from app.db.models import LessonModel, PlaybookModel, ProjectModel, RunModel
 from app.schemas.api import ProjectCreate, ProjectUpdate
+from app.services.workspace_service import runs_root
 
 
 class ProjectService:
@@ -36,15 +38,30 @@ class ProjectService:
             dest = Path(__file__).resolve().parents[2] / "repos" / project_name.replace(" ", "-")
             dest.mkdir(parents=True, exist_ok=True)
             if not any(dest.iterdir()):
-                import subprocess
-
                 subprocess.run(["git", "clone", spec, str(dest)], check=True)
+            if not self._path_has_real_content(dest):
+                raise ValidationError(f"Cloned repository is empty or invalid: {dest}")
             spec = str(dest)
 
-        path = Path(spec)
+        path = Path(spec).expanduser()
         if not path.exists():
-            path.mkdir(parents=True, exist_ok=True)
-        return str(path.resolve())
+            raise ValidationError(f"Project source path does not exist: {path}")
+        if not path.is_dir():
+            raise ValidationError(f"Project source path is not a directory: {path}")
+        resolved = path.resolve()
+        workspaces_root = runs_root().resolve()
+        if resolved == workspaces_root or workspaces_root in resolved.parents:
+            raise ValidationError(
+                f"Project source cannot be inside run workspaces: {resolved}. "
+                "Set source_repo_spec to the repository root, not a runtime workspace copy."
+            )
+        return str(resolved)
+
+    def _path_has_real_content(self, path: Path) -> bool:
+        try:
+            return any(entry.name != ".git" for entry in path.iterdir())
+        except OSError:
+            return False
 
     def create(self, data: ProjectCreate) -> ProjectModel:
         resolved_spec = self._resolve_source_repo_spec(data.source_repo_spec, data.name)

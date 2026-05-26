@@ -24,6 +24,8 @@ export interface RunSummary {
   error_message?: string | null
   created_at: string
   updated_at?: string
+  last_event_at?: string | null
+  stale_running?: boolean
 }
 
 export function hasRecoveryMetadata(run: RunSummary): boolean {
@@ -65,6 +67,7 @@ export interface RunDetail {
   primary_failure_class?: string | null
   chat_session_id?: string | null
   deliverable_kind?: string | null
+  workflow_stages?: string[]
   expected_targets?: string[]
   expected_validation_family?: string | null
   readiness?: Record<string, unknown>
@@ -73,6 +76,8 @@ export interface RunDetail {
   clarification_question?: string | null
   clarification_stage?: string | null
   recommended_assumption?: string | null
+  last_event_at?: string | null
+  stale_running?: boolean
   created_at: string
   updated_at: string
 }

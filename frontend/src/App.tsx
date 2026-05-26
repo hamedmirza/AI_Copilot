@@ -223,8 +223,8 @@ export default function App() {
   const setRunStatus = useRunStore((s) => s.setRunStatus)
   const currentRunId = useRunStore((s) => s.currentRunId)
   const spawnedRunIds = useChatStore((s) => s.spawnedRunIds)
-  const trackedRunEvents = useChatStore((s) => s.runEventsById)
-  const addRunEvent = useChatStore((s) => s.addRunEvent)
+  const runEventsByRunId = useRunStore((s) => s.runEventsByRunId)
+  const appendRunEvent = useRunStore((s) => s.appendRunEvent)
 
   const gitPanelVisible =
     activePanel === 'git' || (bottomTab === 'git' && !bottomPanelCollapsed)
@@ -246,11 +246,11 @@ export default function App() {
     }
     const trackedRunIds = new Set([
       ...spawnedRunIds,
-      ...Object.keys(trackedRunEvents),
+      ...Object.keys(runEventsByRunId),
       ...(currentRunId ? [currentRunId] : []),
     ])
     if (runId && trackedRunIds.has(runId)) {
-      addRunEvent(runId, ev)
+      appendRunEvent(runId, ev)
     }
     if (['run_completed', 'code_patch_applied', 'awaiting_approval'].includes(type)) {
       window.setTimeout(() => bumpTreeRefresh(), 3000)
@@ -260,7 +260,7 @@ export default function App() {
         dispatchBrowserRefresh()
       }
     }
-  }, [addRunEvent, bumpTreeRefresh, currentRunId, setRunStatus, setWsConnections, spawnedRunIds, trackedRunEvents]), true)
+  }, [appendRunEvent, bumpTreeRefresh, currentRunId, runEventsByRunId, setRunStatus, setWsConnections, spawnedRunIds]), true)
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {

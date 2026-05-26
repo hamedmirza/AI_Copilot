@@ -1,5 +1,9 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { appendRunEventDeduped, dedupeRunEvents, normalizeRunEvent } from '@/lib/runEvents'
+import type { RunEvent } from '@/types/runs'
+
+export type { RunEvent }
 
 export type Panel = 'explorer' | 'search' | 'git' | 'agents' | 'settings'
 export type SidebarPanel = Exclude<Panel, 'settings'>
@@ -68,15 +72,6 @@ export interface ChatMessage {
   tool_calls?: ChatToolCall[]
   pending?: boolean
   error?: string
-}
-
-export interface RunEvent {
-  type?: string
-  run_id?: string
-  stage?: string | null
-  severity?: string
-  message?: string
-  [key: string]: unknown
 }
 
 export interface PageElementSelection {
@@ -172,11 +167,15 @@ interface RunState {
   runStatus: string
   currentStage: string | null
   events: Array<Record<string, unknown>>
+  runEventsByRunId: Record<string, RunEvent[]>
   runs: Array<Record<string, unknown>>
   setCurrentRun: (id: string | null) => void
   setRunStatus: (status: string, stage?: string | null) => void
   addEvent: (e: Record<string, unknown>) => void
   setEvents: (e: Array<Record<string, unknown>>) => void
+  setRunEvents: (runId: string, events: RunEvent[]) => void
+  appendRunEvent: (runId: string, raw: Record<string, unknown>) => void
+  clearRunEvents: (runId?: string) => void
   setRuns: (r: Array<Record<string, unknown>>) => void
   resetRunPanel: () => void
   resetRunForProjectSwitch: () => void
@@ -509,19 +508,88 @@ export const useEditorStore = create<EditorState>((set) => ({
   clearWorkspace: () => set({ tabs: [], activeTab: null, treeItems: [], selection: null }),
 }))
 
-export const useRunStore = create<RunState>((set) => ({
+export const useRunStore = create<RunState>((set, get) => ({
   currentRunId: null,
   runStatus: 'idle',
   currentStage: null,
   events: [],
+  runEventsByRunId: {},
   runs: [],
   setCurrentRun: (id) => set({ currentRunId: id }),
   setRunStatus: (status, stage = null) => set({ runStatus: status, currentStage: stage }),
-  addEvent: (e) => set((s) => ({ events: [...s.events, e] })),
-  setEvents: (events) => set({ events }),
+  addEvent: (e) => {
+    const runId = get().currentRunId
+    if (runId) {
+      get().appendRunEvent(runId, e)
+      return
+    }
+    set((s) => ({ events: [...s.events, e] }))
+  },
+  setEvents: (events) => {
+    const runId = get().currentRunId
+    const normalized = events.map((row) => normalizeRunEvent(row) as RunEvent)
+    if (runId) {
+      get().setRunEvents(runId, normalized)
+      return
+    }
+    set({ events })
+  },
+  setRunEvents: (runId, events) =>
+    set((s) => {
+      const deduped = dedupeRunEvents(events)
+      const patch: Partial<RunState> = {
+        runEventsByRunId: { ...s.runEventsByRunId, [runId]: deduped },
+      }
+      if (s.currentRunId === runId) {
+        patch.events = deduped as unknown as Array<Record<string, unknown>>
+      }
+      return patch
+    }),
+  appendRunEvent: (runId, raw) =>
+    set((s) => {
+      const existing = s.runEventsByRunId[runId] || []
+      const next = appendRunEventDeduped(existing, raw)
+      const patch: Partial<RunState> = {
+        runEventsByRunId: { ...s.runEventsByRunId, [runId]: next },
+      }
+      if (s.currentRunId === runId) {
+        patch.events = next as unknown as Array<Record<string, unknown>>
+      }
+      return patch
+    }),
+  clearRunEvents: (runId) =>
+    set((s) => {
+      if (!runId) {
+        return {
+          runEventsByRunId: {},
+          events: s.currentRunId ? [] : s.events,
+        }
+      }
+      const nextMap = { ...s.runEventsByRunId }
+      delete nextMap[runId]
+      const patch: Partial<RunState> = { runEventsByRunId: nextMap }
+      if (s.currentRunId === runId) patch.events = []
+      return patch
+    }),
   setRuns: (runs) => set({ runs }),
-  resetRunPanel: () => set({ currentRunId: null, runStatus: 'idle', currentStage: null, events: [], runs: [] }),
-  resetRunForProjectSwitch: () => set({ currentRunId: null, runStatus: 'idle', currentStage: null, events: [], runs: [] }),
+  resetRunPanel: () =>
+    set({
+      currentRunId: null,
+      runStatus: 'idle',
+      currentStage: null,
+      events: [],
+      runEventsByRunId: {},
+      runs: [],
+    }),
+  resetRunForProjectSwitch: () =>
+    set({
+      currentRunId: null,
+      runStatus: 'idle',
+      currentStage: null,
+      events: [],
+      runEventsByRunId: {},
+      runs: [],
+    }),
 }))
 
 export const useSettingsStore = create<SettingsState>((set) => ({
@@ -627,20 +695,24 @@ export const useChatStore = create<ChatState>((set) => ({
     set((state) => ({ streamingContent: `${state.streamingContent}${chunk}` })),
   clearStreamingContent: () => set({ streamingContent: '' }),
   setAssistantStatus: (assistantStatus) => set({ assistantStatus }),
-  addRunEvent: (runId, event) =>
+  addRunEvent: (runId, event) => {
+    useRunStore.getState().appendRunEvent(runId, event as unknown as Record<string, unknown>)
     set((state) => ({
       runEventsById: {
         ...state.runEventsById,
-        [runId]: [...(state.runEventsById[runId] || []), event],
+        [runId]: useRunStore.getState().runEventsByRunId[runId] || [],
       },
-    })),
-  clearRunEvents: (runId) =>
+    }))
+  },
+  clearRunEvents: (runId) => {
+    useRunStore.getState().clearRunEvents(runId)
     set((state) => {
       if (!runId) return { runEventsById: {} }
       const next = { ...state.runEventsById }
       delete next[runId]
       return { runEventsById: next }
-    }),
+    })
+  },
   setPendingRunId: (pendingRunId) => set({ pendingRunId }),
   setComposerPrefill: (composerPrefill) => set({ composerPrefill }),
   resetChatState: () => set({

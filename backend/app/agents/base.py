@@ -5,7 +5,11 @@ from typing import Any, TypeVar, get_args, get_origin
 
 from pydantic import BaseModel
 
-from app.agents.payload_normalize import loads_agent_json, normalize_agent_payload
+from app.agents.payload_normalize import (
+    loads_agent_json,
+    normalize_agent_payload,
+    preprocess_agent_json_text,
+)
 from app.agents.tool_runtime import PipelineToolRuntime
 from app.agents.skill_loader import (
     load_integrity_charter,
@@ -134,6 +138,15 @@ class BaseAgent:
                 "\nArchitectOutput requirement: file_changes must contain at least one "
                 "object with path, action, and rationale (never an empty list).\n"
             )
+        elif schema.__name__ == "CoderOutput":
+            schema_extra = (
+                "\nCoderOutput JSON rules (mandatory):\n"
+                "- Return exactly one JSON object; no markdown fences or commentary.\n"
+                "- In new_content and full_content: escape \" as \\\", \\ as \\\\, and use \\n for "
+                "newlines (never raw line breaks inside JSON strings).\n"
+                "- Prefer several small line_changes over one giant full_content blob.\n"
+                "- Use field names summary, file_changes, line_changes, requires_operator_approval only.\n"
+            )
         user_with_schema = (
             f"{user_prompt}\n\n"
             "Return JSON matching this schema exactly:\n"
@@ -141,11 +154,7 @@ class BaseAgent:
             f"{schema_extra}"
         )
         raw = self._run_with_optional_tools(system_with_rules, user_with_schema)
-        text = (raw or "").strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if "\n" in text:
-                text = text.split("\n", 1)[1]
+        text = preprocess_agent_json_text((raw or "").strip())
         payload = loads_agent_json(text)
         if isinstance(payload, dict):
             payload = normalize_agent_payload(schema.__name__, payload)

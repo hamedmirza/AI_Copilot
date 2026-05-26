@@ -28,12 +28,17 @@ export function normalizeRunEvents(rows: Array<Record<string, unknown>>): RunEve
   return rows.map((row) => normalizeRunEvent(row))
 }
 
-export function stageStatusFromEvents(events: RunEvent[], stage: string): 'pending' | 'running' | 'done' | 'failed' {
+export function stageStatusFromEvents(
+  events: RunEvent[],
+  stage: string,
+): 'pending' | 'running' | 'done' | 'failed' | 'skipped' {
   const failed = events.some((e) => e.type === `${stage}_failed`)
   const complete = events.some((e) => e.type === `${stage}_complete`)
+  const skipped = events.some((e) => e.type === `${stage}_skipped`)
   const started = events.some((e) => e.type === `${stage}_started`)
   if (failed) return 'failed'
   if (complete) return 'done'
+  if (skipped) return 'skipped'
   if (started) return 'running'
   return 'pending'
 }
@@ -64,10 +69,18 @@ const SIGNIFICANT_EVENT_TYPES = new Set([
   'run_blocked',
   'run_changes_requested',
   'code_patch_applied',
+  'architect_schema_rejected',
+  'coder_schema_rejected',
+  'coder_guard_rejected',
   'validation_rejected',
   'validation_passed',
+  'validation_result',
   'ui_designer_skipped',
   'provider_resolved',
+  'lessons_applied',
+  'stage_progress',
+  'pipeline_tool_start',
+  'pipeline_tool_end',
   'visual_evidence_failed',
   'visual_evidence_passed',
   'browser_client_required',
@@ -76,6 +89,119 @@ const SIGNIFICANT_EVENT_TYPES = new Set([
   'browser_visual_check_failed',
   'project_dev_server_down',
 ])
+
+const ACTIVITY_VISIBLE_TYPES = new Set([
+  ...SIGNIFICANT_EVENT_TYPES,
+])
+
+const ACTIVE_RUN_STATUSES = new Set([
+  'pending',
+  'running',
+  'awaiting_clarification',
+  'awaiting_approval',
+  'awaiting_design_review',
+  'blocked',
+  'changes_requested',
+])
+
+export function isActiveRunStatus(status: string): boolean {
+  return ACTIVE_RUN_STATUSES.has(status)
+}
+
+export function runEventDedupeKey(event: RunEvent): string {
+  const id = event.id
+  if (id != null && !Number.isNaN(Number(id))) return `id:${id}`
+  const created = event.created_at || ''
+  const type = String(event.type || event.event_type || '')
+  const message = String(event.message || '')
+  const stage = event.stage ?? ''
+  return `${type}|${stage}|${message}|${created}`
+}
+
+export function dedupeRunEvents(events: RunEvent[]): RunEvent[] {
+  const seen = new Set<string>()
+  const out: RunEvent[] = []
+  for (const event of events) {
+    const key = runEventDedupeKey(event)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(event)
+  }
+  return out
+}
+
+export function appendRunEventDeduped(existing: RunEvent[], raw: Record<string, unknown>): RunEvent[] {
+  const next = normalizeRunEvent(raw)
+  const key = runEventDedupeKey(next)
+  if (existing.some((e) => runEventDedupeKey(e) === key)) return existing
+  return [...existing, next]
+}
+
+export function isActivityVisibleRunEvent(event: RunEvent): boolean {
+  const type = String(event.type || '')
+  if (ACTIVITY_VISIBLE_TYPES.has(type)) return true
+  if (type.endsWith('_started') || type.endsWith('_complete')) return true
+  if (type.startsWith('pipeline_tool_')) return true
+  return false
+}
+
+export function formatRunActivityLine(event: RunEvent): string {
+  const type = String(event.type || '')
+  const payload = event.payload
+  const tool = payload?.tool ? String(payload.tool) : ''
+  const path = payload?.path ? String(payload.path) : payload?.file_path ? String(payload.file_path) : ''
+
+  if (type === 'stage_progress') {
+    const msg = String(event.message || '').trim()
+    return msg || `Still working on ${event.stage || 'stage'}…`
+  }
+  if (type === 'provider_resolved') {
+    return String(event.message || 'Provider resolved')
+  }
+  if (type === 'lessons_applied') {
+    return 'Applied lessons from prior runs'
+  }
+  if (type === 'pipeline_tool_start') {
+    if (tool && path) return `${tool}: ${path}`
+    if (tool) return `${tool}…`
+    return 'Running tool…'
+  }
+  if (type === 'pipeline_tool_end') {
+    if (tool && path) return `Finished ${tool}: ${path}`
+    if (tool) return `Finished ${tool}`
+    return 'Tool finished'
+  }
+  if (type === 'code_patch_applied') {
+    const files = payload?.applied_count ?? payload?.file_count
+    if (files != null) return `Applied patch (${files} file${Number(files) === 1 ? '' : 's'})`
+    return String(event.message || 'Patch applied')
+  }
+  if (type.endsWith('_started')) {
+    const stage = event.stage || type.replace(/_started$/, '')
+    return `${stage.replaceAll('_', ' ')}…`
+  }
+  if (type.endsWith('_complete')) {
+    const stage = event.stage || type.replace(/_complete$/, '')
+    return `${stage.replaceAll('_', ' ')} complete`
+  }
+  if (type === 'coder_schema_rejected' || type === 'architect_schema_rejected') {
+    return 'Retrying — output did not match schema'
+  }
+  if (type === 'validation_result' || type === 'validation_passed' || type === 'validation_rejected') {
+    return formatRunEventLine(event)
+  }
+  return formatRunEventLine(event)
+}
+
+export function latestActivityLineFromEvents(events: RunEvent[]): string | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i]
+    if (!isActivityVisibleRunEvent(event)) continue
+    const line = formatRunActivityLine(event).trim()
+    if (line) return line
+  }
+  return null
+}
 
 export function isSignificantRunEvent(event: RunEvent): boolean {
   const type = String(event.type || '')
@@ -89,6 +215,16 @@ export function isSignificantRunEvent(event: RunEvent): boolean {
 
 export function filterSignificantRunEvents(events: RunEvent[]): RunEvent[] {
   return events.filter(isSignificantRunEvent)
+}
+
+/** Pipeline retry / rejection events that update the run thread and activity log. */
+export function shouldRefreshRunThread(eventType: string): boolean {
+  const type = String(eventType || '')
+  return (
+    type.endsWith('_schema_rejected') ||
+    type.endsWith('_guard_rejected') ||
+    type === 'validation_rejected'
+  )
 }
 
 export function patchRunsFromEvent<T extends { id: string; status?: string; current_stage?: string | null }>(
@@ -112,6 +248,19 @@ export function patchRunsFromEvent<T extends { id: string; status?: string; curr
   }
   if (type === 'run_failed') {
     return runs.map((run, i) => (i === index ? { ...run, status: 'failed' } : run))
+  }
+  if (type === 'run_blocked' || type === 'run_changes_requested') {
+    return runs.map((run, i) => (i === index ? { ...run, status: type.replace('run_', '') } : run))
+  }
+  if (type === 'stage_progress' && event.stage) {
+    return runs.map((run, i) =>
+      i === index ? { ...run, status: 'running', current_stage: event.stage || run.current_stage } : run,
+    )
+  }
+  if (type.startsWith('pipeline_tool_') && event.stage) {
+    return runs.map((run, i) =>
+      i === index ? { ...run, status: 'running', current_stage: event.stage || run.current_stage } : run,
+    )
   }
   return null
 }

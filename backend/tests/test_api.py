@@ -2,6 +2,7 @@ from pathlib import Path
 
 import json
 import sqlite3
+import pytest
 from starlette.websockets import WebSocketDisconnect
 
 from app.db.session import SessionLocal
@@ -495,6 +496,10 @@ def test_awaiting_approval_event_is_persisted(client, tmp_path):
         db.add(run)
         db.commit()
 
+        from tests.conftest import seed_pipeline_gate_artifacts
+
+        seed_pipeline_gate_artifacts(db, run.id)
+
         service = OrchestrationService()
         service._stage_planner = lambda db_arg, run_id, ctx, fs: True  # type: ignore[method-assign]
         service._stage_architect = lambda db_arg, run_id, ctx: True  # type: ignore[method-assign]
@@ -733,8 +738,8 @@ def test_resume_inflight_runs_prioritizes_later_stage_runs(client):
         )
         db.add(task)
         db.flush()
-        older = datetime.now(UTC) - timedelta(hours=2)
-        newer = datetime.now(UTC) - timedelta(minutes=5)
+        older = datetime.now(UTC) - timedelta(minutes=2)
+        newer = datetime.now(UTC) - timedelta(minutes=1)
         planner_run = RunModel(project_id=project.id, task_id=task.id, status="running", current_stage="planner")
         reviewer_run = RunModel(project_id=project.id, task_id=task.id, status="running", current_stage="reviewer")
         tester_run = RunModel(project_id=project.id, task_id=task.id, status="pending", current_stage="tester")
@@ -744,6 +749,9 @@ def test_resume_inflight_runs_prioritizes_later_stage_runs(client):
         reviewer_run.updated_at = newer
         tester_run.updated_at = older
         db.commit()
+        planner_run_id = planner_run.id
+        reviewer_run_id = reviewer_run.id
+        tester_run_id = tester_run.id
 
         captured: list[str] = []
         original_enqueue = run_engine.enqueue
@@ -755,7 +763,7 @@ def test_resume_inflight_runs_prioritizes_later_stage_runs(client):
     finally:
         db.close()
 
-    assert captured[:3] == [tester_run.id, reviewer_run.id, planner_run.id]
+    assert captured[:3] == [tester_run_id, reviewer_run_id, planner_run_id]
 
 
 def test_resume_inflight_runs_can_limit_batch_size(client):
@@ -878,7 +886,85 @@ def test_resume_run_endpoint_rejects_non_resumable_run(client):
     for run_id in run_ids:
         response = client.post(f"/api/runs/{run_id}/resume", headers=HEADERS)
         assert response.status_code == 400
-        assert response.json()["detail"] == "Run is not resumable"
+
+
+def test_resume_inflight_runs_finalizes_stale_running_run(client, tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.orchestration_service import resume_inflight_runs, run_engine
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="ResumeStale",
+            source_repo_spec=str(tmp_path),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(project_id=project.id, description="Resume stale run", validation_profile="python")
+        db.add(task)
+        db.flush()
+        run = RunModel(project_id=project.id, task_id=task.id, status="running", current_stage="coder")
+        db.add(run)
+        db.flush()
+        run.updated_at = datetime.now(UTC) - timedelta(minutes=10)
+        db.commit()
+
+        captured: list[str] = []
+        original_enqueue = run_engine.enqueue
+        run_engine.enqueue = lambda run_id: captured.append(run_id)  # type: ignore[assignment]
+        try:
+            resumed = resume_inflight_runs(db)
+        finally:
+            run_engine.enqueue = original_enqueue  # type: ignore[assignment]
+        db.refresh(run)
+    finally:
+        db.close()
+
+    assert resumed == []
+    assert captured == []
+    assert run.status == "failed"
+    assert "stalled" in (run.error_message or "").lower()
+
+
+def test_resume_run_endpoint_rejects_stale_running_run(client, tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+
+    project_dir = tmp_path / "resume_stale_endpoint"
+    project_dir.mkdir()
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="ResumeEndpointStale",
+            source_repo_spec=str(project_dir),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(project_id=project.id, description="Resume stale endpoint task", validation_profile="python")
+        db.add(task)
+        db.flush()
+        run = RunModel(project_id=project.id, task_id=task.id, status="running", current_stage="reviewer")
+        db.add(run)
+        db.flush()
+        run.updated_at = datetime.now(UTC) - timedelta(minutes=10)
+        db.commit()
+        run_id = run.id
+    finally:
+        db.close()
+
+    response = client.post(f"/api/runs/{run_id}/resume", headers=HEADERS)
+    assert response.status_code == 400
+    assert "stale" in response.json()["detail"].lower()
 
 
 def test_lifespan_auto_resume_enabled_enqueues_one_inflight_run(monkeypatch):
@@ -1352,6 +1438,52 @@ def test_prepare_run_workspace_links_frontend_node_modules(tmp_path):
     assert linked.resolve() == (source / "frontend/node_modules").resolve()
 
 
+def test_retry_run_fails_immediately_for_git_only_source(client, tmp_path):
+    from app.core.enums import RunStatus
+    from app.db.models import ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+
+    source = tmp_path / "git_only_source"
+    source.mkdir()
+    (source / ".git").mkdir()
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="GitOnlySource",
+            source_repo_spec=str(source),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Initialize project scaffold and governance for GitOnlySource",
+            validation_profile="python",
+            task_kind="setup",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status=RunStatus.FAILED.value,
+            current_stage="coder",
+            task_kind="setup",
+            error_message="previous failure",
+        )
+        db.add(run)
+        db.commit()
+        run_id = run.id
+    finally:
+        db.close()
+
+    response = client.post(f"/api/runs/{run_id}/retry", headers=HEADERS)
+    assert response.status_code == 400
+    assert "no usable files" in response.json()["detail"].lower()
+
+
 def test_run_command_prepends_workspace_node_modules_bin(tmp_path):
     from app.tools.command_runner import run_command
 
@@ -1496,6 +1628,102 @@ def test_stage_coder_retries_after_guard_rejection(client, tmp_path, monkeypatch
     assert calls["count"] == 2
     assert "hasRecoveryMetadata" in content
     assert "item19" in content
+
+
+def test_stage_coder_rejects_non_blueprint_setup_dependency_path(client, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import app.services.orchestration_service as orchestration_module
+    from app.db.models import ArtifactModel, ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.file_service import FileService
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "setup_scope_workspace"
+    workspace.mkdir()
+    (workspace / "AGENTS.md").write_text("existing\n")
+    (workspace / ".ai-copilot").mkdir()
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="SetupScope",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Initialize project scaffold and governance for SetupScope",
+            validation_profile="python",
+            task_kind="setup",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status="running",
+            task_kind="setup",
+            workspace_path=str(workspace),
+        )
+        db.add(run)
+        db.flush()
+        db.add(
+            ArtifactModel(
+                run_id=run.id,
+                artifact_type="architect",
+                content_json=json.dumps(
+                    {
+                        "overview": "setup",
+                        "modules": ["governance"],
+                        "file_changes": [
+                            {"path": "AGENTS.md", "action": "create", "rationale": "governance"},
+                            {
+                                "path": ".ai-copilot/architecture.md",
+                                "action": "create",
+                                "rationale": "architecture",
+                            },
+                        ],
+                    }
+                ),
+            )
+        )
+        db.commit()
+
+        class FakeRegistry:
+            def active_provider(self):
+                return "ollama"
+
+            def resolve_stage(self, stage):
+                return object()
+
+        class FakeCoderAgent:
+            def __init__(self, provider, tool_runtime=None):
+                self.provider = provider
+
+            def code(self, context):
+                return SimpleNamespace(
+                    file_changes=[{"path": "frontend/node_modules/typescript/lib/tsc.js", "full_content": "// bad\n"}],
+                    model_dump=lambda: {
+                        "summary": "bad setup drift",
+                        "file_changes": [
+                            {"path": "frontend/node_modules/typescript/lib/tsc.js", "full_content": "// bad\n"}
+                        ],
+                        "requires_operator_approval": False,
+                    },
+                )
+
+        monkeypatch.setattr(orchestration_module.ProviderRegistry, "get", staticmethod(lambda: FakeRegistry()))
+        monkeypatch.setattr(orchestration_module, "CoderAgent", FakeCoderAgent)
+
+        service = OrchestrationService()
+        with pytest.raises(orchestration_module.PatchGuardError, match="dependency path during setup"):
+            service._stage_coder(db, run.id, "Patch blueprint files only", FileService(workspace))
+    finally:
+        db.close()
 
 
 def test_pipeline_block_protect_resolve_learning_events(client, tmp_path, monkeypatch):
@@ -1652,6 +1880,10 @@ def test_running_run_resumes_from_current_stage(client, tmp_path):
         db.add(run)
         db.commit()
 
+        from tests.conftest import seed_pipeline_gate_artifacts
+
+        seed_pipeline_gate_artifacts(db, run.id)
+
         service = OrchestrationService()
         called: list[str] = []
         service._stage_planner = lambda db_arg, run_id, ctx, fs: called.append("planner") or True  # type: ignore[method-assign]
@@ -1738,7 +1970,7 @@ def test_profile_commands_are_skipped_for_non_matching_changed_files(client):
     assert kept == commands
 
 
-def test_stage_architect_retries_on_empty_file_changes(client, tmp_path):
+def test_stage_architect_retries_on_empty_file_changes(client, tmp_path, monkeypatch):
     import json as _json
 
     from app.db.models import ArtifactModel, ProjectModel, RunEventModel, RunModel, TaskModel
@@ -1746,6 +1978,16 @@ def test_stage_architect_retries_on_empty_file_changes(client, tmp_path):
     from app.providers.fake import FakeProvider
     from app.providers.registry import ProviderRegistry
     from app.services.orchestration_service import OrchestrationService
+
+    emitted: list[dict] = []
+
+    def _capture_emit(_run_id: str, event: dict) -> None:
+        emitted.append(event)
+
+    monkeypatch.setattr(
+        "app.services.orchestration_service.event_bus.emit",
+        _capture_emit,
+    )
 
     workspace = tmp_path / "architect_retry"
     workspace.mkdir()
@@ -1829,6 +2071,10 @@ def test_stage_architect_retries_on_empty_file_changes(client, tmp_path):
             .all()
         )
         assert len(reject_events) == 1
+        schema_emits = [event for event in emitted if event.get("type") == "architect_schema_rejected"]
+        assert len(schema_emits) == 1
+        assert schema_emits[0].get("severity") == "warning"
+        assert schema_emits[0].get("message")
     finally:
         db.close()
 
@@ -2577,6 +2823,39 @@ def test_create_project_triggers_setup_run(client, tmp_path, monkeypatch):
         db.close()
 
 
+def test_create_project_rejects_missing_source_path(client, tmp_path):
+    missing = tmp_path / "does_not_exist"
+    response = client.post(
+        "/api/projects",
+        json={
+            "name": "MissingSource",
+            "source_repo_spec": str(missing),
+            "validation_profile": "python",
+        },
+        headers=HEADERS,
+    )
+    assert response.status_code == 400
+    assert "does not exist" in response.json()["detail"]
+
+
+def test_create_project_rejects_run_workspace_path(client, tmp_path):
+    from app.services.workspace_service import runs_root
+
+    workspace_like = runs_root() / "fake-project-source"
+    workspace_like.mkdir(parents=True, exist_ok=True)
+    response = client.post(
+        "/api/projects",
+        json={
+            "name": "WorkspaceSource",
+            "source_repo_spec": str(workspace_like),
+            "validation_profile": "python",
+        },
+        headers=HEADERS,
+    )
+    assert response.status_code == 400
+    assert "inside run workspaces" in response.json()["detail"]
+
+
 def test_project_update(client, tmp_path):
     proj_dir = tmp_path / "update_proj"
     proj_dir.mkdir()
@@ -2611,6 +2890,34 @@ def test_project_update(client, tmp_path):
     assert body["description"] == "Updated description"
     assert body["validation_profile"] == "react"
     assert body["source_repo_spec"] == str(new_dir.resolve())
+
+
+def test_project_update_rejects_missing_source_path_and_preserves_existing(client, tmp_path):
+    proj_dir = tmp_path / "update_missing_proj"
+    proj_dir.mkdir()
+    response = client.post(
+        "/api/projects",
+        json={
+            "name": "UpdateMissingPath",
+            "source_repo_spec": str(proj_dir),
+            "validation_profile": "python",
+        },
+        headers=HEADERS,
+    )
+    assert response.status_code == 200
+    project_id = response.json()["id"]
+
+    missing = tmp_path / "typo_missing_path"
+    update = client.put(
+        f"/api/projects/{project_id}",
+        json={"source_repo_spec": str(missing)},
+        headers=HEADERS,
+    )
+    assert update.status_code == 400
+
+    fetched = client.get(f"/api/projects/{project_id}", headers=HEADERS)
+    assert fetched.status_code == 200
+    assert fetched.json()["source_repo_spec"] == str(proj_dir.resolve())
 
 
 def test_file_rename(client, tmp_path):
@@ -2714,6 +3021,40 @@ def test_git_status_empty_repo(client, tmp_path):
     assert "unstaged" in body
     assert "untracked" in body
     assert any(f["path"] == "main.py" for f in body["untracked"])
+
+
+def test_git_commit_stages_untracked_and_clears_status(client, tmp_path):
+    proj_dir = tmp_path / "git_commit_proj"
+    proj_dir.mkdir()
+    (proj_dir / "main.py").write_text("x=1\n")
+    r = client.post(
+        "/api/projects",
+        json={
+            "name": "GitCommitTest",
+            "source_repo_spec": str(proj_dir),
+            "validation_profile": "python",
+        },
+        headers=HEADERS,
+    )
+    pid = r.json()["id"]
+    r = client.post(
+        f"/api/projects/{pid}/git/commit",
+        json={"message": "track main"},
+        headers=HEADERS,
+    )
+    assert r.status_code == 200
+    assert r.json().get("sha")
+    r = client.get(f"/api/projects/{pid}/git/status", headers=HEADERS)
+    body = r.json()
+    assert body["staged"] == []
+    assert body["unstaged"] == []
+    assert body["untracked"] == []
+    r = client.post(
+        f"/api/projects/{pid}/git/commit",
+        json={"message": "nothing to commit"},
+        headers=HEADERS,
+    )
+    assert r.status_code == 400
 
 
 def test_retry_stores_operator_feedback(client, tmp_path):

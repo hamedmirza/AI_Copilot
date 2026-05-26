@@ -201,11 +201,6 @@ def run_migrations() -> None:
             if not _column_exists("runs", "clarification_context_json"):
                 _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN clarification_context_json TEXT DEFAULT '{}'")
 
-    if not _table_exists("run_thread_entries"):
-        Base.metadata.create_all(
-            bind=engine, tables=[Base.metadata.tables["run_thread_entries"]], checkfirst=True
-        )
-
     if _table_exists("tasks"):
         with engine.begin() as conn:
             if not _column_exists("tasks", "task_kind"):
@@ -247,6 +242,8 @@ def seed_app_config(db: Session) -> None:
         "chat_max_context_tokens": 32768,
         "chat_max_output_tokens": 4096,
         "stop_on_first_failure": True,
+        "auto_assume_clarifications": False,
+        "require_supervisor_llm": False,
         "model_planner": "qwen3.6-27b",
         "model_architect": "qwen3.6-27b",
         "model_ui_designer": "qwen3.6-27b",

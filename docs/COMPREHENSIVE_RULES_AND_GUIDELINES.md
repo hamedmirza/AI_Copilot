@@ -7,7 +7,7 @@ Consolidated standards for humans and AI agents in AI Copilot.
 - **Monorepo**: `backend/` (FastAPI) + `frontend/` (Vite React), orchestrated by `scripts/server.sh`
 - **Persistence**: SQLite at `backend/app.db` (WAL mode)
 - **Auth**: `X-Api-Token` header; default dev token `dev-token`
-- **Agents pipeline**: Planner → Architect → UI Designer → Coder → Reviewer → Tester → Supervisor
+- **Agents pipeline**: task-kind-specific stage graphs via `task_kind_workflow.py` (e.g. analysis omits tester; playbook uses playbook_supervisor; pre/post-deploy supervisor gates approval)
 - **Projects**: local workspace path or HTTPS git clone into `backend/repos/`
 
 ## Coding standards

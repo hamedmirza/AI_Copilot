@@ -74,6 +74,7 @@ class BaseProvider(ABC):
         tools: list[dict[str, Any]] | None = None,
         stream: bool = False,
         max_tokens: int | None = None,
+        tool_choice: dict[str, Any] | str | None = None,
     ) -> ChatCompletionResult:
         system_prompt, user_prompt = self._build_react_prompt(messages, tools or [])
         raw = self.invoke_json(system_prompt, user_prompt)
@@ -98,8 +99,9 @@ class BaseProvider(ABC):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
+        tool_choice: dict[str, Any] | str | None = None,
     ) -> Iterable[ChatStreamChunk]:
-        result = self.invoke_chat(messages, tools=tools, stream=False)
+        result = self.invoke_chat(messages, tools=tools, stream=False, tool_choice=tool_choice)
         if result.content:
             yield ChatStreamChunk(delta=result.content, finish_reason=result.finish_reason)
         elif result.tool_calls:

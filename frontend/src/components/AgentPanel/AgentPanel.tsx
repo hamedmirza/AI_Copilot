@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { api } from '@/api/client'
 import { useRunDetail } from '@/hooks/useRunDetail'
+import { useRunLive } from '@/hooks/useRunLive'
 import { formatElementForAgentTask } from '@/lib/pageElementContext'
-import { normalizeRunEvents } from '@/lib/runEvents'
+import { isActiveRunStatus, shouldRefreshRunThread } from '@/lib/runEvents'
 import { useEditorStore, useProjectStore, useRunStore, useUIStore } from '@/store'
-import { useWebSocket } from '@/hooks/useWebSocket'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button, EmptyState, Skeleton } from '@/components/ui/primitives'
 import { RejectReasonDialog } from '@/components/ui/RejectReasonDialog'
@@ -18,7 +18,7 @@ import { PipelineTimeline } from './PipelineTimeline'
 import { RunActionBar } from './RunActionBar'
 import { RunComposer } from './RunComposer'
 import { RunConversationPanel } from './RunConversationPanel'
-import { RunStatusChip } from './RunStatusChip'
+import { RunProgressCard } from './RunProgressCard'
 
 const ACTIVE_RUN_STATUSES = new Set([
   'pending',
@@ -50,7 +50,7 @@ export function AgentPanel() {
   const runDrawerRequest = useUIStore((s) => s.runDrawerRequest)
   const clearRunDrawerRequest = useUIStore((s) => s.clearRunDrawerRequest)
   const rightPanelTab = useUIStore((s) => s.rightPanelTab)
-  const { currentRunId, runStatus, events, setCurrentRun, setRunStatus, addEvent, setRuns } = useRunStore()
+  const { currentRunId, runStatus, setCurrentRun, setRunStatus, setRuns } = useRunStore()
   const {
     detail,
     artifacts,
@@ -60,6 +60,11 @@ export function AgentPanel() {
     hydrateRun,
     refreshThread,
   } = useRunDetail()
+  const {
+    events: liveEvents,
+    status: liveStatus,
+    currentStage,
+  } = useRunLive(currentRunId, { syncPanel: true, enabled: Boolean(currentRunId) })
   const [description, setDescription] = useState('')
   const [validationProfile, setValidationProfile] = useState('python')
   const [allowWebSearch, setAllowWebSearch] = useState(false)
@@ -78,11 +83,12 @@ export function AgentPanel() {
   const [learningBusy, setLearningBusy] = useState(false)
 
   const normalizedEvents = useMemo(
-    () => normalizeRunEvents(events as Array<Record<string, unknown>>),
-    [events],
+    () => liveEvents,
+    [liveEvents],
   )
 
-  const runActive = ACTIVE_RUN_STATUSES.has(runStatus)
+  const effectiveStatus = liveStatus || runStatus
+  const runActive = ACTIVE_RUN_STATUSES.has(effectiveStatus) || isActiveRunStatus(effectiveStatus)
 
   const loadRuns = useCallback(async () => {
     if (!projectId) {
@@ -146,7 +152,7 @@ export function AgentPanel() {
 
   useEffect(() => {
     if (!currentRunId) return
-    void hydrateRun(currentRunId, false)
+    void hydrateRun(currentRunId, true)
   }, [currentRunId, hydrateRun])
 
   useEffect(() => {
@@ -166,45 +172,18 @@ export function AgentPanel() {
 
   const bumpTreeRefresh = useEditorStore((s) => s.bumpTreeRefresh)
 
-  const applyRunEvent = useCallback((ev: Record<string, unknown>) => {
-    const type = String(ev.type || '')
-    if (type === 'run_clarification_requested') setRunStatus('awaiting_clarification', String(ev.stage || ''))
-    else if (type === 'awaiting_approval') setRunStatus('awaiting_approval', String(ev.stage || ''))
-    else if (type === 'run_blocked') setRunStatus('blocked', String(ev.stage || ''))
-    else if (type === 'run_failed') setRunStatus('failed', String(ev.stage || ''))
-    else if (type === 'run_completed') setRunStatus('completed', String(ev.stage || ''))
-    else if (type === 'run_changes_requested') setRunStatus('changes_requested', String(ev.stage || ''))
-    else if (type.endsWith('_started')) setRunStatus('running', type.replace('_started', ''))
+  useEffect(() => {
+    if (!currentRunId || liveEvents.length === 0) return
+    const last = liveEvents[liveEvents.length - 1]
+    const type = String(last.type || '')
+    if (shouldRefreshRunThread(type)) {
+      void refreshThread(currentRunId)
+    }
     if (['run_completed', 'code_patch_applied', 'awaiting_approval'].includes(type)) {
       window.setTimeout(() => bumpTreeRefresh(), 3000)
-    }
-  }, [bumpTreeRefresh, setRunStatus])
-
-  const onGlobalEvent = useCallback((data: unknown) => {
-    const ev = data as Record<string, unknown>
-    if (ev.run_id === currentRunId) {
-      addEvent(ev)
-      applyRunEvent(ev)
-    }
-  }, [currentRunId, addEvent, applyRunEvent])
-
-  useWebSocket('/api/ws/events', onGlobalEvent, !!projectId)
-
-  const onRunEvent = useCallback((data: unknown) => {
-    const ev = data as Record<string, unknown>
-    addEvent(ev)
-    applyRunEvent(ev)
-    if (ev.type?.toString().includes('complete') || ev.type === 'awaiting_approval') {
       void loadRuns()
     }
-    if (currentRunId) void refreshThread(currentRunId)
-  }, [addEvent, applyRunEvent, loadRuns, refreshThread, currentRunId])
-
-  useWebSocket(
-    currentRunId ? `/api/ws/runs/${currentRunId}` : '',
-    onRunEvent,
-    !!currentRunId,
-  )
+  }, [bumpTreeRefresh, currentRunId, liveEvents, loadRuns, refreshThread])
 
   const handleRetryWithFeedback = useCallback(async (feedback: string) => {
     if (!currentRunId) return
@@ -359,18 +338,22 @@ export function AgentPanel() {
 
       {currentRunId ? (
         <div className="shrink-0 space-y-2 mb-2">
-          <RunStatusChip
+          <RunProgressCard
             runId={currentRunId}
             displayName={displayName}
-            status={runStatus}
-            events={events}
+            status={effectiveStatus}
             showViewLink={false}
           />
-          <PipelineTimeline events={normalizedEvents} compact />
+          <PipelineTimeline
+            events={normalizedEvents}
+            workflowStages={detail?.workflow_stages}
+            compact
+            activeStage={currentStage}
+          />
           <RunActionBar
-            status={runStatus}
+            status={effectiveStatus}
             busy={actionBusy}
-            events={events}
+            events={liveEvents}
             promoteSnapshot={detail?.promote_snapshot ?? null}
             onApprove={() => setShowApprove(true)}
             onReject={() => setShowReject(true)}

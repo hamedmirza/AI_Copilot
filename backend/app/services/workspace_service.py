@@ -105,6 +105,34 @@ def prepare_run_workspace(source_repo: Path, run_id: str) -> Path:
     return workspace
 
 
+def workspace_has_promotable_files(workspace: Path) -> bool:
+    if not workspace.exists() or not workspace.is_dir():
+        return False
+    for path in iter_workspace_files(workspace):
+        rel = path.relative_to(workspace)
+        if is_promotable_path(rel):
+            return True
+    return False
+
+
+def validate_run_workspace(
+    workspace: Path,
+    *,
+    source_repo: Path,
+    repo_mode: str | None,
+    task_kind: str | None,
+) -> None:
+    if not workspace.exists() or not workspace.is_dir():
+        raise ValidationError(f"Run workspace missing: {workspace}")
+    has_promotable = workspace_has_promotable_files(workspace)
+    if repo_mode == "existing" and not has_promotable:
+        raise ValidationError("Workspace reset produced no usable files from project source")
+    if task_kind == "setup" and repo_mode != "greenfield" and not has_promotable:
+        raise ValidationError("Workspace reset produced no usable files from project source")
+    if task_kind == "setup" and not has_promotable and (source_repo / ".git").exists():
+        raise ValidationError("Workspace reset produced no usable files from project source")
+
+
 def is_promotable_path(rel: Path) -> bool:
     parts = rel.parts
     if not parts:

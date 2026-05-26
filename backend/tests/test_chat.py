@@ -362,7 +362,7 @@ def test_chat_cancel_mid_stream(client, tmp_path: Path):
     stream_chunks = ["part", "ial", " stream"]
     first_chunk_sent = threading.Event()
 
-    def slow_stream(self, messages, tools=None, max_tokens=None):
+    def slow_stream(self, messages, tools=None, max_tokens=None, tool_choice=None):
         for index, piece in enumerate(stream_chunks):
             if index > 0:
                 time.sleep(0.05)

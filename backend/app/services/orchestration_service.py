@@ -3,10 +3,11 @@ import logging
 import re
 import subprocess
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from threading import Lock
+from threading import Event as ThreadEvent
+from threading import Lock, Thread
 from typing import Any, Callable, cast
 
 import httpx
@@ -19,6 +20,7 @@ from app.agents import (
     CoderAgent,
     DocumentationAgent,
     PlannerAgent,
+    PlaybookSupervisorAgent,
     ReviewerAgent,
     TesterAgent,
     UIDesignerAgent,
@@ -38,8 +40,8 @@ from app.services.project_service import ProjectService
 from app.services.scope_guard import scope_issues
 from app.services.source_validation import frontend_structure_issues
 from app.services.run_engine.event_bus import event_bus
-from app.services.workspace_service import clone_for_run
-from app.core.exceptions import CommandRejectedError, PatchGuardError
+from app.services.workspace_service import clone_for_run, validate_run_workspace
+from app.core.exceptions import CommandRejectedError, PatchGuardError, ValidationError
 from app.tools.command_runner import run_command, validate_command
 from app.tools.lint_runner import (
     FRONTEND_SCAFFOLD_MESSAGE,
@@ -87,6 +89,15 @@ from app.services.run_outcome_service import (
     evaluate_blueprint_satisfaction,
 )
 from app.services.web_search_service import WebSearchError, WebSearchService, infer_allow_web_search
+from app.services.task_kind_workflow import (
+    RunContext,
+    StageSpec,
+    WorkflowContext,
+    build_pipeline_stages,
+    check_stage_gate,
+    skips_deployment_gates,
+    workflow_stage_specs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +114,11 @@ _RESUME_STAGE_PRIORITY = {
     PipelineStage.ARCHITECT.value: 2,
     PipelineStage.PLANNER.value: 1,
     PipelineStage.APP_DESIGNER.value: 0,
+    PipelineStage.PLAYBOOK_SUPERVISOR.value: 2,
 }
+
+_STALE_INFLIGHT_TIMEOUT = timedelta(minutes=3)
+_ALLOWED_SETUP_COMPANION_PREFIXES = ("docs/change-requests/",)
 
 
 class OrchestrationService:
@@ -167,6 +182,29 @@ class OrchestrationService:
                 return
             wait(pending, timeout=remaining)
 
+    def _run_with_stage_heartbeat(self, run_id: str, stage: str, fn: Callable[[], Any]) -> Any:
+        stop = ThreadEvent()
+        start = time.monotonic()
+
+        def heartbeat() -> None:
+            while not stop.wait(20):
+                elapsed_s = int(time.monotonic() - start)
+                self._emit(
+                    run_id,
+                    "stage_progress",
+                    stage,
+                    f"Still working on {stage}… ({elapsed_s}s)",
+                    {"elapsed_s": elapsed_s, "stage": stage},
+                )
+
+        thread = Thread(target=heartbeat, daemon=True)
+        thread.start()
+        try:
+            return fn()
+        finally:
+            stop.set()
+            thread.join(timeout=0.5)
+
     def _emit(
         self,
         run_id: str,
@@ -184,7 +222,9 @@ class OrchestrationService:
             run_id,
             {
                 "type": event_type,
+                "event_type": event_type,
                 "stage": stage,
+                "severity": severity,
                 "message": message,
                 "payload": enriched,
                 "outcome_class": enriched.get("outcome_class"),
@@ -228,6 +268,10 @@ class OrchestrationService:
             self._mark_run_failed(db, run_id, "", str(exc))
             self._emit(run_id, "run_failed", "", str(exc))
         finally:
+            try:
+                self._finalize_if_left_running(db, run_id)
+            except Exception:
+                logger.debug("Failed to finalize inflight run %s", run_id, exc_info=True)
             db.close()
             run_id_var.set(None)
 
@@ -325,6 +369,18 @@ class OrchestrationService:
                 isolated.close()
         self._record_event(db, run_id, "run_failed", stage, "error", message)
         persist_run_truth(db, run_id)
+        self._finalize_terminal_state(db, run_id)
+
+    def _finalize_if_left_running(self, db: Session, run_id: str) -> None:
+        run = db.get(RunModel, run_id)
+        if not run or run.status != RunStatus.RUNNING.value:
+            return
+        self._mark_run_failed(
+            db,
+            run_id,
+            run.current_stage or "",
+            "Run worker exited before reaching a terminal state",
+        )
 
     def _clarification_probe_text(self, run: RunModel, task_description: str) -> str:
         parts = [task_description or "", run.operator_feedback or ""]
@@ -383,6 +439,44 @@ class OrchestrationService:
                 "clarification_pending": True,
             },
         )
+
+    def _auto_assume_clarifications_enabled(self, db: Session) -> bool:
+        return bool(ConfigService(db).get_all().get("auto_assume_clarifications", False))
+
+    def _apply_clarification_assumption(
+        self,
+        db: Session,
+        run_id: str,
+        *,
+        gate_id: str,
+        assumption: str,
+    ) -> bool:
+        run = db.get(RunModel, run_id)
+        if not run:
+            return False
+        prior = dict(run.clarification_context or {})
+        resolved = list(prior.get("resolved_gates") or [])
+        if gate_id not in resolved:
+            resolved.append(gate_id)
+        prior["resolved_gates"] = resolved
+        prior["answer"] = assumption
+        prior.pop("pending_gate", None)
+        run.clarification_context_json = json.dumps(prior)
+        run.status = RunStatus.RUNNING.value
+        run.clarification_question = None
+        run.clarification_stage = None
+        db.commit()
+        self._record_event(
+            db,
+            run_id,
+            "clarification_auto_assumed",
+            run.current_stage or "",
+            "info",
+            f"Auto-applied assumption for gate {gate_id}",
+            {"gate_id": gate_id, "assumption": assumption},
+        )
+        self._emit(run_id, "clarification_auto_assumed", run.current_stage or "", assumption, {"gate_id": gate_id})
+        return True
 
     def _needs_clarification(
         self, run: RunModel, task_description: str, stage: str
@@ -578,6 +672,19 @@ class OrchestrationService:
         self._emit(run_id, "repo_preflight_failed", "planner", message)
         return False
 
+    def _workflow_context(
+        self, db: Session, run_id: str, run: RunModel, snapshot: ReconSnapshot
+    ) -> WorkflowContext:
+        task = run.task
+        description = task.description if task else ""
+        return WorkflowContext(
+            task_kind=run.task_kind or "implementation",
+            repo_mode=snapshot.repo_mode,
+            deliverable_kind=run.deliverable_kind,
+            description=description,
+            has_app_design=bool(self._latest_artifact(db, run_id, "app_design")),
+        )
+
     def _capture_baseline(
         self,
         db: Session,
@@ -606,35 +713,87 @@ class OrchestrationService:
     ) -> list[tuple[PipelineStage, Callable[[str], object]]]:
         workspace = Path(run.workspace_path or "")
         source = Path(ProjectService(db).get(run.project_id).source_repo_spec)
-        is_setup = run.task_kind == "setup"
-        stages: list[tuple[PipelineStage, Callable[[str], object]]] = []
-        if (
-            not is_setup
-            and snapshot.repo_mode == RepoMode.GREENFIELD.value
-            and not self._latest_artifact(db, run_id, "app_design")
-        ):
-            stages.append(
-                (PipelineStage.APP_DESIGNER, lambda ctx: self._stage_app_designer(db, run_id, ctx))
-            )
-        stages.extend(
-            [
-                (PipelineStage.PLANNER, lambda ctx: self._stage_planner(db, run_id, ctx, fs)),
-                (PipelineStage.ARCHITECT, lambda ctx: self._stage_architect(db, run_id, ctx)),
-            ]
+        wf = self._workflow_context(db, run_id, run, snapshot)
+        ctx = RunContext(
+            db=db,
+            run_id=run_id,
+            run=run,
+            snapshot=snapshot,
+            fs=fs,
+            workspace_path=str(workspace),
+            source_path=str(source),
         )
-        if is_setup:
-            stages.append((PipelineStage.CODER, lambda ctx: self._stage_coder(db, run_id, ctx, fs)))
-            return stages
-        stages.extend(
-            [
-                (PipelineStage.UI_DESIGNER, lambda ctx: self._stage_ui(db, run_id, ctx)),
-                (PipelineStage.CODER, lambda ctx: self._stage_coder(db, run_id, ctx, fs)),
-                (PipelineStage.REVIEWER, lambda ctx: self._stage_reviewer_loop(db, run_id, ctx, fs, workspace, source)),
-                (PipelineStage.TESTER, lambda ctx: self._stage_tester(db, run_id, ctx, workspace)),
-                (PipelineStage.DOCUMENTATION, lambda ctx: self._stage_documentation(db, run_id, ctx, fs)),
-            ]
+        return build_pipeline_stages(self, ctx)
+
+    def _block_stage_gate(
+        self,
+        db: Session,
+        run_id: str,
+        *,
+        stage: str,
+        missing: list[str],
+    ) -> None:
+        run = db.get(RunModel, run_id)
+        if not run:
+            return
+        message = f"Stage gate failed: missing artifact(s): {', '.join(missing)}"
+        run.status = RunStatus.BLOCKED.value
+        run.error_message = message
+        db.commit()
+        payload = {"missing_artifacts": missing, "stage": stage}
+        self._record_event(db, run_id, "stage_gate_failed", stage, "error", message, payload)
+        self._emit(run_id, "stage_gate_failed", stage, message, payload)
+        self._emit(run_id, "run_blocked", stage, message, payload)
+
+    def _validate_debug_planner_output(self, db: Session, run_id: str, stage: str) -> bool:
+        plan = self._latest_artifact(db, run_id, "plan") or {}
+        hypothesis = str(plan.get("hypothesis") or "").strip()
+        raw_repro = plan.get("repro_steps")
+        if isinstance(raw_repro, str):
+            repro = [raw_repro.strip()] if raw_repro.strip() else []
+        else:
+            repro = [str(step).strip() for step in (raw_repro or []) if str(step).strip()]
+        if hypothesis and repro:
+            return True
+        missing = []
+        if not hypothesis:
+            missing.append("hypothesis")
+        if not repro:
+            missing.append("repro_steps")
+        self._block_stage_gate(db, run_id, stage=stage, missing=missing)
+        return False
+
+    def _stage_playbook_supervisor(self, db: Session, run_id: str, context: str) -> bool:
+        provider = ProviderRegistry.get().resolve_stage(PipelineStage.SUPERVISOR)
+        self._log_provider(db, run_id, "playbook_supervisor", provider)
+        agent = PlaybookSupervisorAgent(provider)
+        output = agent.supervise_playbook(context)
+        self._record_stage_output(output)
+        payload = output.model_dump()
+        self._save_artifact(db, run_id, "playbook_supervisor", payload)
+        if output.approved:
+            persist_run_truth(db, run_id)
+            return True
+        run = db.get(RunModel, run_id)
+        if not run:
+            return False
+        summary = output.summary or "Playbook supervisor rejected the procedure"
+        run.status = RunStatus.BLOCKED.value
+        run.error_message = summary
+        db.commit()
+        self._record_event(
+            db,
+            run_id,
+            "playbook_supervisor_rejected",
+            PipelineStage.PLAYBOOK_SUPERVISOR.value,
+            "error",
+            summary,
+            payload,
         )
-        return stages
+        self._emit(run_id, "playbook_supervisor_rejected", PipelineStage.PLAYBOOK_SUPERVISOR.value, summary, payload)
+        self._emit(run_id, "run_blocked", PipelineStage.PLAYBOOK_SUPERVISOR.value, summary, payload)
+        persist_run_truth(db, run_id)
+        return False
 
     def _verify_dependencies(self, db: Session, run_id: str, workspace: Path, source: Path) -> bool:
         architect = self._latest_artifact(db, run_id, "architect") or {}
@@ -679,6 +838,26 @@ class OrchestrationService:
         RunThreadService(db).ensure_session(run_id, run.chat_session_id)
         use_scout = bool(getattr(task, "use_scout", False))
         snapshot = self._prepare_recon(db, run, project, task, source)
+        try:
+            validate_run_workspace(
+                workspace,
+                source_repo=source,
+                repo_mode=snapshot.repo_mode,
+                task_kind=run.task_kind,
+            )
+        except ValidationError as exc:
+            self._mark_run_failed(db, run_id, run.current_stage or PipelineStage.PLANNER.value, str(exc))
+            self._record_event(
+                db,
+                run_id,
+                f"{run.current_stage or PipelineStage.PLANNER.value}_failed",
+                run.current_stage or PipelineStage.PLANNER.value,
+                "error",
+                str(exc),
+            )
+            self._emit(run_id, "run_failed", run.current_stage or PipelineStage.PLANNER.value, str(exc))
+            self._finalize_terminal_state(db, run_id)
+            return
         if not self._run_preflight(
             db,
             run_id,
@@ -704,6 +883,8 @@ class OrchestrationService:
         ConfigService(db).reload_registry()
 
         stages = self._pipeline_stages(db, run_id, run, snapshot, fs)
+        wf_ctx = self._workflow_context(db, run_id, run, snapshot)
+        self._workflow_stage_specs = {spec.stage.value: spec for spec in workflow_stage_specs(wf_ctx)}
 
         start_index = 0
         if run.status == RunStatus.RUNNING.value and run.current_stage:
@@ -718,25 +899,62 @@ class OrchestrationService:
             if not run:
                 self._finalize_terminal_state(db, run_id)
                 return
+            stage_spec = self._workflow_stage_specs.get(stage.value)
+            if stage_spec:
+                gate_reason = check_stage_gate(
+                    db,
+                    run_id,
+                    run,
+                    stage_spec,
+                    latest_artifact=self._latest_artifact,
+                    workflow_ctx=wf_ctx,
+                )
+                if gate_reason:
+                    run = db.get(RunModel, run_id)
+                    if run:
+                        run.status = RunStatus.BLOCKED.value
+                        run.error_message = gate_reason
+                        db.commit()
+                    self._record_event(
+                        db,
+                        run_id,
+                        "stage_gate_failed",
+                        stage.value,
+                        "error",
+                        gate_reason,
+                        {"why_blocked": gate_reason},
+                    )
+                    self._emit(run_id, "stage_gate_failed", stage.value, gate_reason, {"why_blocked": gate_reason})
+                    self._finalize_terminal_state(db, run_id)
+                    return
             proactive = self._needs_clarification(run, task.description, stage.value)
             if proactive:
                 question, recommendation, gate_id = proactive
-                self._request_clarification(
-                    db,
-                    run_id,
-                    stage=stage.value,
-                    question=question,
-                    recommended_assumption=recommendation,
-                    gate_id=gate_id,
-                )
-                return
+                if self._auto_assume_clarifications_enabled(db):
+                    self._apply_clarification_assumption(
+                        db, run_id, gate_id=gate_id, assumption=recommendation
+                    )
+                else:
+                    self._request_clarification(
+                        db,
+                        run_id,
+                        stage=stage.value,
+                        question=question,
+                        recommended_assumption=recommendation,
+                        gate_id=gate_id,
+                    )
+                    return
             run.current_stage = stage.value
             db.commit()
             self._record_event(db, run_id, f"{stage.value}_started", stage.value, "info", f"{stage.value} started")
             self._emit(run_id, f"{stage.value}_started", stage.value, f"{stage.value} started")
             try:
                 stage_context = self._stage_context(db, run, stage.value, context_base)
-                result = fn(stage_context)
+                result = self._run_with_stage_heartbeat(
+                    run_id,
+                    stage.value,
+                    lambda: fn(stage_context),
+                )
                 if result is False:
                     run = db.get(RunModel, run_id)
                     if run and run.status in {
@@ -752,25 +970,34 @@ class OrchestrationService:
                     if open_q:
                         self._request_design_review(db, run_id, stage=stage.value, questions=open_q)
                         return
-                if stage == PipelineStage.ARCHITECT and not self._verify_dependencies(
-                    db, run_id, workspace, source
-                ):
-                    self._finalize_terminal_state(db, run_id)
-                    return
                 agent_clarification = self._evaluate_agent_clarification_from_output(
                     stage.value, getattr(self, "_last_stage_output", None)
                 )
                 if agent_clarification:
                     question, recommendation, gate_id = agent_clarification
-                    self._request_clarification(
-                        db,
-                        run_id,
-                        stage=stage.value,
-                        question=question,
-                        recommended_assumption=recommendation,
-                        gate_id=gate_id,
-                    )
+                    if self._auto_assume_clarifications_enabled(db):
+                        self._apply_clarification_assumption(
+                            db, run_id, gate_id=gate_id, assumption=recommendation
+                        )
+                    else:
+                        self._request_clarification(
+                            db,
+                            run_id,
+                            stage=stage.value,
+                            question=question,
+                            recommended_assumption=recommendation,
+                            gate_id=gate_id,
+                        )
+                        return
+                if stage == PipelineStage.ARCHITECT and not self._verify_dependencies(
+                    db, run_id, workspace, source
+                ):
+                    self._finalize_terminal_state(db, run_id)
                     return
+                if stage == PipelineStage.PLANNER and (run.task_kind or "") == "debug":
+                    if not self._validate_debug_planner_output(db, run_id, stage.value):
+                        self._finalize_terminal_state(db, run_id)
+                        return
             except Exception as exc:
                 db.rollback()
                 self._mark_run_failed(db, run_id, stage.value, str(exc))
@@ -789,6 +1016,34 @@ class OrchestrationService:
             self._finalize_terminal_state(db, run_id)
             return
         if run.status == RunStatus.RUNNING.value:
+            if skips_deployment_gates(run.task_kind):
+                run.status = RunStatus.AWAITING_APPROVAL.value
+                run.operator_feedback = None
+                db.commit()
+                approval_payload = {
+                    "status": RunStatus.AWAITING_APPROVAL.value,
+                    "outcome_class": outcome_class_for_awaiting_approval(db, run_id),
+                    "playbook_only": True,
+                }
+                self._record_event(
+                    db,
+                    run_id,
+                    "awaiting_approval",
+                    run.current_stage or "",
+                    "info",
+                    "Playbook run awaiting approval",
+                    approval_payload,
+                )
+                self._emit(
+                    run_id,
+                    "awaiting_approval",
+                    "",
+                    "Playbook run awaiting approval",
+                    approval_payload,
+                )
+                persist_run_truth(db, run_id)
+                self._finalize_terminal_state(db, run_id)
+                return
             if not self._finalize_deployment_gates(db, run_id, workspace, source):
                 self._finalize_terminal_state(db, run_id)
                 return
@@ -1062,6 +1317,61 @@ class OrchestrationService:
         }:
             LearningService(db).finalize_terminal_run(run_id)
 
+    def _latest_event_timestamp(self, db: Session, run_id: str) -> datetime | None:
+        event = (
+            db.query(RunEventModel)
+            .filter(RunEventModel.run_id == run_id)
+            .order_by(RunEventModel.created_at.desc())
+            .first()
+        )
+        return event.created_at if event else None
+
+    def _inflight_stale_reason(self, db: Session, run: RunModel) -> str | None:
+        if run.status not in {RunStatus.RUNNING.value, RunStatus.PENDING.value}:
+            return None
+        latest_event_at = self._latest_event_timestamp(db, run.id)
+        if run.status == RunStatus.PENDING.value:
+            return None
+        reference = latest_event_at or run.updated_at or run.created_at
+        if not reference:
+            return None
+        now = datetime.now(UTC)
+        if now - reference <= _STALE_INFLIGHT_TIMEOUT:
+            return None
+        stage = run.current_stage or "unknown"
+        return f"Run stalled in {stage}: no progress recorded for more than {_STALE_INFLIGHT_TIMEOUT.total_seconds() // 60:.0f} minutes"
+
+    def _finalize_stale_inflight_run(self, db: Session, run: RunModel) -> bool:
+        reason = self._inflight_stale_reason(db, run)
+        if not reason:
+            return False
+        run_id = run.id
+        stage = run.current_stage or ""
+        run.failure_class = "worker_stalled"
+        run.failure_subclass = "stale_inflight"
+        run.failure_signature = f"worker_stalled:{run.current_stage or 'unknown'}:{run_id}"
+        run.recovery_status = "none"
+        db.commit()
+        self._mark_run_failed(db, run_id, stage, reason)
+        self._record_event(
+            db,
+            run_id,
+            "run_stalled",
+            stage,
+            "error",
+            reason,
+            {"stale_timeout_seconds": int(_STALE_INFLIGHT_TIMEOUT.total_seconds())},
+        )
+        self._emit(
+            run_id,
+            "run_stalled",
+            stage,
+            reason,
+            {"stale_timeout_seconds": int(_STALE_INFLIGHT_TIMEOUT.total_seconds())},
+            severity="error",
+        )
+        return True
+
     def _write_change_request_doc(
         self,
         db: Session,
@@ -1230,6 +1540,14 @@ class OrchestrationService:
                     str(exc),
                     {"attempt": attempt},
                 )
+                self._emit(
+                    run_id,
+                    "architect_schema_rejected",
+                    "architect",
+                    str(exc),
+                    {"attempt": attempt},
+                    severity="warning",
+                )
                 if attempt >= max_attempts:
                     raise
                 attempt_context = "\n".join(
@@ -1363,6 +1681,14 @@ class OrchestrationService:
                     str(exc),
                     {"attempt": attempt},
                 )
+                self._emit(
+                    run_id,
+                    "coder_schema_rejected",
+                    "coder",
+                    str(exc),
+                    {"attempt": attempt},
+                    severity="warning",
+                )
                 if attempt >= max_attempts:
                     raise
                 attempt_context = "\n".join(
@@ -1380,6 +1706,7 @@ class OrchestrationService:
                 fc if isinstance(fc, dict) else fc.model_dump() for fc in output.file_changes
             ]
             try:
+                self._validate_setup_coder_scope(run, fs.workspace, changes, blueprint_paths)
                 applied = fs.apply_coder_changes(changes)
                 self._run_frontend_patch_check(fs.workspace, applied)
                 applied_paths = [str(c.get("path") or "") for c in applied if c.get("path")]
@@ -1422,7 +1749,11 @@ class OrchestrationService:
                         else (
                             "Fix TypeScript errors with surgical line_changes; preserve unrelated imports and exports."
                             if is_frontend_tsc
-                            else "Revise using line_changes only; preserve imports, exports, props, and helper functions."
+                            else (
+                                "Stay within architect blueprint paths for setup runs. Revise using line_changes only; preserve imports, exports, props, and helper functions."
+                                if run and run.task_kind == "setup"
+                                else "Revise using line_changes only; preserve imports, exports, props, and helper functions."
+                            )
                         )
                     ),
                     target_stages=target_stages,
@@ -1446,6 +1777,7 @@ class OrchestrationService:
                         "Deterministic patch guard rejected the previous attempt:",
                         exc_text,
                         "",
+                        "For setup runs, only patch architect blueprint files or existing change-request companion files.",
                         "Revise the patch using line_changes only for existing source files. Preserve all unrelated imports, exports, props, interfaces, and helper functions.",
                         "Place imports only in the import block at the top of the file. Place JSX only inside the existing render tree.",
                         "",
@@ -1792,6 +2124,7 @@ class OrchestrationService:
         fs: FileService,
         source_root: Path,
     ) -> str:
+        run = db.get(RunModel, run_id)
         plan = self._latest_artifact(db, run_id, "plan") or {}
         architect = self._latest_artifact(db, run_id, "architect") or {}
         protected_files = self._protected_files_for_run(db, run_id)
@@ -1802,6 +2135,15 @@ class OrchestrationService:
             sections.extend(["", "Acceptance criteria checklist:", *criteria_lines])
         if blueprint_paths:
             sections.extend(["", "Architect blueprint paths:", "\n".join(f"- {path}" for path in blueprint_paths)])
+            if run and run.task_kind == "setup":
+                sections.extend(
+                    [
+                        "",
+                        "Setup run scope rule:",
+                        "Only patch architect blueprint paths or an existing docs/change-requests companion file created by planner.",
+                        "Never patch dependency directories such as node_modules during setup.",
+                    ]
+                )
         ui_design = self._latest_artifact(db, run_id, "ui_design")
         if ui_design:
             sections.extend(
@@ -1869,8 +2211,49 @@ class OrchestrationService:
             )
         return "\n".join(sections)
 
+    def _is_dependency_path(self, rel_path: str) -> bool:
+        normalized = str(rel_path or "").strip().replace("\\", "/")
+        if not normalized:
+            return False
+        parts = tuple(part for part in normalized.split("/") if part)
+        return "node_modules" in parts or normalized.startswith(".venv/") or normalized == ".venv"
+
+    def _is_allowed_setup_companion_path(self, workspace: Path, rel_path: str) -> bool:
+        normalized = str(rel_path or "").strip().replace("\\", "/")
+        if not normalized:
+            return False
+        if any(normalized.startswith(prefix) for prefix in _ALLOWED_SETUP_COMPANION_PREFIXES):
+            return (workspace / normalized).exists()
+        return False
+
+    def _validate_setup_coder_scope(
+        self,
+        run: RunModel | None,
+        workspace: Path,
+        changes: list[dict],
+        blueprint_paths: list[str],
+    ) -> None:
+        if not run or run.task_kind != "setup":
+            return
+        allowed = {path.replace("\\", "/") for path in blueprint_paths if path}
+        for change in changes:
+            rel_path = str(change.get("path") or "").strip().replace("\\", "/")
+            if not rel_path:
+                continue
+            if self._is_dependency_path(rel_path):
+                raise PatchGuardError(rel_path, "Coder output targeted dependency path during setup")
+            if rel_path in allowed:
+                continue
+            if self._is_allowed_setup_companion_path(workspace, rel_path):
+                continue
+            raise PatchGuardError(rel_path, "Coder output targeted non-blueprint path during setup")
+
     def _run_frontend_patch_check(self, workspace: Path, changed_files: list[dict]) -> None:
-        if not any(is_frontend_code_path(str(change.get("path") or "")) for change in changed_files):
+        if not any(
+            is_frontend_code_path(str(change.get("path") or ""))
+            and not self._is_dependency_path(str(change.get("path") or ""))
+            for change in changed_files
+        ):
             return
         frontend_dir = workspace / "frontend"
         node_modules = frontend_dir / "node_modules"
@@ -2324,6 +2707,10 @@ class OrchestrationService:
                         for issue in deterministic_issues
                     )
                 )
+            review_context = (
+                f"{review_context}\n\nTwo-stage review (Hermes-style): first verify spec/acceptance "
+                "criteria compliance, then code quality. Approve only if both pass."
+            )
             output = agent.review(review_context)
             self._record_stage_output(output)
             review_payload = output.model_dump()
@@ -2543,6 +2930,13 @@ class OrchestrationService:
                 if required:
                     executed += 1
                     all_passed = all_passed and passed
+                result_payload = {
+                    "stdout": stdout[:2000],
+                    "stderr": stderr[:2000],
+                    "required": required,
+                    "command": command,
+                    "exit_code": code,
+                }
                 self._record_event(
                     db,
                     run_id,
@@ -2550,8 +2944,34 @@ class OrchestrationService:
                     "tester",
                     "info" if passed else "error",
                     f"exit={code}",
-                    {"stdout": stdout[:2000], "stderr": stderr[:2000], "required": required},
+                    result_payload,
                 )
+                self._emit(
+                    run_id,
+                    result_event,
+                    "tester",
+                    f"exit={code}",
+                    result_payload,
+                    severity="info" if passed else "error",
+                )
+                if event_prefix == "validation":
+                    if passed:
+                        self._emit(
+                            run_id,
+                            "validation_passed",
+                            "tester",
+                            f"exit={code}",
+                            result_payload,
+                        )
+                    elif required:
+                        self._emit(
+                            run_id,
+                            "validation_rejected",
+                            "tester",
+                            f"exit={code}",
+                            result_payload,
+                            severity="error",
+                        )
             except Exception as exc:
                 if required:
                     all_passed = False
@@ -2563,6 +2983,14 @@ class OrchestrationService:
                     "error",
                     str(exc),
                     {"required": required},
+                )
+                self._emit(
+                    run_id,
+                    rejected_event,
+                    "tester",
+                    str(exc),
+                    {"required": required},
+                    severity="error",
                 )
         if required and executed == 0:
             return False
@@ -2594,6 +3022,14 @@ class OrchestrationService:
                 "error",
                 "Blueprint tests failed for no-change coder run",
                 {"test_paths": test_paths},
+            )
+            self._emit(
+                run_id,
+                "validation_rejected",
+                "tester",
+                "Blueprint tests failed for no-change coder run",
+                {"test_paths": test_paths},
+                severity="error",
             )
             self._emit(run_id, "run_blocked", "tester", "Blueprint tests failed for no-change coder run")
             return False
@@ -2825,6 +3261,13 @@ class OrchestrationService:
                 "error",
                 "No required validation commands could be executed",
             )
+            self._emit(
+                run_id,
+                "validation_rejected",
+                "tester",
+                "No required validation commands could be executed",
+                severity="error",
+            )
 
         if not required_passed:
             run = db.get(RunModel, run_id)
@@ -2938,12 +3381,18 @@ def claim_run(db: Session, run_id: str) -> bool:
 
 
 def resume_inflight_runs(db: Session, limit: int | None = None) -> list[str]:
+    service = OrchestrationService()
     runs = list(
         db.query(RunModel)
         .filter(RunModel.status.in_([RunStatus.RUNNING.value, RunStatus.PENDING.value]))
         .all()
     )
-    runs.sort(
+    active_runs: list[RunModel] = []
+    for run in runs:
+        if service._finalize_stale_inflight_run(db, run):
+            continue
+        active_runs.append(run)
+    active_runs.sort(
         key=lambda run: (
             _RESUME_STAGE_PRIORITY.get(str(run.current_stage or ""), 0),
             run.updated_at,
@@ -2952,7 +3401,7 @@ def resume_inflight_runs(db: Session, limit: int | None = None) -> list[str]:
         reverse=True,
     )
     resumed_ids: list[str] = []
-    selected = runs if limit is None else runs[: max(0, int(limit))]
+    selected = active_runs if limit is None else active_runs[: max(0, int(limit))]
     for run in selected:
         run_engine.enqueue(run.id)
         resumed_ids.append(run.id)

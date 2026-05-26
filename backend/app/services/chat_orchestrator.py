@@ -26,13 +26,16 @@ from app.services.chat_optimization import (
     effective_max_output_tokens,
     format_runtime_settings_answer,
     is_runtime_settings_question,
+    should_force_web_search_tool,
     should_offer_tools,
+    web_search_tool_choice,
 )
 from app.services.chat_service import ChatService
 from app.services.config_service import ConfigService
 from app.services.project_service import ProjectService
 from app.services.run_engine.event_bus import event_bus
 from app.services.token_estimator import fit_messages_to_token_budget
+from app.services.web_search_service import WebSearchError, WebSearchService
 from app.tools.chat_tools import ToolExecutionContext
 from app.tools.tool_registry import ToolRegistry
 
@@ -129,6 +132,7 @@ class ChatOrchestrator:
             git_branch = None
         mode = self._mode_registry_for(db).get_mode(session.mode)
         registry = ProviderRegistry.get()
+        registry.reload(config)
         provider = registry.resolve_chat_provider(mode.key, session.model_override)
         provider_name = "Ollama" if registry.active_provider() == "ollama" else "LM Studio"
         resolved_model = str(getattr(provider, "model", "") or "auto")
@@ -195,7 +199,19 @@ class ChatOrchestrator:
             context={**context, "git_branch": git_branch},
             provider_runtime=provider_runtime,
             use_nothink=use_nothink,
+            allow_web_search=bool(session.allow_web_search),
         )
+        force_web_search = should_force_web_search_tool(
+            user_text,
+            allow_web_search=bool(session.allow_web_search),
+            has_web_search_tool="web_search" in available_tools,
+            tool_round_index=0,
+        )
+        web_search_prefetched = False
+        if force_web_search:
+            messages = self._condense_messages_for_web_search(messages)
+            messages, web_search_prefetched = self._inject_web_search_prefetch(messages, user_text)
+            event_bus.emit_chat(session_id, {"type": "status", "message": "Searching the web…"})
         model_name = str(getattr(provider, "model", "") or "")
         messages, prompt_tokens, dropped_messages = fit_messages_to_token_budget(
             messages,
@@ -218,7 +234,8 @@ class ChatOrchestrator:
 
         event_bus.emit_chat(session_id, {"type": "status", "message": "Thinking…"})
         turn_started = time.monotonic()
-        for _ in range(max(1, mode.max_tool_rounds)):
+        has_web_search_tool = "web_search" in available_tools
+        for tool_round_index in range(max(1, mode.max_tool_rounds)):
             if self._is_cancelled(session_id):
                 self._finalize_cancelled(
                     db,
@@ -228,14 +245,27 @@ class ChatOrchestrator:
                     turn_started=turn_started,
                 )
                 return
+            tool_choice = (
+                web_search_tool_choice()
+                if should_force_web_search_tool(
+                    user_text,
+                    allow_web_search=bool(session.allow_web_search),
+                    has_web_search_tool=has_web_search_tool,
+                    tool_round_index=tool_round_index,
+                )
+                and not web_search_prefetched
+                else None
+            )
+            schemas_for_call = self._tool_schemas_for_call(tool_schemas, tool_choice)
             try:
                 result = self._invoke_provider(
                     session_id,
                     provider,
                     messages,
-                    tool_schemas,
+                    schemas_for_call,
                     mode=session.mode,
                     max_output_tokens=max_output_tokens,
+                    tool_choice=tool_choice,
                 )
             except ChatCancelled as exc:
                 self._finalize_cancelled(
@@ -390,6 +420,58 @@ class ChatOrchestrator:
         return "\n\n".join(parts)
 
     @staticmethod
+    def _condense_messages_for_web_search(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop prior refusals so the model answers from prefetched web results."""
+        if not messages:
+            return messages
+        system = messages[0] if messages[0].get("role") == "system" else {"role": "system", "content": ""}
+        last_user = next((item for item in reversed(messages) if item.get("role") == "user"), None)
+        if last_user is not None:
+            return [system, last_user]
+        return [system]
+
+    @staticmethod
+    def _inject_web_search_prefetch(
+        messages: list[dict[str, Any]],
+        user_text: str,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        if not messages or messages[0].get("role") != "system":
+            return messages, False
+        try:
+            block = WebSearchService().build_context_block(user_text, limit=5)
+            prefetched = "no public web results were found" not in block.lower()
+        except (WebSearchError, Exception) as exc:
+            block = f"Web search was requested but failed: {exc}"
+            prefetched = False
+        follow_up = (
+            "\n\nUse the web search findings above to answer the user's question. "
+            "Do not claim you lack internet access or refuse to discuss the topic."
+        )
+        updated = list(messages)
+        updated[0] = {
+            **messages[0],
+            "content": f"{messages[0].get('content') or ''}\n\n{block}{follow_up}",
+        }
+        return updated, prefetched
+
+    @staticmethod
+    def _tool_schemas_for_call(
+        tool_schemas: list[dict[str, Any]],
+        tool_choice: dict[str, Any] | str | None,
+    ) -> list[dict[str, Any]]:
+        if not tool_choice or not isinstance(tool_choice, dict):
+            return tool_schemas
+        forced_name = str((tool_choice.get("function") or {}).get("name") or "")
+        if not forced_name:
+            return tool_schemas
+        narrowed = [
+            schema
+            for schema in tool_schemas
+            if str((schema.get("function") or {}).get("name") or "") == forced_name
+        ]
+        return narrowed or tool_schemas
+
+    @staticmethod
     def _resolve_use_nothink(session_nothink: bool | None, config: dict[str, Any]) -> bool:
         if session_nothink is not None:
             return bool(session_nothink)
@@ -420,6 +502,7 @@ class ChatOrchestrator:
         context: dict[str, Any],
         provider_runtime: dict[str, str] | None = None,
         use_nothink: bool = True,
+        allow_web_search: bool = False,
     ) -> list[dict[str, Any]]:
         system_context = {
             "workspace_path": project_path,
@@ -439,9 +522,18 @@ class ChatOrchestrator:
                 "Prefer the project's component/source files over editing raw HTML snippets. "
                 "Use browser_navigate / browser_snapshot / browser_click / browser_screenshot to verify UI behavior when helpful."
             )
-        system_content = f"{mode_prompt}{page_element_hint}\n\nCurrent context:\n{system_context_json}"
+        web_search_hint = ""
+        if allow_web_search:
+            web_search_hint = (
+                "\n\nWeb search is ENABLED for this chat session. "
+                "For news, current events, or any live external facts you MUST call the web_search tool first. "
+                "Do not claim you lack internet access or cite a training-data cutoff when web_search is available."
+            )
+        system_content = f"{mode_prompt}{page_element_hint}{web_search_hint}\n\nCurrent context:\n{system_context_json}"
         if use_nothink:
-            system_content = f"{mode_prompt}{page_element_hint}\n/nothink\n\nCurrent context:\n{system_context_json}"
+            system_content = (
+                f"{mode_prompt}{page_element_hint}{web_search_hint}\n/nothink\n\nCurrent context:\n{system_context_json}"
+            )
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",
@@ -514,6 +606,7 @@ class ChatOrchestrator:
         mode: str = "general",
         max_output_tokens: int = 4096,
         retried: bool = False,
+        tool_choice: dict[str, Any] | str | None = None,
     ) -> ChatCompletionResult:
         if self._is_cancelled(session_id):
             raise ChatCancelled()
@@ -526,6 +619,7 @@ class ChatOrchestrator:
                 messages,
                 tools=tool_schemas,
                 max_tokens=max_output_tokens,
+                tool_choice=tool_choice,
             ):
                 if self._is_cancelled(session_id):
                     raise ChatCancelled(accumulated)
@@ -538,6 +632,21 @@ class ChatOrchestrator:
                     finish_reason = chunk.finish_reason
             if self._is_cancelled(session_id):
                 raise ChatCancelled(accumulated)
+            if (
+                tool_choice
+                and not tool_calls
+                and accumulated.strip()
+                and tool_schemas
+            ):
+                retry_schemas = self._tool_schemas_for_call(tool_schemas, tool_choice)
+                retry = provider.invoke_chat(
+                    messages,
+                    tools=retry_schemas,
+                    max_tokens=max_output_tokens,
+                    tool_choice=tool_choice,
+                )
+                if retry.tool_calls:
+                    return retry
             return ChatCompletionResult(content=accumulated, tool_calls=tool_calls, finish_reason=finish_reason)
         except ChatCancelled:
             raise
@@ -563,6 +672,7 @@ class ChatOrchestrator:
                         mode=mode,
                         max_output_tokens=max_output_tokens,
                         retried=True,
+                        tool_choice=tool_choice,
                     )
             raise
         except ChatCancelled:
@@ -575,6 +685,7 @@ class ChatOrchestrator:
                     messages,
                     tools=tool_schemas,
                     max_tokens=max_output_tokens,
+                    tool_choice=tool_choice,
                 )
             except ProviderError as exc:
                 if not retried and self._is_memory_pressure_error(exc):
@@ -588,6 +699,7 @@ class ChatOrchestrator:
                             mode=mode,
                             max_output_tokens=max_output_tokens,
                             retried=True,
+                            tool_choice=tool_choice,
                         )
                 raise
             if self._is_cancelled(session_id):

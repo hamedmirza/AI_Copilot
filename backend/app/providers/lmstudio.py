@@ -191,12 +191,24 @@ class LMStudioProvider(BaseProvider):
             normalized.append(dict(message))
         return normalized
 
+    def _apply_tooling(
+        self,
+        payload: dict[str, Any],
+        tools: list[dict[str, Any]] | None,
+        tool_choice: dict[str, Any] | str | None = None,
+    ) -> None:
+        if not tools:
+            return
+        payload["tools"] = tools
+        payload["tool_choice"] = tool_choice if tool_choice is not None else "auto"
+
     def invoke_chat(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         stream: bool = False,
         max_tokens: int | None = None,
+        tool_choice: dict[str, Any] | str | None = None,
     ) -> ChatCompletionResult:
         model = (self.model or "").strip()
         if not model:
@@ -210,9 +222,7 @@ class LMStudioProvider(BaseProvider):
             "messages": self._normalize_messages_for_lmstudio(messages),
             "stream": False,
         }
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+        self._apply_tooling(payload, tools, tool_choice)
         self._apply_max_tokens(payload, max_tokens)
         try:
             data = self._post_chat_completion(url, payload)
@@ -255,6 +265,7 @@ class LMStudioProvider(BaseProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
+        tool_choice: dict[str, Any] | str | None = None,
     ):
         model = (self.model or "").strip()
         if not model:
@@ -269,9 +280,7 @@ class LMStudioProvider(BaseProvider):
             "messages": self._normalize_messages_for_lmstudio(messages),
             "stream": True,
         }
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+        self._apply_tooling(payload, tools, tool_choice)
         self._apply_max_tokens(payload, max_tokens)
         try:
             with self._client.stream(
@@ -297,7 +306,9 @@ class LMStudioProvider(BaseProvider):
                     "LM Studio streaming rejected native tool calling, falling back to JSON ReAct: %s",
                     self._http_error_message(exc),
                 )
-                yield from super().invoke_chat_stream(messages, tools=tools, max_tokens=max_tokens)
+                yield from super().invoke_chat_stream(
+                    messages, tools=tools, max_tokens=max_tokens, tool_choice=tool_choice
+                )
                 return
             raise ProviderError(self._provider_error_message(exc)) from exc
 

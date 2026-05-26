@@ -17,6 +17,8 @@ class PlannerOutput(BaseModel):
     clarification_needed: bool = False
     clarification_question: str | None = None
     change_request_slug: str | None = None
+    hypothesis: str | None = None
+    repro_steps: str | None = None
 
     @field_validator("steps")
     @classmethod

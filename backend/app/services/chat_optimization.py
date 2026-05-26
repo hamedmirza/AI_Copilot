@@ -4,6 +4,27 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
+_WEB_RESEARCH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:latest|current|recent|today'?s?|breaking)\b.{0,40}\b(?:news|headlines|updates?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:news|headlines|updates?)\b.{0,40}\b(?:about|on|in|from)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bwhat(?:'s| is)\b.{0,30}\b(?:happening|going on)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:search|look up|find)\b.{0,30}\b(?:online|on the web|the internet)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bweb\s*search\b", re.IGNORECASE),
+    re.compile(r"\bsearch\b.{0,24}\b(?:the\s+)?web\b", re.IGNORECASE),
+)
+
 _RUNTIME_SETTINGS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"\b(?:lm\s*studio|lmstudio)\b.{0,80}\b(?:ip|url|host|address|port|server|connect|endpoint)\b",
@@ -31,6 +52,17 @@ _RUNTIME_SETTINGS_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
     re.compile(r"\blm\s*studio\s+serve(?:r)?\s+ip\b", re.IGNORECASE),
 )
+
+
+def is_web_research_question(text: str) -> bool:
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return False
+    return any(pattern.search(normalized) for pattern in _WEB_RESEARCH_PATTERNS)
+
+
+def web_search_tool_choice() -> dict[str, Any]:
+    return {"type": "function", "function": {"name": "web_search"}}
 
 
 def is_runtime_settings_question(text: str) -> bool:
@@ -95,3 +127,17 @@ def should_offer_tools(
     if mode_key == "general" and is_runtime_settings_question(user_text):
         return False
     return True
+
+
+def should_force_web_search_tool(
+    user_text: str,
+    *,
+    allow_web_search: bool,
+    has_web_search_tool: bool,
+    tool_round_index: int,
+) -> bool:
+    if tool_round_index > 0:
+        return False
+    if not allow_web_search or not has_web_search_tool:
+        return False
+    return is_web_research_question(user_text)

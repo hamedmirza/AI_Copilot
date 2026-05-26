@@ -176,6 +176,8 @@ class RunResponse(BaseModel):
     clarification_question: str | None = None
     clarification_stage: str | None = None
     recommended_assumption: str | None = None
+    last_event_at: str | None = None
+    stale_running: bool | None = None
     created_at: str
     updated_at: str
 

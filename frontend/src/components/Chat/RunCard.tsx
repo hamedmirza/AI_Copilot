@@ -1,17 +1,15 @@
-import { RunStatusChip } from '@/components/AgentPanel/RunStatusChip'
+import { RunProgressCard } from '@/components/AgentPanel/RunProgressCard'
 import { useUIStore } from '@/store'
-import type { RunEvent } from '@/store'
 
 interface RunCardProps {
   runId: string
   displayName?: string | null
-  events: RunEvent[]
   status?: string
   onOpen?: () => void
 }
 
 /** Thin wrapper — run actions live in the Agents tab. */
-export function RunCard({ runId, displayName, events, status, onOpen }: RunCardProps) {
+export function RunCard({ runId, displayName, status, onOpen }: RunCardProps) {
   const requestOpenRunDrawer = useUIStore((s) => s.requestOpenRunDrawer)
   const setRightPanelTab = useUIStore((s) => s.setRightPanelTab)
 
@@ -21,11 +19,10 @@ export function RunCard({ runId, displayName, events, status, onOpen }: RunCardP
   })
 
   return (
-    <RunStatusChip
+    <RunProgressCard
       runId={runId}
       displayName={displayName}
       status={status}
-      events={events}
       showViewLink
       onOpen={handleOpen}
     />

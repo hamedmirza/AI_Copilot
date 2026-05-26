@@ -131,6 +131,7 @@ def test_duckduckgo_provider_uses_html_endpoint():
     captured: dict[str, str] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
         captured["url"] = str(request.url)
         html = """
         <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fgithub.com%2Fa">GitHub hit</a>
@@ -141,5 +142,26 @@ def test_duckduckgo_provider_uses_html_endpoint():
     client = httpx.Client(transport=httpx.MockTransport(handler))
     results = DuckDuckGoHtmlProvider().search(client, "python", limit=2)
     client.close()
+    assert captured["method"] == "POST"
     assert "html.duckduckgo.com" in captured["url"]
     assert results[0].url == "https://github.com/a"
+
+
+def test_duckduckgo_falls_back_to_get_when_post_returns_empty():
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        if request.method == "POST":
+            return httpx.Response(202, text="<html><body>challenge</body></html>")
+        html = """
+        <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com">Hit</a>
+        <a class="result__snippet">Snippet</a>
+        """
+        return httpx.Response(200, text=html)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    results = DuckDuckGoHtmlProvider().search(client, "fallback query", limit=2)
+    client.close()
+    assert calls == ["POST", "GET"]
+    assert results[0].url == "https://example.com"

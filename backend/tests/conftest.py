@@ -26,12 +26,52 @@ def _remove_test_db_files() -> None:
             candidate.unlink()
 
 
+def seed_pipeline_gate_artifacts(db, run_id: str) -> None:
+    """Minimal artifacts so stage-gate checks pass when stages are stubbed."""
+    import json
+
+    from app.db.models import ArtifactModel
+
+    payloads = {
+        "plan": {
+            "summary": "test",
+            "steps": [
+                {
+                    "step_id": "1",
+                    "title": "Step",
+                    "description": "Work",
+                    "acceptance_criteria": ["done"],
+                }
+            ],
+            "risks": [],
+        },
+        "architect": {
+            "overview": "test",
+            "modules": [],
+            "file_changes": [{"path": "app.py", "action": "modify", "rationale": "test"}],
+            "dependencies": [],
+        },
+        "coder": {"summary": "test", "file_changes": []},
+    }
+    for artifact_type, content in payloads.items():
+        db.add(
+            ArtifactModel(
+                run_id=run_id,
+                artifact_type=artifact_type,
+                content_json=json.dumps(content),
+            )
+        )
+    db.commit()
+
+
 @pytest.fixture(autouse=True)
 def _reset_backend_state():
     chat_orchestrator.wait_for_idle()
     run_engine.wait_for_idle()
     close_all_sessions()
-    reconfigure_engine("sqlite:///:memory:")
+    from app.db.session import engine as db_engine
+
+    db_engine.dispose()
     _remove_test_db_files()
     reconfigure_engine(TEST_DB_URL)
     run_migrations()
@@ -42,14 +82,17 @@ def _reset_backend_state():
         db.close()
     yield
     chat_orchestrator.wait_for_idle()
-    run_engine.wait_for_idle()
+    run_engine.wait_for_idle(timeout=30)
     registry = ProviderRegistry.get()
     registry.fake_provider = None
     registry.reload({})
     close_all_sessions()
-    reconfigure_engine("sqlite:///:memory:")
+    from app.db.session import engine as db_engine
+
+    db_engine.dispose()
     _remove_test_db_files()
     reconfigure_engine(TEST_DB_URL)
+    run_migrations()
 
 
 @pytest.fixture()

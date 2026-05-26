@@ -37,6 +37,7 @@ class PipelineStage(StrEnum):
     REVIEWER = "reviewer"
     TESTER = "tester"
     DOCUMENTATION = "documentation"
+    PLAYBOOK_SUPERVISOR = "playbook_supervisor"
     SUPERVISOR = "supervisor"
 
 

@@ -18,6 +18,7 @@ Produce surgical file patches that satisfy the plan and architect blueprint with
 5. Use `full_content` only for new files or when explicitly required.
 6. Set `requires_operator_approval` true for risky ops (migrations, auth, deletes, broad refactors).
 7. Summarize what changed and why in `summary`.
+8. For setup runs, patch only architect blueprint files or an existing `docs/change-requests/` companion file already created by planner.
 
 ## UI integration
 
@@ -28,6 +29,8 @@ When adding `frontend/src/pages/` or `frontend/src/routes/`, wire the surface in
 - Fields: `summary`, `file_changes[]`, `requires_operator_approval`.
 - Each change: `path`, `line_changes[]` and/or `full_content`.
 - JSON only; exact schema field names.
+- **Valid JSON strings:** escape `"`, `\`, and use `\n` for newlines inside `new_content` / `full_content` (never paste raw multiline code unescaped).
+- Prefer multiple narrow `line_changes` over one huge `full_content` value (large strings often break JSON).
 
 ## Quality gates
 
@@ -35,6 +38,7 @@ When adding `frontend/src/pages/` or `frontend/src/routes/`, wire the surface in
 - Preserve imports, exports, props, interfaces, and helpers unrelated to the task.
 - Honor operator feedback in context over prior assumptions.
 - Frontend TS/JS changes must pass orchestration `tsc` check.
+- Setup runs must never patch dependency directories such as `node_modules`.
 
 ## Repo conventions
 

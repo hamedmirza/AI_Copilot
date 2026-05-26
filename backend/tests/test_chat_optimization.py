@@ -4,6 +4,8 @@ from app.services.chat_optimization import (
     effective_max_output_tokens,
     format_runtime_settings_answer,
     is_runtime_settings_question,
+    is_web_research_question,
+    should_force_web_search_tool,
     should_offer_tools,
 )
 
@@ -31,6 +33,33 @@ def test_format_runtime_settings_answer_lmstudio():
 def test_should_offer_tools_skips_for_runtime_question_in_general():
     assert should_offer_tools("general", "LM studio IP?", read_only=True) is False
     assert should_offer_tools("general", "explain chat_orchestrator.py", read_only=True) is True
+
+
+def test_is_web_research_question_detects_news_queries():
+    assert is_web_research_question("what is latest news about Iran?")
+    assert is_web_research_question("search the web for python 3.13 release")
+    assert not is_web_research_question("refactor chat_orchestrator.py")
+
+
+def test_should_force_web_search_tool_only_on_first_round():
+    assert should_force_web_search_tool(
+        "latest news about Iran",
+        allow_web_search=True,
+        has_web_search_tool=True,
+        tool_round_index=0,
+    )
+    assert not should_force_web_search_tool(
+        "latest news about Iran",
+        allow_web_search=True,
+        has_web_search_tool=True,
+        tool_round_index=1,
+    )
+    assert not should_force_web_search_tool(
+        "latest news about Iran",
+        allow_web_search=False,
+        has_web_search_tool=True,
+        tool_round_index=0,
+    )
 
 
 def test_effective_max_output_tokens_caps_general_and_runtime():

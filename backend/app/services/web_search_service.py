@@ -128,7 +128,7 @@ class WebSearchService:
     def search_payload(self, query: str, *, limit: int = 5) -> dict[str, object]:
         normalized = " ".join(str(query or "").split())
         results = self.search(query, limit=limit)
-        return {
+        payload: dict[str, object] = {
             "query": normalized,
             "providers": list(self.provider_names),
             "results": [
@@ -141,6 +141,12 @@ class WebSearchService:
                 for item in results
             ],
         }
+        if not results:
+            payload["notice"] = (
+                "No public web results were returned. The query may have been blocked by a provider, "
+                "or optional providers (Google CSE, GitHub token) may be unconfigured."
+            )
+        return payload
 
 
 _WEB_SEARCH_HINTS: Final[tuple[str, ...]] = (

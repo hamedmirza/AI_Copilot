@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import re
+import xml.etree.ElementTree as ET
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Final
@@ -9,8 +10,17 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 
 import httpx
 
-_USER_AGENT: Final[str] = "AI-Copilot/0.1 (+https://localhost)"
+_USER_AGENT: Final[str] = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
+_DDG_HEADERS: Final[dict[str, str]] = {
+    "User-Agent": _USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 _DDG_SEARCH_URL: Final[str] = "https://html.duckduckgo.com/html/"
+_GOOGLE_NEWS_RSS_URL: Final[str] = "https://news.google.com/rss/search"
 _GITHUB_SEARCH_URL: Final[str] = "https://api.github.com/search/code"
 _GOOGLE_CSE_URL: Final[str] = "https://www.googleapis.com/customsearch/v1"
 _MAX_SNIPPET_LENGTH: Final[int] = 280
@@ -210,14 +220,89 @@ def _search_duckduckgo_html(
     limit: int,
     provider: str,
 ) -> list[WebSearchResult]:
-    response = client.get(
-        f"{_DDG_SEARCH_URL}?q={quote_plus(query)}",
-        headers={"User-Agent": _USER_AGENT},
-        timeout=client.timeout,
-        follow_redirects=True,
-    )
-    response.raise_for_status()
-    return _parse_duckduckgo_html(response.text, limit=limit, provider=provider)
+    """DuckDuckGo HTML search.
+
+    Many queries (news, geopolitics, etc.) return HTTP 202 with no result markup on GET
+    but succeed with POST form submission. Try POST first, then GET.
+    """
+    request_timeout = client.timeout
+    for method in ("post", "get"):
+        try:
+            if method == "post":
+                response = client.post(
+                    _DDG_SEARCH_URL,
+                    data={"q": query},
+                    headers=_DDG_HEADERS,
+                    timeout=request_timeout,
+                    follow_redirects=True,
+                )
+            else:
+                response = client.get(
+                    f"{_DDG_SEARCH_URL}?q={quote_plus(query)}",
+                    headers=_DDG_HEADERS,
+                    timeout=request_timeout,
+                    follow_redirects=True,
+                )
+        except httpx.HTTPError:
+            continue
+        if response.status_code >= 400:
+            continue
+        results = _parse_duckduckgo_html(response.text, limit=limit, provider=provider)
+        if results:
+            return results
+    if _should_try_news_rss(query):
+        return _search_google_news_rss(client, query, limit=limit, provider="google_news")
+    return []
+
+
+def _should_try_news_rss(query: str) -> bool:
+    lowered = query.lower()
+    hints = ("news", "latest", "current", "today", "breaking", "headline", "happening")
+    return any(hint in lowered for hint in hints)
+
+
+def _search_google_news_rss(
+    client: httpx.Client,
+    query: str,
+    *,
+    limit: int,
+    provider: str,
+) -> list[WebSearchResult]:
+    try:
+        response = client.get(
+            _GOOGLE_NEWS_RSS_URL,
+            params={"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"},
+            headers=_DDG_HEADERS,
+            timeout=client.timeout,
+            follow_redirects=True,
+        )
+    except httpx.HTTPError:
+        return []
+    if response.status_code >= 400:
+        return []
+    try:
+        root = ET.fromstring(response.text)
+    except ET.ParseError:
+        return []
+    results: list[WebSearchResult] = []
+    for item in root.findall(".//item"):
+        if len(results) >= limit:
+            break
+        title = _clean_text((item.findtext("title") or "").strip())
+        url = (item.findtext("link") or "").strip()
+        pub_date = _clean_text((item.findtext("pubDate") or "").strip())
+        if not title or not url:
+            continue
+        snippet = f"Published: {pub_date}" if pub_date else ""
+        results.append(
+            WebSearchResult(
+                title=title,
+                url=url,
+                snippet=snippet[:_MAX_SNIPPET_LENGTH],
+                provider=provider,
+            )
+        )
+    return results
 
 
 def _parse_duckduckgo_html(content: str, *, limit: int, provider: str) -> list[WebSearchResult]:

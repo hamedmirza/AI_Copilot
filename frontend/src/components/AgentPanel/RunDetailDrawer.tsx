@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { X } from 'lucide-react'
 import { api } from '@/api/client'
 import { useRunDetail } from '@/hooks/useRunDetail'
-import { useWebSocket } from '@/hooks/useWebSocket'
+import { useRunLive } from '@/hooks/useRunLive'
+import { isActiveRunStatus, shouldRefreshRunThread } from '@/lib/runEvents'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button } from '@/components/ui/primitives'
 import { PipelineTimeline } from './PipelineTimeline'
@@ -22,6 +23,8 @@ import { ArtifactViewer } from './ArtifactViewer'
 import { ApproveDialog } from './ApproveDialog'
 import { ReviewArtifactPanel } from './ReviewArtifactPanel'
 import { RunLogPanel } from '@/components/shared/RunLogPanel'
+import { RunActivityFeed } from './RunActivityFeed'
+import { RunOutcomeSummary } from './RunOutcomeSummary'
 import { RunConversationPanel } from './RunConversationPanel'
 import { RunComposer } from './RunComposer'
 import { VisualEvidencePanel, type VisualEvidencePayload } from './VisualEvidencePanel'
@@ -67,8 +70,7 @@ export function RunDetailDrawer({
   const setCurrentSessionId = useChatStore((s) => s.setCurrentSessionId)
   const setRightPanelTab = useUIStore((s) => s.setRightPanelTab)
   const {
-    detail,
-    events,
+    detail: hydratedDetail,
     artifacts,
     thread,
     threadLoading,
@@ -77,6 +79,14 @@ export function RunDetailDrawer({
     refreshThread,
   } = useRunDetail()
   const [listOnly, setListOnly] = useState(mode === 'list')
+  const {
+    events,
+    detail: liveDetail,
+    status: liveStatus,
+    elapsedMs,
+  } = useRunLive(runId, { enabled: open && !listOnly && Boolean(runId) })
+  const detail = liveDetail || hydratedDetail
+  const status = liveStatus || detail?.status || 'pending'
   const [activeTab, setActiveTab] = useState<DrawerTab>('pipeline')
   const [showApprove, setShowApprove] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -122,35 +132,17 @@ export function RunDetailDrawer({
       })
   }, [listOnly, open, runId, detail?.status])
 
-  const onRunWsEvent = useCallback((data: unknown) => {
-    const ev = data as Record<string, unknown>
-    const type = String(ev.type || '')
-    if (type === 'run_clarification_requested') {
-      setRunStatus('awaiting_clarification', String(ev.stage || ''))
-    } else if (type === 'awaiting_approval') {
-      setRunStatus('awaiting_approval', String(ev.stage || ''))
-    } else if (type === 'run_blocked') {
-      setRunStatus('blocked', String(ev.stage || ''))
-    } else if (type === 'run_failed') {
-      setRunStatus('failed', String(ev.stage || ''))
-    } else if (type === 'run_completed') {
-      setRunStatus('completed', String(ev.stage || ''))
-    } else if (type === 'run_changes_requested') {
-      setRunStatus('changes_requested', String(ev.stage || ''))
-    } else if (type.endsWith('_started')) {
-      setRunStatus('running', type.replace('_started', ''))
+  useEffect(() => {
+    if (!runId || !open || listOnly || events.length === 0) return
+    const last = events[events.length - 1]
+    const type = String(last.type || '')
+    if (shouldRefreshRunThread(type)) {
+      void refreshThread(runId)
     }
-    if (runId) void refreshThread(runId)
-    if (runId && (type.includes('complete') || type === 'awaiting_approval' || type === 'run_clarification_requested')) {
+    if (type.includes('complete') || type === 'awaiting_approval' || type === 'run_clarification_requested') {
       void hydrateRun(runId, false)
     }
-  }, [hydrateRun, refreshThread, runId, setRunStatus])
-
-  useWebSocket(
-    runId && open && !listOnly ? `/api/ws/runs/${runId}` : '',
-    onRunWsEvent,
-    Boolean(runId && open && !listOnly),
-  )
+  }, [events, hydrateRun, listOnly, open, refreshThread, runId])
 
   const reviewArtifact = useMemo(() => latestReviewArtifact(artifacts), [artifacts])
   const readinessWarnings = useMemo(() => {
@@ -333,8 +325,8 @@ export function RunDetailDrawer({
     )
   }
 
-  const status = detail?.status || 'pending'
   const snapshotCount = detail?.promote_snapshot?.paths?.length || 0
+  const terminal = !isActiveRunStatus(status)
   const awaitingClarification = status === 'awaiting_clarification'
 
   const detailBody = (
@@ -428,20 +420,24 @@ export function RunDetailDrawer({
                   />
                 ) : (
                   <div className="space-y-4">
-                    <PipelineTimeline events={events} />
+                    <PipelineTimeline
+                      events={events}
+                      workflowStages={detail?.workflow_stages}
+                      activeStage={detail?.current_stage}
+                    />
 
-                    <button
-                      type="button"
-                      className="text-xs text-[var(--accent)] hover:underline"
-                      onClick={() => {
-                        if (runId) {
-                          useUIStore.getState().setRightPanelTab('agents')
-                          useUIStore.getState().requestOpenRunDrawer(runId, 'conversation')
-                        }
-                      }}
-                    >
-                      Open in Agents for pipeline actions →
-                    </button>
+                    {terminal && runId ? (
+                      <RunOutcomeSummary
+                        runId={runId}
+                        detail={detail}
+                        status={status}
+                        elapsedMs={elapsedMs}
+                        onOpenConversation={detail?.chat_session_id ? handleOpenChat : undefined}
+                        onRetry={inline ? undefined : () => void handleRetry()}
+                      />
+                    ) : (
+                      <RunActivityFeed events={events} status={status} />
+                    )}
 
                     {reviewArtifact && (
                       <div className="border border-[var(--border)] rounded p-3">
@@ -527,7 +523,7 @@ export function RunDetailDrawer({
                       </div>
                     )}
 
-                    <RunLogPanel events={events} />
+                    <RunLogPanel events={events} defaultExpanded={false} />
 
                     {(postmortem || projectLessons.length > 0 || globalSkills.length > 0) && (
                       <div className="grid gap-3 lg:grid-cols-3">

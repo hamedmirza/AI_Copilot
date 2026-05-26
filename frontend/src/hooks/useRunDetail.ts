@@ -7,7 +7,7 @@ import type { RunArtifact, RunDetail, RunEvent, RunThreadEntry } from '@/types/r
 import { useRunStore } from '@/store'
 
 export function useRunDetail() {
-  const { setCurrentRun, setRunStatus, setEvents } = useRunStore()
+  const { setCurrentRun, setRunStatus, setEvents, setRunEvents, clearRunEvents } = useRunStore()
   const [detail, setDetail] = useState<RunDetail | null>(null)
   const [events, setLocalEvents] = useState<RunEvent[]>([])
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([])
@@ -31,6 +31,7 @@ export function useRunDetail() {
 
   const hydrateRun = useCallback(async (runId: string, syncPanel = true) => {
     setLoading(true)
+    clearRunEvents(runId)
     try {
       const [runRaw, eventRows, artifactRows, threadRows] = await Promise.all([
         api.runs.get(runId) as Promise<RunDetail>,
@@ -42,12 +43,13 @@ export function useRunDetail() {
       const normalizedThread = threadRows.map(normalizeThreadEntry)
       setDetail(runRaw)
       setLocalEvents(normalized)
+      setRunEvents(runId, normalized as RunEvent[])
       setArtifacts(artifactRows)
       setThread(normalizedThread)
       if (syncPanel) {
         setCurrentRun(runId)
         setRunStatus(runRaw.status, runRaw.current_stage || '')
-        setEvents(normalized as unknown as import('@/store').RunEvent[])
+        setEvents(normalized as unknown as Array<Record<string, unknown>>)
       }
       return { run: runRaw, events: normalized, artifacts: artifactRows, thread: normalizedThread }
     } catch (e) {
@@ -56,7 +58,7 @@ export function useRunDetail() {
     } finally {
       setLoading(false)
     }
-  }, [setCurrentRun, setEvents, setRunStatus])
+  }, [clearRunEvents, setCurrentRun, setEvents, setRunEvents, setRunStatus])
 
   return {
     detail,

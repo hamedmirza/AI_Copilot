@@ -17,7 +17,17 @@ export const CHAT_MODE_OPTIONS: Array<{ value: ChatMode; label: string }> = [
   { value: 'architect', label: 'Architect' },
 ]
 
-export const STAGES = ['planner', 'architect', 'ui_designer', 'coder', 'reviewer', 'tester', 'supervisor']
+export const STAGES = [
+  'app_designer',
+  'planner',
+  'architect',
+  'ui_designer',
+  'coder',
+  'reviewer',
+  'tester',
+  'documentation',
+  'playbook_supervisor',
+]
 
 export function normalizeChatMode(value: unknown): ChatMode {
   const normalized = String(value || 'general').toLowerCase()

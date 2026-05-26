@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { ChatMessage, RunEvent } from '@/store'
+import type { ChatMessage } from '@/store'
 import { parsePageElementContext } from '@/lib/pageElementContext'
 import { parseUnknownObject, formatAnswerDuration, formatChatTimestamp, resolveAnswerDurationMs } from './types'
 import { ToolCallCard } from './ToolCallCard'
@@ -8,14 +8,12 @@ import { ThinkingIndicator } from './ThinkingIndicator'
 
 interface MessageBubbleProps {
   message: ChatMessage
-  runEventsById: Record<string, RunEvent[]>
   thinkingLabel?: string | null
   onOpenRunInAgents?: (runId: string) => void
 }
 
 export function MessageBubble({
   message,
-  runEventsById,
   thinkingLabel,
   onOpenRunInAgents,
 }: MessageBubbleProps) {
@@ -44,7 +42,6 @@ export function MessageBubble({
   const isRunCard = metaType === 'run_spawned' && !!runId
   const isRunSummary = metaType === 'run_summary' && !!runId
   const isRunThread = metaType === 'run_thread' && !!runId
-  const runEvents = runId ? (runEventsById[runId] || []) : []
   const runStatus = String(message.metadata?.run_status || message.metadata?.status || (message.metadata?.clarification_pending ? 'awaiting_clarification' : ''))
   const contextMeta = parseUnknownObject(message.metadata?.context)
   const pageElement = parsePageElementContext(contextMeta?.page_element)
@@ -113,7 +110,6 @@ export function MessageBubble({
             <RunCard
               runId={runId}
               displayName={runDisplayName}
-              events={runEvents}
               status={runStatus || undefined}
               onOpen={onOpenRunInAgents ? () => onOpenRunInAgents(runId) : undefined}
             />

@@ -144,6 +144,7 @@ def test_architect_agent_clarification_pauses_run_after_architect_stage(client, 
         service._prepare_recon = lambda *args, **kwargs: existing_snapshot  # type: ignore[method-assign]
         service._run_preflight = lambda *args, **kwargs: True  # type: ignore[method-assign]
         service._capture_baseline = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        service._verify_dependencies = lambda db_arg, run_id_arg, workspace_arg, source_arg: True  # type: ignore[method-assign]
         service._stage_ui = lambda db_arg, run_id_arg, ctx: True  # type: ignore[method-assign]
         service._stage_coder = lambda db_arg, run_id_arg, ctx, fs: True  # type: ignore[method-assign]
         service._stage_reviewer_loop = lambda db_arg, run_id_arg, ctx, fs, ws, src: True  # type: ignore[method-assign]

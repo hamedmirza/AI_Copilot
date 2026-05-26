@@ -196,8 +196,18 @@ def run_pre_deploy_supervisor(
                     plan_gaps.append(gap.model_dump())
             llm_gaps = [g.model_dump() for g in output.plan_gaps]
             summary = output.summary or summary
-        except Exception:
-            pass
+        except Exception as exc:
+            from app.services.config_service import ConfigService
+
+            if ConfigService(db).get_all().get("require_supervisor_llm", False):
+                approved = False
+                plan_gaps.append(
+                    {
+                        "step_id": "supervisor_llm",
+                        "message": f"critical: pre-deploy supervisor LLM failed: {exc}",
+                    }
+                )
+                summary = str(exc) or "Pre-deploy supervisor LLM failed"
 
     payload = {
         "approved": approved,

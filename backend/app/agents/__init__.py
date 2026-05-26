@@ -56,6 +56,16 @@ class CoderAgent(BaseAgent):
     prompt_filename = "coder.md"
     max_tool_rounds = 12
 
+    def _provider_output_rules(self) -> str:
+        rules = super()._provider_output_rules()
+        return (
+            f"{rules}"
+            "6. Coder requirement: every patch string must be valid inside JSON — escape quotes "
+            "and newlines; never paste raw multiline source without \\n escapes.\n"
+            "7. Prefer line_changes with narrow start_line/end_line ranges over full_content rewrites.\n"
+            "8. If a file is large, emit multiple line_changes instead of one huge string value.\n"
+        )
+
     def code(self, context: str) -> CoderOutput:
         result = self.run(context, CoderOutput)
         assert result is not None

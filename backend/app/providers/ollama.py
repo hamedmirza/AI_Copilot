@@ -110,12 +110,44 @@ class OllamaProvider(BaseProvider):
         if max_tokens is not None and max_tokens > 0:
             payload["max_tokens"] = int(max_tokens)
 
+    def _apply_tooling(
+        self,
+        payload: dict[str, Any],
+        tools: list[dict[str, Any]] | None,
+        tool_choice: dict[str, Any] | str | None = None,
+    ) -> None:
+        if not tools:
+            return
+        payload["tools"] = tools
+        payload["tool_choice"] = tool_choice if tool_choice is not None else "auto"
+
+    def _uses_reasoning_as_output(self) -> bool:
+        """Some Ollama models (e.g. gpt-oss) emit the user-visible reply in `reasoning`."""
+        return "gpt-oss" in (self.model or "").lower()
+
+    def _message_visible_text(self, message: dict[str, Any]) -> str:
+        content = str(message.get("content") or "").strip()
+        if content:
+            return content
+        if self._uses_reasoning_as_output():
+            return str(message.get("reasoning") or "").strip()
+        return ""
+
+    def _delta_visible_text(self, delta: dict[str, Any]) -> str:
+        content = str(delta.get("content") or "")
+        if content:
+            return content
+        if self._uses_reasoning_as_output():
+            return str(delta.get("reasoning") or "")
+        return ""
+
     def invoke_chat(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         stream: bool = False,
         max_tokens: int | None = None,
+        tool_choice: dict[str, Any] | str | None = None,
     ) -> ChatCompletionResult:
         model = (self.model or "").strip()
         if not model:
@@ -126,9 +158,7 @@ class OllamaProvider(BaseProvider):
             "messages": messages,
             "stream": False,
         }
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+        self._apply_tooling(payload, tools, tool_choice)
         self._apply_max_tokens(payload, max_tokens)
         try:
             response = self._client.post(url, json=payload)
@@ -136,15 +166,19 @@ class OllamaProvider(BaseProvider):
             data = response.json()
             message = data["choices"][0]["message"]
         except (KeyError, IndexError, TypeError):
-            return super().invoke_chat(messages, tools=tools, stream=stream, max_tokens=max_tokens)
+            return super().invoke_chat(
+                messages, tools=tools, stream=stream, max_tokens=max_tokens, tool_choice=tool_choice
+            )
         except httpx.HTTPError as exc:
             if tools and self._should_fallback_to_react(exc):
                 logger.warning("Ollama rejected native tool calling, falling back to JSON ReAct: %s", exc)
             else:
                 logger.warning("Ollama native chat failed, falling back to JSON ReAct: %s", exc)
-            return super().invoke_chat(messages, tools=tools, stream=stream, max_tokens=max_tokens)
+            return super().invoke_chat(
+                messages, tools=tools, stream=stream, max_tokens=max_tokens, tool_choice=tool_choice
+            )
         return ChatCompletionResult(
-            content=str(message.get("content") or ""),
+            content=self._message_visible_text(message),
             tool_calls=self._tool_calls_from_message(message),
             finish_reason=str(data.get("choices", [{}])[0].get("finish_reason") or "stop"),
             raw=data,
@@ -155,6 +189,7 @@ class OllamaProvider(BaseProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
+        tool_choice: dict[str, Any] | str | None = None,
     ):
         model = (self.model or "").strip()
         if not model:
@@ -165,9 +200,7 @@ class OllamaProvider(BaseProvider):
             "messages": messages,
             "stream": True,
         }
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+        self._apply_tooling(payload, tools, tool_choice)
         self._apply_max_tokens(payload, max_tokens)
         try:
             with self._client.stream("POST", url, json=payload) as response:
@@ -191,9 +224,9 @@ class OllamaProvider(BaseProvider):
                         continue
                     choice = choices[0]
                     delta = choice.get("delta") or {}
-                    content = delta.get("content") or ""
-                    if content:
-                        yield ChatStreamChunk(delta=str(content))
+                    visible = self._delta_visible_text(delta)
+                    if visible:
+                        yield ChatStreamChunk(delta=visible)
                     for item in delta.get("tool_calls") or []:
                         index = int(item.get("index", 0))
                         entry = tool_fragments.setdefault(
@@ -233,7 +266,7 @@ class OllamaProvider(BaseProvider):
                 logger.warning("Ollama streaming rejected native tool calling, falling back to JSON ReAct: %s", exc)
             else:
                 logger.warning("Ollama streaming failed, falling back to JSON ReAct: %s", exc)
-        yield from super().invoke_chat_stream(messages, tools=tools)
+        yield from super().invoke_chat_stream(messages, tools=tools, tool_choice=tool_choice)
 
     def _list_models_openai(self) -> list[str]:
         response = self._client.get(f"{self.base_url}/models")

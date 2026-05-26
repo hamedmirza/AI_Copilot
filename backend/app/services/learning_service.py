@@ -42,7 +42,17 @@ IMPROVEMENT_STATUSES = {"candidate", "trialing", "approved", "deprecated", "reje
 AUTO_PROMOTABLE_FAILURES = FAILURE_CLASSES - {"unknown"}
 AUTO_PROMOTABLE_LESSON_KINDS = frozenset({"repo_convention", "failure_avoidance", "task_intent_hint"})
 # In-run orchestration stages (OrchestrationService._pipeline).
-PIPELINE_STAGE_ORDER = ("planner", "architect", "ui_designer", "coder", "reviewer", "tester")
+PIPELINE_STAGE_ORDER = (
+    "app_designer",
+    "planner",
+    "architect",
+    "ui_designer",
+    "coder",
+    "reviewer",
+    "tester",
+    "documentation",
+    "playbook_supervisor",
+)
 # Post-deploy only: runs in approve_run_sync after promotion — not in _pipeline loop.
 POST_DEPLOY_STAGE_ORDER = ("supervisor",)
 FULL_PIPELINE_STAGE_ORDER = PIPELINE_STAGE_ORDER + POST_DEPLOY_STAGE_ORDER

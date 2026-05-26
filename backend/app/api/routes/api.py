@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import ptyprocess
@@ -53,10 +54,38 @@ from app.services.project_service import ProjectService
 from app.services.run_cleanup_service import RunCleanupService
 from app.services.run_thread_service import RunThreadService
 from app.services.run_truth_service import persist_run_truth
+from app.core.enums import RepoMode
+from app.services.task_kind_workflow import WorkflowContext, resolve_workflow_stage_values
+from app.db.models import RunEventModel
+
+_STALE_RUN_UI_THRESHOLD = timedelta(minutes=3)
 
 router = APIRouter()
 router.include_router(chat_router)
 router.include_router(kanban_router)
+
+
+def _workflow_stages_for_run(run, task_description: str) -> list[str]:
+    from app.db.session import SessionLocal
+
+    repo_mode = RepoMode.EXISTING.value
+    db = SessionLocal()
+    try:
+        from app.services.orchestration_service import OrchestrationService
+
+        recon = OrchestrationService()._latest_artifact(db, run.id, "recon") or {}
+        if recon.get("repo_mode"):
+            repo_mode = str(recon["repo_mode"])
+    finally:
+        db.close()
+    ctx = WorkflowContext(
+        task_kind=getattr(run, "task_kind", None) or "implementation",
+        repo_mode=repo_mode,
+        deliverable_kind=getattr(run, "deliverable_kind", None),
+        description=task_description,
+        has_app_design=False,
+    )
+    return resolve_workflow_stage_values(ctx)
 
 
 def _project_to_response(p, db: Session) -> dict:
@@ -76,6 +105,25 @@ def _project_to_response(p, db: Session) -> dict:
     }
 
 
+def _run_activity_snapshot(db: Session, run) -> dict[str, Any]:
+    latest_event = (
+        db.query(RunEventModel)
+        .filter(RunEventModel.run_id == run.id)
+        .order_by(RunEventModel.created_at.desc())
+        .first()
+    )
+    latest_event_at = latest_event.created_at if latest_event else None
+    is_active = str(run.status) in {"pending", "running", "awaiting_clarification", "awaiting_design_review", "awaiting_approval"}
+    reference = latest_event_at or run.updated_at or run.created_at
+    is_stale = False
+    if is_active and reference:
+        is_stale = datetime.now(UTC) - reference > _STALE_RUN_UI_THRESHOLD
+    return {
+        "last_event_at": latest_event_at.isoformat() if latest_event_at else None,
+        "stale_running": is_stale,
+    }
+
+
 def _artifact_to_response(artifact) -> dict:
     return {
         "id": artifact.id,
@@ -85,13 +133,14 @@ def _artifact_to_response(artifact) -> dict:
     }
 
 
-def _run_to_response(run, task_description: str, run_number: int | None = None) -> dict:
+def _run_to_response(db: Session, run, task_description: str, run_number: int | None = None) -> dict:
     promote_snapshot = None
     if run.promote_snapshot_json:
         try:
             promote_snapshot = json.loads(run.promote_snapshot_json)
         except json.JSONDecodeError:
             promote_snapshot = None
+    activity = _run_activity_snapshot(db, run)
     return {
         "id": run.id,
         "display_name": derive_run_display_name(task_description, run.created_at, run_number=run_number),
@@ -124,6 +173,7 @@ def _run_to_response(run, task_description: str, run_number: int | None = None) 
         "deliverable_kind": getattr(run, "deliverable_kind", None),
         "expected_targets": getattr(run, "expected_targets", []),
         "expected_validation_family": getattr(run, "expected_validation_family", None),
+        "workflow_stages": _workflow_stages_for_run(run, task_description),
         "readiness": getattr(run, "readiness", {}),
         "mismatch_classes": getattr(run, "mismatch_classes", []),
         "approval_override": getattr(run, "approval_override", None),
@@ -131,6 +181,8 @@ def _run_to_response(run, task_description: str, run_number: int | None = None) 
         "clarification_question": getattr(run, "clarification_question", None),
         "clarification_stage": getattr(run, "clarification_stage", None),
         "recommended_assumption": (run.clarification_context or {}).get("recommended_assumption"),
+        "last_event_at": activity["last_event_at"],
+        "stale_running": activity["stale_running"],
         "created_at": run.created_at.isoformat(),
         "updated_at": run.updated_at.isoformat(),
     }
@@ -255,7 +307,10 @@ def list_projects(db: Session = Depends(get_db)):
 @router.post("/projects")
 def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
     svc = ProjectService(db)
-    p = svc.create(data)
+    try:
+        p = svc.create(data)
+    except ValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
     from app.services.setup_run_service import trigger_setup_run
 
     trigger_setup_run(db, p.id)
@@ -271,7 +326,11 @@ def get_project(project_id: str, db: Session = Depends(get_db)):
 @router.put("/projects/{project_id}")
 def update_project(project_id: str, data: ProjectUpdate, db: Session = Depends(get_db)):
     svc = ProjectService(db)
-    return _project_to_response(svc.update(project_id, data), db)
+    try:
+        project = svc.update(project_id, data)
+    except ValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return _project_to_response(project, db)
 
 
 @router.delete("/projects/{project_id}")
@@ -493,7 +552,7 @@ def get_run(run_id: str, db: Session = Depends(get_db)):
         .order_by(RunModel.created_at.asc())
         .all()
     )
-    return _run_to_response(run, task_description, run_numbers_for_task(sibling_runs).get(run.id))
+    return _run_to_response(db, run, task_description, run_numbers_for_task(sibling_runs).get(run.id))
 
 
 @router.get("/runs/{run_id}/events")
@@ -689,6 +748,8 @@ def project_runs(project_id: str, db: Session = Depends(get_db)):
             "recovery_status": getattr(r, "recovery_status", None),
             "error_message": (r.error_message or "")[:120] or None,
             "created_at": r.created_at.isoformat(),
+            "updated_at": r.updated_at.isoformat(),
+            **_run_activity_snapshot(db, r),
         }
         for r in runs
     ]
@@ -735,8 +796,9 @@ def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depen
     from app.core.enums import RunStatus
     from app.db.models import ArtifactModel, RunModel, TaskModel
     from app.services.learning_service import infer_task_kind
-    from app.services.orchestration_service import claim_run
-    from app.services.workspace_service import reset_run_workspace
+    from app.services.orchestration_service import claim_run, orchestration_service
+    from app.services.reconnaissance_service import ReconnaissanceService
+    from app.services.workspace_service import reset_run_workspace, validate_run_workspace
 
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
     if not run:
@@ -764,13 +826,28 @@ def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depen
     run.approval_override = False
     task = db.query(TaskModel).filter(TaskModel.id == run.task_id).first()
     if task and task.description:
-        kind = infer_task_kind(task.description)
+        kind = task.task_kind or run.task_kind or infer_task_kind(task.description)
         run.task_kind = kind
         task.task_kind = kind
     project = ProjectService(db).get(run.project_id)
     if project and project.source_repo_spec:
-        workspace = reset_run_workspace(Path(project.source_repo_spec), run_id)
-        run.workspace_path = str(workspace)
+        try:
+            workspace = reset_run_workspace(Path(project.source_repo_spec), run_id)
+            repo_mode = ReconnaissanceService().detect_repo_mode(Path(project.source_repo_spec))
+            validate_run_workspace(
+                workspace,
+                source_repo=Path(project.source_repo_spec),
+                repo_mode=repo_mode,
+                task_kind=run.task_kind,
+            )
+            run.workspace_path = str(workspace)
+        except (ValidationError, NotFoundError) as exc:
+            run.status = RunStatus.FAILED.value
+            run.error_message = str(exc)
+            db.commit()
+            persist_run_truth(db, run_id)
+            orchestration_service._mark_run_failed(db, run_id, run.current_stage or "", str(exc))
+            raise HTTPException(400, str(exc)) from exc
     prior_clarification = dict(run.clarification_context or {})
     preserved = {
         k: prior_clarification[k]
@@ -808,6 +885,7 @@ def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depen
             "feedback": body.feedback.strip() if body and body.feedback else "",
             "workspace_reset": bool(project and project.source_repo_spec),
             "task_kind": run.task_kind,
+            "source_repo_spec": project.source_repo_spec if project else None,
         },
     )
     persist_run_truth(db, run_id)
@@ -820,10 +898,13 @@ def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depen
 def resume_run(run_id: str, db: Session = Depends(get_db)):
     from app.core.enums import RunStatus
     from app.db.models import RunModel
+    from app.services.orchestration_service import orchestration_service
 
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
     if not run:
         raise HTTPException(404, "Run not found")
+    if orchestration_service._finalize_stale_inflight_run(db, run):
+        raise HTTPException(400, "Run is stale and was finalized as failed")
     if run.status not in (RunStatus.RUNNING.value, RunStatus.PENDING.value):
         raise HTTPException(400, "Run is not resumable")
     run_engine.enqueue(run.id)
@@ -945,7 +1026,15 @@ def git_status(project_id: str, db: Session = Depends(get_db)):
     status = gs.status()
     status["branch"] = gs.current_branch()
     status["has_remote"] = gs.has_remote()
+    status["remote_name"] = gs.remote_name()
     return status
+
+
+@router.post("/projects/{project_id}/git/stage-all")
+def git_stage_all(project_id: str, db: Session = Depends(get_db)):
+    project = ProjectService(db).get(project_id)
+    GitService(__import__("pathlib").Path(project.source_repo_spec)).stage_all()
+    return {"ok": True}
 
 
 @router.post("/projects/{project_id}/git/stage")
@@ -993,8 +1082,11 @@ def git_branches(project_id: str, db: Session = Depends(get_db)):
 @router.post("/projects/{project_id}/git/checkout")
 def git_checkout(project_id: str, body: GitCheckoutRequest, db: Session = Depends(get_db)):
     project = ProjectService(db).get(project_id)
-    GitService(__import__("pathlib").Path(project.source_repo_spec)).checkout(body.branch)
-    return {"ok": True}
+    try:
+        GitService(__import__("pathlib").Path(project.source_repo_spec)).checkout(body.branch)
+        return {"ok": True}
+    except ValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/projects/{project_id}/git/diff/{path:path}")
@@ -1007,8 +1099,7 @@ def git_diff(project_id: str, path: str, db: Session = Depends(get_db)):
 def git_push(project_id: str, db: Session = Depends(get_db)):
     project = ProjectService(db).get(project_id)
     try:
-        GitService(__import__("pathlib").Path(project.source_repo_spec)).push()
-        return {"ok": True}
+        return GitService(__import__("pathlib").Path(project.source_repo_spec)).push()
     except ValidationError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -1017,8 +1108,7 @@ def git_push(project_id: str, db: Session = Depends(get_db)):
 def git_pull(project_id: str, db: Session = Depends(get_db)):
     project = ProjectService(db).get(project_id)
     try:
-        GitService(__import__("pathlib").Path(project.source_repo_spec)).pull()
-        return {"ok": True}
+        return GitService(__import__("pathlib").Path(project.source_repo_spec)).pull()
     except ValidationError as exc:
         raise HTTPException(400, str(exc)) from exc
 

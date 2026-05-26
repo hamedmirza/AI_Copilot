@@ -890,7 +890,6 @@ export function ChatPanel() {
             streaming={streaming}
             thinkingLabel={assistantStatus || (streaming ? 'Thinking…' : null)}
             pendingToolCalls={pendingToolCalls}
-            runEventsById={runEventsById}
             onOpenRunInAgents={(runId) => {
               setRightPanelTab('agents')
               requestOpenRunDrawer(runId, 'conversation')

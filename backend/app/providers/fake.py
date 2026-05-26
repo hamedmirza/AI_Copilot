@@ -14,12 +14,14 @@ class FakeProvider(BaseProvider):
         default_response: str | None = None,
         model: str = "fake-model",
         invoke_sequence: list[str] | None = None,
+        review_approve_attempt: int = 3,
     ) -> None:
         self.responses = responses or {}
         self.default_response = default_response or "{}"
         self.model = model
         self.call_log: list[tuple[str, str]] = []
         self._review_attempt = 0
+        self._review_approve_attempt = max(1, int(review_approve_attempt))
         self._invoke_sequence = list(invoke_sequence or [])
 
     def set_response_for_keyword(self, keyword: str, payload: dict) -> None:
@@ -38,23 +40,38 @@ class FakeProvider(BaseProvider):
     def _default_payload_for_schema(self, schema_name: str, user_prompt: str) -> str | None:
         lower = user_prompt.lower()
         if schema_name == "PlannerOutput":
-            return json.dumps(
+            payload: dict = {
+                "summary": "Plan for task",
+                "steps": [
+                    {
+                        "step_id": "1",
+                        "title": "Implement",
+                        "description": "Do the work",
+                        "acceptance_criteria": ["Tests pass"],
+                    }
+                ],
+                "risks": [],
+            }
+            if "debug" in lower or "diagnose" in lower or "investigate" in lower:
+                payload["hypothesis"] = "Root cause is in the failing module import path"
+                payload["repro_steps"] = ["Run pytest on the affected test module"]
+            return json.dumps(payload)
+        if schema_name == "ArchitectOutput":
+            report_paths = (
                 {
-                    "summary": "Plan for task",
-                    "steps": [
+                    "overview": "Analysis architecture",
+                    "modules": ["reports"],
+                    "file_changes": [
                         {
-                            "step_id": "1",
-                            "title": "Implement",
-                            "description": "Do the work",
-                            "acceptance_criteria": ["Tests pass"],
+                            "path": ".ai-copilot/reports/analysis.md",
+                            "action": "create",
+                            "rationale": "Capture findings",
                         }
                     ],
-                    "risks": [],
+                    "dependencies": [],
                 }
-            )
-        if schema_name == "ArchitectOutput":
-            return json.dumps(
-                {
+                if "analysis" in lower or "audit" in lower or "report" in lower
+                else {
                     "overview": "Architecture",
                     "modules": ["core"],
                     "file_changes": [
@@ -63,6 +80,17 @@ class FakeProvider(BaseProvider):
                     "dependencies": [],
                 }
             )
+            if "frontend" in lower and "app.tsx" in lower:
+                report_paths = {
+                    "overview": "Frontend scaffold",
+                    "modules": ["frontend"],
+                    "file_changes": [
+                        {"path": "frontend/package.json", "action": "create", "rationale": "Scaffold"},
+                        {"path": "frontend/src/App.tsx", "action": "create", "rationale": "App shell"},
+                    ],
+                    "dependencies": [],
+                }
+            return json.dumps(report_paths)
         if schema_name == "UIDesignerOutput":
             from app.services.run_truth_service import description_implies_frontend_ui
 
@@ -91,7 +119,7 @@ class FakeProvider(BaseProvider):
             )
         if schema_name == "ReviewerOutput":
             self._review_attempt += 1
-            approved = self._review_attempt >= 3
+            approved = self._review_attempt >= self._review_approve_attempt
             return json.dumps(
                 {
                     "approved": approved,
@@ -154,12 +182,15 @@ class FakeProvider(BaseProvider):
                 }
             )
         if schema_name == "PlaybookSupervisorOutput":
+            destructive_without_rollback = "destructive" in lower and "without rollback" in lower
             return json.dumps(
                 {
-                    "approved": True,
-                    "summary": "Playbook approved",
-                    "safety_concerns": [],
-                    "required_changes": [],
+                    "approved": not destructive_without_rollback,
+                    "summary": "Playbook rejected: missing rollback"
+                    if destructive_without_rollback
+                    else "Playbook approved",
+                    "safety_concerns": ["Missing rollback steps"] if destructive_without_rollback else [],
+                    "required_changes": ["Add rollback procedure"] if destructive_without_rollback else [],
                 }
             )
         if schema_name == "AppDesignOutput":
@@ -215,6 +246,7 @@ class FakeProvider(BaseProvider):
         tools: list[dict] | None = None,
         stream: bool = False,
         max_tokens: int | None = None,
+        tool_choice: dict | str | None = None,
     ) -> ChatCompletionResult:
         system_prompt, user_prompt = self._build_react_prompt(messages, tools or [])
         parsed = self._parse_chat_json(self.invoke_json(system_prompt, user_prompt))
@@ -238,8 +270,11 @@ class FakeProvider(BaseProvider):
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int | None = None,
+        tool_choice: dict | str | None = None,
     ):
-        result = self.invoke_chat(messages, tools=tools, stream=False, max_tokens=max_tokens)
+        result = self.invoke_chat(
+            messages, tools=tools, stream=False, max_tokens=max_tokens, tool_choice=tool_choice
+        )
         if result.content:
             yield ChatStreamChunk(delta=result.content, finish_reason=result.finish_reason)
         if result.tool_calls:

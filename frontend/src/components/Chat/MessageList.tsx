@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react'
-import type { ChatMessage, ChatToolCall, RunEvent } from '@/store'
+import type { ChatMessage, ChatToolCall } from '@/store'
 import { EmptyState, Skeleton } from '@/components/ui/primitives'
 import { MessageBubble } from './MessageBubble'
 import { ToolCallCard } from './ToolCallCard'
@@ -11,7 +11,6 @@ interface MessageListProps {
   streaming?: boolean
   thinkingLabel?: string | null
   pendingToolCalls?: ChatToolCall[]
-  runEventsById: Record<string, RunEvent[]>
   onOpenRunInAgents?: (runId: string) => void
 }
 
@@ -21,7 +20,6 @@ export function MessageList({
   streaming,
   thinkingLabel,
   pendingToolCalls = [],
-  runEventsById,
   onOpenRunInAgents,
 }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -61,7 +59,6 @@ export function MessageList({
           key={message.id}
           message={message}
           thinkingLabel={message.pending ? thinkingLabel : null}
-          runEventsById={runEventsById}
           onOpenRunInAgents={onOpenRunInAgents}
         />
       ))}

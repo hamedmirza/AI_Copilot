@@ -143,6 +143,18 @@ def test_coder_agent(provider: FakeProvider):
     assert len(result.file_changes) >= 1
 
 
+def test_coder_repairs_literal_newlines_in_json():
+    malformed = (
+        '{"summary": "patched", "file_changes": [{"path": "src/a.ts", "line_changes": '
+        '[{"start_line": 10, "end_line": 10, "new_content": "const x = 1;\nconst y = 2;"}]}], '
+        '"requires_operator_approval": false}'
+    )
+    provider = FakeProvider(invoke_sequence=[malformed])
+    result = CoderAgent(provider).code("Patch src/a.ts")
+    assert result.summary == "patched"
+    assert "const y = 2" in result.file_changes[0].line_changes[0].new_content
+
+
 def test_coder_normalizes_llm_field_aliases(provider: FakeProvider):
     provider.set_response_for_keyword(
         "coder",
