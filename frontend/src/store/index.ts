@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type { ModelsApiResponse } from '@/lib/lmstudioModels'
+import type { ModelsCacheEntry, ProviderKind } from '@/lib/providerModels'
 import { appendRunEventDeduped, dedupeRunEvents, normalizeRunEvent } from '@/lib/runEvents'
 import type { RunEvent } from '@/types/runs'
 
@@ -203,11 +205,14 @@ interface SettingsState {
   modelCatalog: LMStudioModelCatalogEntry[]
   modelRecommendations: Record<string, string>
   lmstudioResources: LMStudioResources | null
+  modelsCacheByProvider: Partial<Record<ProviderKind, ModelsCacheEntry>>
   setSettings: (s: Record<string, unknown>) => void
   setModels: (m: string[]) => void
   setModelCatalog: (catalog: LMStudioModelCatalogEntry[]) => void
   setModelRecommendations: (recommendations: Record<string, string>) => void
   setLmstudioResources: (resources: LMStudioResources | null) => void
+  setModelsCache: (provider: ProviderKind, response: ModelsApiResponse) => void
+  clearModelsCache: () => void
 }
 
 interface AppState {
@@ -598,11 +603,20 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   modelCatalog: [],
   modelRecommendations: {},
   lmstudioResources: null,
+  modelsCacheByProvider: {},
   setSettings: (settings) => set({ settings }),
   setModels: (models) => set({ models }),
   setModelCatalog: (modelCatalog) => set({ modelCatalog }),
   setModelRecommendations: (modelRecommendations) => set({ modelRecommendations }),
   setLmstudioResources: (lmstudioResources) => set({ lmstudioResources }),
+  setModelsCache: (provider, response) =>
+    set((state) => ({
+      modelsCacheByProvider: {
+        ...state.modelsCacheByProvider,
+        [provider]: { response, fetchedAt: Date.now() },
+      },
+    })),
+  clearModelsCache: () => set({ modelsCacheByProvider: {} }),
 }))
 
 export const useAppStore = create<AppState>((set) => ({

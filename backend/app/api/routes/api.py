@@ -240,15 +240,20 @@ def reset_settings(db: Session = Depends(get_db)):
 
 
 @router.get("/settings/models")
-def list_models(provider: str | None = None, db: Session = Depends(get_db)):
-    ConfigService(db).reload_registry()
+def list_models(
+    provider: str | None = None,
+    refresh: bool = False,
+    db: Session = Depends(get_db),
+):
     from app.providers.registry import ProviderRegistry
 
+    if refresh:
+        ConfigService(db).reload_registry()
     registry = ProviderRegistry.get()
     if provider in ("lmstudio", "ollama"):
-        detailed = registry.list_models_detailed_for_provider(provider)
+        detailed = registry.list_models_detailed_for_provider(provider, refresh=refresh)
     else:
-        detailed = registry.list_models_detailed()
+        detailed = registry.list_models_detailed(refresh=refresh)
     return {
         "provider": provider or registry.active_provider(),
         "models": detailed.models,
@@ -798,7 +803,11 @@ def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depen
     from app.services.learning_service import infer_task_kind
     from app.services.orchestration_service import claim_run, orchestration_service
     from app.services.reconnaissance_service import ReconnaissanceService
-    from app.services.workspace_service import reset_run_workspace, validate_run_workspace
+    from app.services.workspace_service import (
+        reset_run_workspace,
+        validate_run_workspace,
+        workspace_slug_for_project,
+    )
 
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
     if not run:
@@ -832,7 +841,8 @@ def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depen
     project = ProjectService(db).get(run.project_id)
     if project and project.source_repo_spec:
         try:
-            workspace = reset_run_workspace(Path(project.source_repo_spec), run_id)
+            slug = workspace_slug_for_project(project.name, project.source_repo_spec)
+            workspace = reset_run_workspace(Path(project.source_repo_spec), slug)
             repo_mode = ReconnaissanceService().detect_repo_mode(Path(project.source_repo_spec))
             validate_run_workspace(
                 workspace,
@@ -917,7 +927,7 @@ def rollback_run_workspace(run_id: str, db: Session = Depends(get_db)):
 
     from app.core.enums import RunStatus
     from app.db.models import RunModel
-    from app.services.workspace_service import reset_run_workspace
+    from app.services.workspace_service import reset_run_workspace, workspace_slug_for_project
 
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
     if not run:
@@ -931,7 +941,8 @@ def rollback_run_workspace(run_id: str, db: Session = Depends(get_db)):
     if run.status not in allowed:
         raise HTTPException(400, "Run workspace cannot be rolled back in current status")
     project = ProjectService(db).get(run.project_id)
-    workspace = reset_run_workspace(Path(project.source_repo_spec), run_id)
+    slug = workspace_slug_for_project(project.name, project.source_repo_spec)
+    workspace = reset_run_workspace(Path(project.source_repo_spec), slug)
     run.workspace_path = str(workspace)
     run.operator_feedback = None
     if run.status == RunStatus.AWAITING_APPROVAL.value:

@@ -10,6 +10,8 @@ import { StatusBar } from '@/components/StatusBar/StatusBar'
 import { useAppStore, useChatStore, useEditorStore, useProjectStore, useRunStore, useSettingsStore, useUIStore } from '@/store'
 import { Button, EmptyState } from '@/components/ui/primitives'
 import { dispatchBrowserRefresh } from '@/lib/browserRefresh'
+import { applyModelsResponse } from '@/lib/lmstudioModels'
+import { activeProviderFromSettings } from '@/lib/providerModels'
 import { showError } from '@/lib/toast'
 import { isRightPanelTabMounted, rightPanelPanelClass, type RightPanelTab } from '@/lib/rightPanelLayout'
 import { getContribution, getContributions } from '@/workbench/registry'
@@ -152,7 +154,14 @@ export default function App() {
         : 'chat'
   const { projects, currentProjectId, setProjects, setCurrentProject } = useProjectStore()
   useBrowserAgentDriver(currentProjectId)
-  const { setSettings } = useSettingsStore()
+  const {
+    setSettings,
+    setModels,
+    setModelCatalog,
+    setModelRecommendations,
+    setLmstudioResources,
+    setModelsCache,
+  } = useSettingsStore()
   const {
     setBackendOnline,
     setOnboardingReady,
@@ -183,7 +192,23 @@ export default function App() {
       api.health()
         .then(() => setBackendOnline(true))
         .catch(() => setBackendOnline(false))
-      api.settings.get().then(setSettings).catch(() => {})
+      api.settings
+        .get()
+        .then((settings) => {
+          setSettings(settings)
+          const provider = activeProviderFromSettings(settings)
+          void api.settings.models(provider, false).then((response) => {
+            if (cancelled) return
+            setModelsCache(provider, response)
+            applyModelsResponse(response, {
+              setModels,
+              setModelCatalog,
+              setModelRecommendations,
+              setLmstudioResources,
+            })
+          })
+        })
+        .catch(() => {})
 
       const [onboarding, p] = await Promise.all([
         api.onboarding.status().catch(() => ({ complete: false, project_count: 0 })),

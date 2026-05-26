@@ -3329,11 +3329,12 @@ def test_rollback_workspace_recreates_from_source(client, tmp_path):
     from app.core.enums import RunStatus
     from app.db.models import ProjectModel, RunModel, TaskModel
     from app.db.session import SessionLocal
-    from app.services.workspace_service import runs_root
+    from app.services.workspace_service import runs_root, workspace_slug_for_project
 
     source = tmp_path / "rollback_source"
     source.mkdir()
     (source / "main.py").write_text("source version\n")
+    slug = workspace_slug_for_project("RollbackWorkspace", source)
 
     db = SessionLocal()
     try:
@@ -3373,7 +3374,8 @@ def test_rollback_workspace_recreates_from_source(client, tmp_path):
 
     response = client.post(f"/api/runs/{run_id}/rollback-workspace", headers=HEADERS)
     assert response.status_code == 200
-    assert (workspace / "main.py").read_text() == "source version\n"
+    reset_workspace = runs_root() / slug
+    assert (reset_workspace / "main.py").read_text() == "source version\n"
 
 
 def test_approve_snapshot_and_rollback_promote(client, tmp_path):
@@ -3383,11 +3385,12 @@ def test_approve_snapshot_and_rollback_promote(client, tmp_path):
     from app.db.models import ArtifactModel, ProjectModel, RunEventModel, RunModel, TaskModel
     from app.db.session import SessionLocal
     from app.services.snapshot_service import SNAPSHOTS_ROOT
-    from app.services.workspace_service import runs_root
+    from app.services.workspace_service import runs_root, workspace_slug_for_project
 
     source = tmp_path / "promote_source"
     source.mkdir()
     (source / "main.py").write_text("original source\n")
+    slug = workspace_slug_for_project("PromoteRollback", source)
 
     db = SessionLocal()
     try:
@@ -3409,7 +3412,7 @@ def test_approve_snapshot_and_rollback_promote(client, tmp_path):
         )
         db.add(run)
         db.flush()
-        workspace = runs_root() / run.id
+        workspace = runs_root() / slug
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "main.py").write_text("promoted content\n")
         run.workspace_path = str(workspace)
@@ -3480,11 +3483,12 @@ def test_approve_runs_supervisor_and_writes_docs(client, tmp_path):
     from app.db.session import SessionLocal
     from app.providers.fake import FakeProvider
     from app.providers.registry import ProviderRegistry
-    from app.services.workspace_service import runs_root
+    from app.services.workspace_service import runs_root, workspace_slug_for_project
 
     source = tmp_path / "supervisor_source"
     source.mkdir()
     (source / "main.py").write_text("original\n")
+    slug = workspace_slug_for_project("SupervisorApprove", source)
 
     doc_path = ".ai-copilot/plans/deployed.md"
     doc_content = "# Deployed\n\nSynced after promotion.\n"
@@ -3532,7 +3536,7 @@ def test_approve_runs_supervisor_and_writes_docs(client, tmp_path):
         )
         db.add(run)
         db.flush()
-        workspace = runs_root() / run.id
+        workspace = runs_root() / slug
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "main.py").write_text("promoted content\n")
         run.workspace_path = str(workspace)
@@ -3630,7 +3634,7 @@ def test_approve_run_returns_warnings_for_report_substitution(client, tmp_path):
     from app.core.enums import RunStatus
     from app.db.models import ArtifactModel, ProjectModel, RunEventModel, RunModel, TaskModel
     from app.db.session import SessionLocal
-    from app.services.workspace_service import runs_root
+    from app.services.workspace_service import runs_root, workspace_slug_for_project
 
     source = tmp_path / "warning_source"
     source.mkdir()
@@ -3662,7 +3666,8 @@ def test_approve_run_returns_warnings_for_report_substitution(client, tmp_path):
         db.add(run)
         db.flush()
         run_id = run.id
-        workspace = runs_root() / run.id
+        workspace = runs_root() / workspace_slug_for_project("Warning Approval", source)
+        workspace.mkdir(parents=True, exist_ok=True)
         (workspace / ".ai-copilot" / "reports").mkdir(parents=True, exist_ok=True)
         (workspace / ".ai-copilot" / "reports" / "kanban-implementation.md").write_text("# Report only\n")
         run.workspace_path = str(workspace)

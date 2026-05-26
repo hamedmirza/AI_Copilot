@@ -79,8 +79,12 @@ export const api = {
     update: (data: Record<string, unknown>) =>
       request('/api/settings', { method: 'PUT', body: JSON.stringify(data) }),
     reset: () => request<Record<string, unknown>>('/api/settings/reset', { method: 'POST' }),
-    models: (provider?: 'lmstudio' | 'ollama') =>
-      request<{
+    models: (provider?: 'lmstudio' | 'ollama', refresh = false) => {
+      const params = new URLSearchParams()
+      if (provider) params.set('provider', provider)
+      if (refresh) params.set('refresh', 'true')
+      const query = params.toString()
+      return request<{
         provider?: string
         models: string[]
         catalog?: Array<{
@@ -98,7 +102,8 @@ export const api = {
           loaded_count: number
           loaded_size_gb: number
         }
-      }>(`/api/settings/models${provider ? `?provider=${provider}` : ''}`),
+      }>(`/api/settings/models${query ? `?${query}` : ''}`)
+    },
   },
   onboarding: {
     status: () => request<{ complete: boolean; project_count: number }>('/api/onboarding/status'),

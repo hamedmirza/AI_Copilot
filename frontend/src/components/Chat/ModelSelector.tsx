@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { formatModelOptionLabel } from '@/lib/lmstudioModels'
+import { modelOptionsForSelect } from '@/lib/providerModels'
 import type { ChatMode, ChatModelSelectionMode, LMStudioModelCatalogEntry } from '@/store'
 
 interface ModelSelectorProps {
@@ -10,6 +11,7 @@ interface ModelSelectorProps {
   catalog?: LMStudioModelCatalogEntry[]
   resourcesPressure?: string | null
   disabled?: boolean
+  modelsLoading?: boolean
   onSelectionModeChange: (mode: ChatModelSelectionMode) => void
   onModelChange: (model: string) => void
 }
@@ -22,12 +24,11 @@ export function ModelSelector({
   catalog = [],
   resourcesPressure = null,
   disabled,
+  modelsLoading = false,
   onSelectionModeChange,
   onModelChange,
 }: ModelSelectorProps) {
-  const options = useMemo(() => {
-    return Array.from(new Set([model, ...models].filter(Boolean)))
-  }, [model, models])
+  const options = useMemo(() => modelOptionsForSelect(models, model), [model, models])
 
   return (
     <div className="flex items-center gap-2 flex-wrap text-xs text-[var(--text-secondary)]">
@@ -46,10 +47,14 @@ export function ModelSelector({
           className="min-w-[220px] bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-sm text-[var(--text-primary)]"
           value={model}
           onChange={(event) => onModelChange(event.target.value)}
-          disabled={disabled || options.length === 0}
+          disabled={disabled || modelsLoading || options.length === 0}
         >
           <option value="" disabled>
-            {options.length === 0 ? 'No models available' : 'Select a model'}
+            {modelsLoading
+              ? 'Loading models…'
+              : options.length === 0
+                ? 'No models available'
+                : 'Select a model'}
           </option>
           {options.map((option) => (
             <option key={option} value={option}>

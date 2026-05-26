@@ -12,6 +12,11 @@ import {
 } from '@/lib/chatStreaming'
 import { applyModelsResponse } from '@/lib/lmstudioModels'
 import {
+  activeProviderFromSettings,
+  createSaveSequencer,
+  isModelsCacheFresh,
+} from '@/lib/providerModels'
+import {
   elementContextPayload,
   formatElementForAgentTask,
   inferValidationProfile,
@@ -92,6 +97,8 @@ export function ChatPanel() {
   const setModelCatalog = useSettingsStore((state) => state.setModelCatalog)
   const setModelRecommendations = useSettingsStore((state) => state.setModelRecommendations)
   const setLmstudioResources = useSettingsStore((state) => state.setLmstudioResources)
+  const setModelsCache = useSettingsStore((state) => state.setModelsCache)
+  const modelsCacheByProvider = useSettingsStore((state) => state.modelsCacheByProvider)
   const appSettings = useSettingsStore((state) => state.settings)
 
   const sessions = useChatStore((state) => state.sessions)
@@ -170,7 +177,15 @@ export function ChatPanel() {
 
   const [searchResults, setSearchResults] = useState<typeof sessions | null>(null)
   const [stopping, setStopping] = useState(false)
+  const [modelsLoading, setModelsLoading] = useState(false)
   const previousSessionIdRef = useRef<string | null>(null)
+  const modelSaveInFlightRef = useRef(false)
+  const sessionSaveSeqRef = useRef(createSaveSequencer())
+
+  const activeProvider = useMemo(
+    () => activeProviderFromSettings(appSettings),
+    [appSettings.ollama_enabled],
+  )
 
   const agentWorking = useMemo(() => {
     if (submitting || streaming) return true
@@ -337,24 +352,48 @@ export function ChatPanel() {
   }, [setMessages, setSpawnedRunIds])
 
   useEffect(() => {
-    if (availableModels.length > 0) return
+    let cancelled = false
+    const cached = modelsCacheByProvider[activeProvider]
+    if (cached && isModelsCacheFresh(cached.fetchedAt)) {
+      applyModelsResponse(cached.response, {
+        setModels,
+        setModelCatalog,
+        setModelRecommendations,
+        setLmstudioResources,
+      })
+      return () => {
+        cancelled = true
+      }
+    }
+
+    setModelsLoading(true)
     void api.settings
-      .models()
-      .then((response) =>
+      .models(activeProvider, false)
+      .then((response) => {
+        if (cancelled) return
+        setModelsCache(activeProvider, response)
         applyModelsResponse(response, {
           setModels,
           setModelCatalog,
           setModelRecommendations,
           setLmstudioResources,
-        }),
-      )
+        })
+      })
       .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setModelsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [
-    availableModels.length,
+    activeProvider,
+    modelsCacheByProvider,
     setModels,
     setModelCatalog,
     setModelRecommendations,
     setLmstudioResources,
+    setModelsCache,
   ])
 
   useEffect(() => {
@@ -412,47 +451,48 @@ export function ChatPanel() {
   }, [clearRunEvents, clearStreamingContent, currentSessionId, loadMessages, setPendingToolCalls, setStreaming])
 
   useEffect(() => {
-    if (!currentSession) return
+    if (!currentSession || modelSaveInFlightRef.current) return
     setActiveMode(normalizeChatMode(currentSession.mode))
     setModelSelectionMode(normalizeModelSelectionMode(currentSession.model_override))
     setSelectedModel(currentSession.model_override || '')
   }, [currentSession, setActiveMode, setModelSelectionMode, setSelectedModel])
 
   const handleModelSelectionModeChange = useCallback(async (nextMode: ChatModelSelectionMode) => {
-    setModelSelectionMode(nextMode)
     if (nextMode === 'manual') {
       if (!selectedModel) {
         showError('Select a model to use Manual mode')
         return
       }
-      if (currentSession) {
-        upsertSession({ ...currentSession, model_override: selectedModel })
-      }
-      if (currentSessionId) {
-        try {
-          const updated = await api.chat.sessions.update(currentSessionId, { model_override: selectedModel })
-          upsertSession(toChatSession(updated))
-        } catch (error) {
-          showError(error)
-          return
-        }
-      }
-      showSuccess(`Chat model set to ${selectedModel}`)
-      return
     }
+    const ticket = sessionSaveSeqRef.current.nextTicket()
+    modelSaveInFlightRef.current = true
+    setModelSelectionMode(nextMode)
+    const override = nextMode === 'manual' ? selectedModel : null
     if (currentSession) {
-      upsertSession({ ...currentSession, model_override: null })
+      upsertSession({ ...currentSession, model_override: override })
     }
     if (currentSessionId) {
       try {
-        const updated = await api.chat.sessions.update(currentSessionId, { model_override: null })
+        const updated = await api.chat.sessions.update(currentSessionId, {
+          model_override: override,
+        })
+        if (!sessionSaveSeqRef.current.isLatest(ticket)) return
         upsertSession(toChatSession(updated))
       } catch (error) {
+        if (!sessionSaveSeqRef.current.isLatest(ticket)) return
         showError(error)
         return
+      } finally {
+        modelSaveInFlightRef.current = false
       }
+    } else {
+      modelSaveInFlightRef.current = false
     }
-    showSuccess('Chat model selection set to Auto')
+    showSuccess(
+      nextMode === 'manual'
+        ? `Chat model set to ${selectedModel}`
+        : 'Chat model selection set to Auto',
+    )
   }, [
     currentSession,
     currentSessionId,
@@ -476,6 +516,9 @@ export function ChatPanel() {
   }, [currentSession, currentSessionId, effectiveNothink, upsertSession])
 
   const handleManualModelChange = useCallback(async (model: string) => {
+    if (!model) return
+    const ticket = sessionSaveSeqRef.current.nextTicket()
+    modelSaveInFlightRef.current = true
     setModelSelectionMode('manual')
     setSelectedModel(model)
     if (currentSession) {
@@ -484,11 +527,17 @@ export function ChatPanel() {
     if (currentSessionId) {
       try {
         const updated = await api.chat.sessions.update(currentSessionId, { model_override: model })
+        if (!sessionSaveSeqRef.current.isLatest(ticket)) return
         upsertSession(toChatSession(updated))
       } catch (error) {
+        if (!sessionSaveSeqRef.current.isLatest(ticket)) return
         showError(error)
         return
+      } finally {
+        modelSaveInFlightRef.current = false
       }
+    } else {
+      modelSaveInFlightRef.current = false
     }
     showSuccess(`Chat model set to ${model}`)
   }, [
@@ -825,6 +874,7 @@ export function ChatPanel() {
             catalog={modelCatalog}
             resourcesPressure={lmstudioResources?.pressure ?? null}
             disabled={composerDisabled}
+            modelsLoading={modelsLoading}
             onSelectionModeChange={(mode) => void handleModelSelectionModeChange(mode)}
             onModelChange={(model) => void handleManualModelChange(model)}
           />

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -39,6 +40,45 @@ def runs_root() -> Path:
     root = Path(__file__).resolve().parents[3] / "runtime" / "workspaces"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _sanitize_workspace_slug(name: str) -> str:
+    cleaned = name.strip().replace("/", "-").replace("\\", "-")
+    cleaned = re.sub(r"[^\w.\- ]", "-", cleaned, flags=re.ASCII)
+    cleaned = re.sub(r"\s+", "-", cleaned).strip(".-")
+    return (cleaned[:120] if cleaned else "workspace")
+
+
+def workspace_slug_for_project(project_name: str, source_repo: Path | str) -> str:
+    """Stable folder name under runs_root — matches source repo directory name when possible."""
+    source = Path(source_repo).expanduser().resolve()
+    base = source.name
+    if not base or base in {".", ".."}:
+        base = project_name.strip() or "workspace"
+    return _sanitize_workspace_slug(base)
+
+
+def workspace_path_for_project(project_name: str, source_repo: Path | str) -> Path:
+    return (runs_root() / workspace_slug_for_project(project_name, source_repo)).resolve()
+
+
+def active_workspace_dir_names(db_run_rows: list) -> set[str]:
+    """Directory names under runs_root that belong to active runs (for orphan purge)."""
+    names: set[str] = set()
+    for run in db_run_rows:
+        if getattr(run, "workspace_path", None):
+            path = Path(run.workspace_path).resolve()
+            if runs_root().resolve() in path.parents or path.parent == runs_root().resolve():
+                names.add(path.name)
+        project = getattr(run, "project", None)
+        if project is not None:
+            names.add(
+                workspace_slug_for_project(
+                    getattr(project, "name", "") or "",
+                    getattr(project, "source_repo_spec", "") or "",
+                )
+            )
+    return names
 
 
 def _resolve_source_repo(source_repo: Path) -> Path:
@@ -89,12 +129,12 @@ def _link_dependency_dirs(source_root: Path, workspace: Path) -> None:
         workspace_dep.symlink_to(source_dep)
 
 
-def prepare_run_workspace(source_repo: Path, run_id: str) -> Path:
+def prepare_run_workspace(source_repo: Path, workspace_name: str) -> Path:
     source = _resolve_source_repo(source_repo)
     if not source.exists():
         raise NotFoundError(f"Source repo not found: {source}")
 
-    workspace = (runs_root() / run_id).resolve()
+    workspace = (runs_root() / _sanitize_workspace_slug(workspace_name)).resolve()
     if workspace.exists():
         shutil.rmtree(workspace)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -163,15 +203,36 @@ def promote_workspace_to_source(workspace: Path, source_repo: Path) -> None:
         shutil.copy2(path, dest)
 
 
-def discard_run_workspace(run_id: str) -> None:
-    workspace = runs_root() / run_id
+def discard_run_workspace(workspace_name: str) -> None:
+    workspace = runs_root() / _sanitize_workspace_slug(workspace_name)
     if workspace.exists():
         shutil.rmtree(workspace)
 
 
-def reset_run_workspace(source_repo: Path, run_id: str) -> Path:
-    discard_run_workspace(run_id)
-    return prepare_run_workspace(source_repo, run_id)
+def discard_run_workspace_path(workspace: Path) -> None:
+    path = workspace.resolve()
+    root = runs_root().resolve()
+    if path.exists() and (path == root or root in path.parents):
+        shutil.rmtree(path)
+
+
+def reset_run_workspace(source_repo: Path, workspace_name: str) -> Path:
+    discard_run_workspace(workspace_name)
+    return prepare_run_workspace(source_repo, workspace_name)
+
+
+def cleanup_run_workspace_for_run(
+    run,
+    *,
+    project_name: str,
+    source_repo_spec: str,
+) -> None:
+    if getattr(run, "workspace_path", None):
+        path = Path(run.workspace_path)
+        if path.exists():
+            discard_run_workspace_path(path)
+            return
+    discard_run_workspace(workspace_slug_for_project(project_name, source_repo_spec))
 
 
 def list_workspace_changed_files(workspace: Path, source_root: Path) -> list[str]:
@@ -198,6 +259,18 @@ def list_workspace_changed_files(workspace: Path, source_root: Path) -> list[str
 
 
 # Aliases used across the codebase
-clone_for_run = prepare_run_workspace
+def clone_for_run(source_repo: Path, project_name: str, source_repo_spec: Path | str | None = None) -> Path:
+    spec = source_repo_spec if source_repo_spec is not None else source_repo
+    slug = workspace_slug_for_project(project_name, spec)
+    return prepare_run_workspace(source_repo, slug)
+
+
 promote_to_source = promote_workspace_to_source
-cleanup_run_workspace = discard_run_workspace
+
+
+def cleanup_run_workspace(run, project) -> None:
+    cleanup_run_workspace_for_run(
+        run,
+        project_name=project.name,
+        source_repo_spec=project.source_repo_spec,
+    )

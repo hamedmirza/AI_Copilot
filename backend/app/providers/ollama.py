@@ -12,6 +12,9 @@ from app.schemas.provider import ProviderHealthResponse
 
 logger = logging.getLogger(__name__)
 
+# Settings/model-picker listing should fail fast when the host is down.
+_SETTINGS_LIST_TIMEOUT = httpx.Timeout(connect=2.0, read=8.0, write=5.0, pool=2.0)
+
 
 def normalize_ollama_base_url(base_url: str) -> str:
     """Ensure OpenAI-compatible paths (/v1/chat/completions, /v1/models)."""
@@ -312,6 +315,37 @@ class OllamaProvider(BaseProvider):
                 return self._list_models_native()
             except httpx.HTTPError:
                 return []
+
+    def list_models_for_settings(self) -> list[str]:
+        """List models using a short timeout (settings UI / model picker)."""
+        client = httpx.Client(timeout=_SETTINGS_LIST_TIMEOUT)
+        headers: dict[str, str] = {}
+        try:
+            response = client.get(f"{self.base_url}/models")
+            response.raise_for_status()
+            data = response.json()
+            models = sorted(
+                str(item.get("id"))
+                for item in data.get("data", [])
+                if isinstance(item, dict) and item.get("id")
+            )
+            if models:
+                return models
+        except httpx.HTTPError:
+            pass
+        try:
+            response = client.get(f"{ollama_native_root(self.base_url)}/api/tags")
+            response.raise_for_status()
+            data = response.json()
+            names: list[str] = []
+            for item in data.get("models") or []:
+                if isinstance(item, dict) and item.get("name"):
+                    names.append(str(item["name"]))
+            return sorted(names)
+        except httpx.HTTPError:
+            return []
+        finally:
+            client.close()
 
     def _tool_calls_from_message(self, message: dict[str, Any]) -> list[ChatToolCall]:
         calls: list[ChatToolCall] = []

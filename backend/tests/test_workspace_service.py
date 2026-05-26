@@ -3,7 +3,11 @@ from pathlib import Path
 import pytest
 
 from app.core.exceptions import ValidationError
-from app.services.workspace_service import prepare_run_workspace
+from app.services.workspace_service import (
+    prepare_run_workspace,
+    workspace_path_for_project,
+    workspace_slug_for_project,
+)
 from app.tools.lint_runner import canonical_frontend_required_commands, scope_profile_commands
 
 
@@ -65,6 +69,13 @@ def test_prepare_run_workspace_rejects_workspace_source(tmp_path: Path):
         prepare_run_workspace(workspace, "bad-run")
 
 
+def test_workspace_slug_matches_repo_directory_name(tmp_path: Path):
+    repo = tmp_path / "AI_Assitant"
+    repo.mkdir()
+    assert workspace_slug_for_project("AI Assistant", repo) == "AI_Assitant"
+    assert workspace_path_for_project("AI Assistant", repo).name == "AI_Assitant"
+
+
 def test_prepare_run_workspace_clone_from_repo_root(tmp_path: Path, monkeypatch):
     repo = tmp_path / "AI_Copilot"
     repo.mkdir()
@@ -75,6 +86,7 @@ def test_prepare_run_workspace_clone_from_repo_root(tmp_path: Path, monkeypatch)
 
     monkeypatch.setattr("app.services.workspace_service.runs_root", lambda: tmp_path / "runtime" / "workspaces")
 
-    workspace = prepare_run_workspace(repo, "fresh-run")
+    workspace = prepare_run_workspace(repo, workspace_slug_for_project("Copilot", repo))
+    assert workspace.name == "AI_Copilot"
     assert (workspace / "README.md").exists()
     assert not (workspace / "runtime" / "workspaces").exists()

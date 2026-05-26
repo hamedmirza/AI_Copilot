@@ -209,7 +209,9 @@ class ConfigService:
         from app.providers.ollama import normalize_ollama_base_url
 
         config = self.get_all()
-        ProviderRegistry.get().reload(config)
+        registry = ProviderRegistry.get()
+        registry.reload(config)
+        registry.invalidate_models_detailed_cache()
         merged = {**self._DEFAULTS, **config}
         if merged.get("ollama_base_url"):
             merged["ollama_base_url"] = normalize_ollama_base_url(str(merged["ollama_base_url"]))

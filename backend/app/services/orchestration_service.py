@@ -828,7 +828,7 @@ class OrchestrationService:
         if run.workspace_path and Path(run.workspace_path).is_dir():
             workspace = Path(run.workspace_path)
         else:
-            workspace = clone_for_run(source, run_id)
+            workspace = clone_for_run(source, project.name, source)
             run.workspace_path = str(workspace)
             db.commit()
 

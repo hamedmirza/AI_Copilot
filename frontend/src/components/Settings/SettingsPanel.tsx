@@ -1,7 +1,15 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '@/api/client'
 import { useSettingsStore, useAppStore } from '@/store'
 import { applyModelsResponse, recommendedLabel, type ModelsApiResponse } from '@/lib/lmstudioModels'
+import {
+  activeProviderFromSettings,
+  createSaveSequencer,
+  isModelsCacheFresh,
+  modelOptionsForSelect,
+  statusFromModelsResponse,
+  type ProviderKind,
+} from '@/lib/providerModels'
 import { showError, showSuccess } from '@/lib/toast'
 import { Button, Skeleton } from '@/components/ui/primitives'
 
@@ -14,8 +22,6 @@ const AGENTS = [
   { key: 'model_tester', label: 'Tester', recommended: 'qwen2.5-coder-7b-instruct' },
   { key: 'model_supervisor', label: 'Supervisor', recommended: 'qwen2.5-72b-instruct' },
 ]
-
-type ProviderKind = 'lmstudio' | 'ollama'
 
 const CHAT_MODELS = [
   { key: 'model_chat', label: 'General', recommended: 'qwen2.5-72b-instruct' },
@@ -61,12 +67,17 @@ export function SettingsPanel() {
     setModelCatalog,
     setModelRecommendations,
     setLmstudioResources,
+    modelsCacheByProvider,
+    setModelsCache,
+    clearModelsCache,
   } = useSettingsStore()
   const showSettings = useAppStore((s) => s.showSettings)
   const setShowSettings = useAppStore((s) => s.setShowSettings)
-  const [loading, setLoading] = useState(true)
+  const [settingsReady, setSettingsReady] = useState(false)
+  const [modelsLoading, setModelsLoading] = useState<Partial<Record<ProviderKind, boolean>>>({})
   const [pendingProvider, setPendingProvider] = useState<ProviderKind>('lmstudio')
   const [modelsByProvider, setModelsByProvider] = useState<Partial<Record<ProviderKind, ModelsApiResponse>>>({})
+  const saveSeqRef = useRef(createSaveSequencer())
   const [testing, setTesting] = useState(false)
   const [testByProvider, setTestByProvider] = useState<Partial<Record<ProviderKind, { ok: boolean; msg: string }>>>({})
   const [saved, setSaved] = useState(false)
@@ -78,35 +89,125 @@ export function SettingsPanel() {
   const [serverForm, setServerForm] = useState({ name: '', command: '', args: '', envJson: '{}' })
   const importInputRef = useRef<HTMLInputElement>(null)
 
+  const applyActiveProviderModels = useCallback(
+    (response: ModelsApiResponse) => {
+      applyModelsResponse(response, {
+        setModels,
+        setModelCatalog,
+        setModelRecommendations,
+        setLmstudioResources,
+      })
+    },
+    [setModels, setModelCatalog, setModelRecommendations, setLmstudioResources],
+  )
+
+  const hydrateModelsFromCache = useCallback(
+    (provider: ProviderKind) => {
+      const cached = modelsCacheByProvider[provider]
+      if (!cached || !isModelsCacheFresh(cached.fetchedAt)) return false
+      setModelsByProvider((prev) => ({ ...prev, [provider]: cached.response }))
+      const status = statusFromModelsResponse(cached.response)
+      if (provider === 'lmstudio') setLmstudioStatus(status)
+      else setOllamaStatus(status)
+      if (provider === activeProviderFromSettings(useSettingsStore.getState().settings)) {
+        applyActiveProviderModels(cached.response)
+      }
+      return true
+    },
+    [modelsCacheByProvider, applyActiveProviderModels],
+  )
+
+  const loadProviderModels = useCallback(
+    async (provider: ProviderKind, refresh = false) => {
+      if (!refresh) {
+        const cached = useSettingsStore.getState().modelsCacheByProvider[provider]
+        if (cached && isModelsCacheFresh(cached.fetchedAt)) {
+          hydrateModelsFromCache(provider)
+          return cached.response
+        }
+      }
+      setModelsLoading((prev) => ({ ...prev, [provider]: true }))
+      try {
+        const response = await api.settings.models(provider, refresh)
+        setModelsCache(provider, response)
+        setModelsByProvider((prev) => ({ ...prev, [provider]: response }))
+        const status = statusFromModelsResponse(response)
+        if (provider === 'lmstudio') setLmstudioStatus(status)
+        else setOllamaStatus(status)
+        return response
+      } finally {
+        setModelsLoading((prev) => ({ ...prev, [provider]: false }))
+      }
+    },
+    [hydrateModelsFromCache, setModelsCache],
+  )
+
   useEffect(() => {
     if (!showSettings) return
-    setLoading(true)
-    Promise.all([
-      api.settings.get(),
-      api.settings.models('lmstudio'),
-      api.settings.models('ollama'),
-      api.mcp.servers.list().catch(() => [] as Array<Record<string, unknown>>),
-    ])
-      .then(([s, lmModels, ollamaModels, servers]) => {
+    let cancelled = false
+
+    const cachedSettings = useSettingsStore.getState().settings
+    const hasCachedSettings = Object.keys(cachedSettings).length > 0
+    if (hasCachedSettings) {
+      setSettingsReady(true)
+      const active = activeProviderFromSettings(cachedSettings)
+      setPendingProvider(active)
+      hydrateModelsFromCache(active)
+    } else {
+      setSettingsReady(false)
+    }
+
+    void api.settings
+      .get()
+      .then((s) => {
+        if (cancelled) return
         setSettings(s)
-        const active: ProviderKind = s.ollama_enabled ? 'ollama' : 'lmstudio'
-        setModelsByProvider({ lmstudio: lmModels, ollama: ollamaModels })
-        const activeModels = active === 'ollama' ? ollamaModels : lmModels
-        applyModelsResponse(activeModels, {
-          setModels,
-          setModelCatalog,
-          setModelRecommendations,
-          setLmstudioResources,
-        })
-        setMcpServers(servers)
-        void api.providerHealth().then((health) => {
-          setLmstudioStatus(health.lmstudio)
-          setOllamaStatus(health.ollama)
-        }).catch(() => {})
+        const active = activeProviderFromSettings(s)
+        setPendingProvider(active)
+        setSettingsReady(true)
+        if (!hydrateModelsFromCache(active)) {
+          void loadProviderModels(active, false).then((response) => {
+            if (cancelled || !response) return
+            if (activeProviderFromSettings(useSettingsStore.getState().settings) === active) {
+              applyActiveProviderModels(response)
+            }
+          })
+        }
       })
-      .catch(showError)
-      .finally(() => setLoading(false))
-  }, [showSettings, setSettings, setModels, setModelCatalog, setModelRecommendations, setLmstudioResources])
+      .catch((error) => {
+        if (!cancelled) showError(error)
+      })
+
+    void api.mcp.servers
+      .list()
+      .then((servers) => {
+        if (!cancelled) setMcpServers(servers)
+      })
+      .catch(() => {})
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    showSettings,
+    setSettings,
+    loadProviderModels,
+    applyActiveProviderModels,
+    hydrateModelsFromCache,
+  ])
+
+  useEffect(() => {
+    if (!showSettings || !settingsReady) return
+    if (modelsByProvider[pendingProvider] || modelsLoading[pendingProvider]) return
+    void loadProviderModels(pendingProvider)
+  }, [
+    showSettings,
+    settingsReady,
+    pendingProvider,
+    modelsByProvider,
+    modelsLoading,
+    loadProviderModels,
+  ])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -120,7 +221,8 @@ export function SettingsPanel() {
     return () => window.removeEventListener('keydown', handler)
   }, [setShowSettings])
 
-  const activeProvider: ProviderKind = settings.ollama_enabled ? 'ollama' : 'lmstudio'
+  const activeProvider: ProviderKind = activeProviderFromSettings(settings)
+  const editingInactiveProvider = pendingProvider !== activeProvider
   const providerLabel = (provider: ProviderKind) =>
     provider === 'ollama' ? 'Ollama' : 'LM Studio'
   const snapshotKey = (provider: ProviderKind) =>
@@ -139,20 +241,9 @@ export function SettingsPanel() {
     setPendingProvider(settings.ollama_enabled ? 'ollama' : 'lmstudio')
   }, [showSettings, settings.ollama_enabled])
 
-  const loadProviderModels = async (provider: ProviderKind) => {
-    const m = await api.settings.models(provider)
-    setModelsByProvider((prev) => ({ ...prev, [provider]: m }))
-    return m
-  }
-
   const refreshModels = async () => {
-    const m = await loadProviderModels(activeProvider)
-    applyModelsResponse(m, {
-      setModels,
-      setModelCatalog,
-      setModelRecommendations,
-      setLmstudioResources,
-    })
+    const response = await loadProviderModels(activeProvider, true)
+    if (response) applyActiveProviderModels(response)
   }
 
   const roleModelValue = (key: string, editor: ProviderKind) => {
@@ -161,32 +252,45 @@ export function SettingsPanel() {
   }
 
   const saveRoleModel = async (key: string, value: string, editor: ProviderKind) => {
+    if (editingInactiveProvider) return
+    const ticket = saveSeqRef.current.nextTicket()
     if (editor === activeProvider) {
-      await save(key, value)
-      return
+      setSettings({ ...settings, [key]: value })
+    } else {
+      const snapKey = snapshotKey(editor)
+      const snap = { ...getRoleSnapshot(editor), [key]: value }
+      setSettings({ ...settings, [snapKey]: snap })
     }
-    const snapKey = snapshotKey(editor)
-    const snap = { ...getRoleSnapshot(editor), [key]: value }
     try {
-      const updated = await api.settings.update({ [snapKey]: snap }) as Record<string, unknown>
+      const payload =
+        editor === activeProvider
+          ? { [key]: value }
+          : { [snapshotKey(editor)]: { ...getRoleSnapshot(editor), [key]: value } }
+      const updated = (await api.settings.update(payload)) as Record<string, unknown>
+      if (!saveSeqRef.current.isLatest(ticket)) return
       setSettings(updated)
       setSaved(true)
       showSuccess('Saved')
       setTimeout(() => setSaved(false), 2000)
     } catch (e) {
+      if (!saveSeqRef.current.isLatest(ticket)) return
       showError(e)
     }
   }
 
   const save = async (key: string, value: unknown) => {
+    const ticket = saveSeqRef.current.nextTicket()
+    setSettings({ ...settings, [key]: value })
     try {
-      const updated = await api.settings.update({ [key]: value }) as Record<string, unknown>
+      const updated = (await api.settings.update({ [key]: value })) as Record<string, unknown>
+      if (!saveSeqRef.current.isLatest(ticket)) return updated
       setSettings(updated)
       setSaved(true)
       showSuccess('Saved')
       setTimeout(() => setSaved(false), 2000)
       return updated
     } catch (e) {
+      if (!saveSeqRef.current.isLatest(ticket)) return null
       showError(e)
       return null
     }
@@ -224,7 +328,7 @@ export function SettingsPanel() {
           ok: true,
           msg: `${label} connected — ${modelCount} model(s) available${pressure}`,
         }
-        await loadProviderModels(provider)
+        await loadProviderModels(provider, true)
         if (provider === activeProvider) {
           await refreshModels()
         }
@@ -237,7 +341,7 @@ export function SettingsPanel() {
           ok: false,
           msg: (err || 'Connected but model configuration needs attention') + suggestion,
         }
-        await loadProviderModels(provider)
+        await loadProviderModels(provider, true)
         if (provider === activeProvider) {
           await refreshModels()
         }
@@ -268,9 +372,9 @@ export function SettingsPanel() {
       }) as Record<string, unknown>
       setSettings(updated)
       const switched = pendingProvider !== activeProvider
-      await Promise.all([loadProviderModels('lmstudio'), loadProviderModels('ollama')])
-      await refreshModels()
-      await testConnection(pendingProvider)
+      const activeModels = await loadProviderModels(pendingProvider, true)
+      if (activeModels) applyActiveProviderModels(activeModels)
+      if (switched) await testConnection(pendingProvider)
       showSuccess(
         switched
           ? `Active provider set to ${providerLabel(pendingProvider)}`
@@ -361,7 +465,7 @@ export function SettingsPanel() {
           <button onClick={() => setShowSettings(false)} className="text-[var(--text-secondary)] hover:text-white">×</button>
         </div>
 
-        {loading ? (
+        {!settingsReady ? (
           <div className="space-y-3">{[1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-8" />)}</div>
         ) : (
           <div className="space-y-4">
@@ -385,8 +489,13 @@ export function SettingsPanel() {
               </div>
               <p className="text-xs mt-2 text-[var(--text-secondary)]">
                 Active: <strong className="text-[var(--text-primary)]">{providerLabel(activeProvider)}</strong>
-                {pendingProvider !== activeProvider && ` — Apply to switch to ${providerLabel(pendingProvider)}.`}
+                {editingInactiveProvider && ` — Apply to switch to ${providerLabel(pendingProvider)}.`}
               </p>
+              {editingInactiveProvider && (
+                <p className="text-xs mt-1 text-yellow-500/90">
+                  Role model dropdowns are disabled until you Apply — only the active provider is used for runs and chat.
+                </p>
+              )}
             </section>
 
             <section>
@@ -420,6 +529,9 @@ export function SettingsPanel() {
                   onChange={(e) => setSettings({ ...settings, lmstudio_base_url: e.target.value })}
                   onBlur={(e) => { void save('lmstudio_base_url', e.target.value); void testConnection('lmstudio') }}
                 />
+                {modelsLoading.lmstudio && (
+                  <p className="text-xs mt-1 text-[var(--text-secondary)]">Loading models…</p>
+                )}
                 {modelsByProvider.lmstudio?.resources && (
                   <p className="text-xs mt-1 text-[var(--text-secondary)]">
                     Loaded: {modelsByProvider.lmstudio.resources.loaded_count} model(s), {modelsByProvider.lmstudio.resources.loaded_size_gb} GB
@@ -452,14 +564,20 @@ export function SettingsPanel() {
                   onBlur={(e) => { void save('ollama_base_url', e.target.value); void testConnection('ollama') }}
                 />
                 <label className="block text-xs mt-3 mb-1">Default model</label>
+                {modelsLoading.ollama && (
+                  <p className="text-xs mb-1 text-[var(--text-secondary)]">Loading models…</p>
+                )}
                 <select
                   className="w-full bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-sm"
                   value={String(settings.ollama_model || '')}
-                  disabled={(modelsByProvider.ollama?.models.length ?? 0) === 0}
+                  disabled={modelsLoading.ollama || (modelsByProvider.ollama?.models.length ?? 0) === 0}
                   onChange={(e) => void save('ollama_model', e.target.value)}
                 >
                   <option value="">Select a model…</option>
-                  {(modelsByProvider.ollama?.models ?? []).map((m) => <option key={m} value={m}>{m}</option>)}
+                  {modelOptionsForSelect(
+                    modelsByProvider.ollama?.models ?? [],
+                    String(settings.ollama_model || ''),
+                  ).map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
                 {(modelsByProvider.ollama?.models.length ?? 0) > 0 && (
                   <p className="text-xs mt-1 text-[var(--text-secondary)]">
@@ -573,22 +691,30 @@ export function SettingsPanel() {
             <section>
               <h3 className="text-sm font-medium mb-2 text-[var(--text-secondary)]">
                 Per-Agent Models — {providerLabel(pendingProvider)}
+                {modelsLoading[pendingProvider] ? ' (loading…)' : ''}
               </h3>
               {AGENTS.map(({ key, label, recommended }) => {
                 const editorModels = modelsByProvider[pendingProvider]?.models ?? []
                 const editorRecs = modelsByProvider[pendingProvider]?.recommendations ?? {}
+                const current = roleModelValue(key, pendingProvider)
+                const options = modelOptionsForSelect(editorModels, current)
+                const rec = editorRecs[key]
                 return (
                   <div key={key} className="flex items-center gap-2 mb-2">
                     <label className="w-28 text-xs">{label}</label>
                     <select
-                      className="flex-1 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-sm"
-                      value={roleModelValue(key, pendingProvider)}
+                      className="flex-1 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-sm disabled:opacity-50"
+                      value={current}
+                      disabled={editingInactiveProvider || modelsLoading[pendingProvider]}
                       onChange={(e) => void saveRoleModel(key, e.target.value, pendingProvider)}
                     >
-                      <option value={editorRecs[key] || recommended}>
-                        {recommendedLabel(key, recommended, editorRecs)}
-                      </option>
-                      {editorModels.map((m) => <option key={m} value={m}>{m}</option>)}
+                      <option value="">— Select model —</option>
+                      {rec && options.includes(rec) && (
+                        <option value={rec}>{recommendedLabel(key, recommended, editorRecs)}</option>
+                      )}
+                      {options.filter((m) => m !== rec).map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
                     </select>
                   </div>
                 )
@@ -598,22 +724,30 @@ export function SettingsPanel() {
             <section>
               <h3 className="text-sm font-medium mb-2 text-[var(--text-secondary)]">
                 Chat Models — {providerLabel(pendingProvider)}
+                {modelsLoading[pendingProvider] ? ' (loading…)' : ''}
               </h3>
               {CHAT_MODELS.map(({ key, label, recommended }) => {
                 const editorModels = modelsByProvider[pendingProvider]?.models ?? []
                 const editorRecs = modelsByProvider[pendingProvider]?.recommendations ?? {}
+                const current = roleModelValue(key, pendingProvider)
+                const options = modelOptionsForSelect(editorModels, current)
+                const rec = editorRecs[key]
                 return (
                   <div key={key} className="flex items-center gap-2 mb-2">
                     <label className="w-28 text-xs">{label}</label>
                     <select
-                      className="flex-1 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-sm"
-                      value={roleModelValue(key, pendingProvider)}
+                      className="flex-1 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1 text-sm disabled:opacity-50"
+                      value={current}
+                      disabled={editingInactiveProvider || modelsLoading[pendingProvider]}
                       onChange={(e) => void saveRoleModel(key, e.target.value, pendingProvider)}
                     >
-                      <option value={editorRecs[key] || recommended}>
-                        {recommendedLabel(key, recommended, editorRecs)}
-                      </option>
-                      {editorModels.map((m) => <option key={m} value={m}>{m}</option>)}
+                      <option value="">— Select model —</option>
+                      {rec && options.includes(rec) && (
+                        <option value={rec}>{recommendedLabel(key, recommended, editorRecs)}</option>
+                      )}
+                      {options.filter((m) => m !== rec).map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
                     </select>
                   </div>
                 )
@@ -811,6 +945,9 @@ export function SettingsPanel() {
                 try {
                   const updated = await api.settings.reset()
                   setSettings(updated)
+                  clearModelsCache()
+                  setModelsByProvider({})
+                  void loadProviderModels(activeProviderFromSettings(updated), true)
                   setSaved(true)
                   showSuccess('Reset to defaults')
                   setTimeout(() => setSaved(false), 2000)

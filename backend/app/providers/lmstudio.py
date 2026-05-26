@@ -1,5 +1,6 @@
 import logging
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from uuid import uuid4
 
@@ -16,6 +17,9 @@ from app.services.lmstudio_catalog import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Tight budget for settings UI catalog probes (avoid multi-minute hangs on unreachable hosts).
+_CATALOG_HTTP_TIMEOUT = httpx.Timeout(connect=2.0, read=12.0, write=5.0, pool=2.0)
 
 
 class LMStudioProvider(BaseProvider):
@@ -343,21 +347,38 @@ class LMStudioProvider(BaseProvider):
                 model=self.model,
             )
 
+    def _fetch_catalog_v0(self) -> list[dict[str, Any]]:
+        try:
+            response = self._client.get(
+                f"{self._rest_base}/api/v0/models",
+                headers=self._headers(),
+                timeout=_CATALOG_HTTP_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return [item for item in data.get("data", []) if isinstance(item, dict)]
+        except httpx.HTTPError:
+            return []
+
+    def _fetch_catalog_v1(self) -> list[dict[str, Any]]:
+        try:
+            response = self._client.get(
+                f"{self._rest_base}/api/v1/models",
+                headers=self._headers(),
+                timeout=_CATALOG_HTTP_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return [item for item in data.get("models", []) if isinstance(item, dict)]
+        except httpx.HTTPError:
+            return []
+
     def fetch_catalog(self) -> LMStudioCatalog | None:
-        try:
-            v0_response = self._client.get(f"{self._rest_base}/api/v0/models", headers=self._headers())
-            v0_response.raise_for_status()
-            v0_data = v0_response.json()
-            v0_models = [item for item in v0_data.get("data", []) if isinstance(item, dict)]
-        except httpx.HTTPError:
-            v0_models = []
-        try:
-            v1_response = self._client.get(f"{self._rest_base}/api/v1/models", headers=self._headers())
-            v1_response.raise_for_status()
-            v1_data = v1_response.json()
-            v1_models = [item for item in v1_data.get("models", []) if isinstance(item, dict)]
-        except httpx.HTTPError:
-            v1_models = []
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            v0_future = pool.submit(self._fetch_catalog_v0)
+            v1_future = pool.submit(self._fetch_catalog_v1)
+            v0_models = v0_future.result()
+            v1_models = v1_future.result()
         if not v0_models and not v1_models:
             return None
         return merge_catalog_payload(v0_models, v1_models)

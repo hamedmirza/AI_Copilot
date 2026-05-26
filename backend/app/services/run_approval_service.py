@@ -160,7 +160,7 @@ def approve_run_sync(run_id: str, comment: str = "") -> dict:
             },
         )
         LearningService(db).finalize_terminal_run(run_id)
-        cleanup_run_workspace(run_id)
+        cleanup_run_workspace(run, project)
         event_bus.emit(run_id, {"type": "run_completed", "run_id": run_id})
         return {"ok": True, "warnings": warning_list, "approval_override": bool(run.approval_override)}
     finally:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -12,6 +13,8 @@ from app.providers.ollama import OllamaProvider, normalize_ollama_base_url, prob
 from app.services.lmstudio_catalog import LMStudioCatalog, SETTINGS_ROLE_KEYS
 
 logger = logging.getLogger(__name__)
+
+_MODELS_DETAILED_CACHE_TTL_SECONDS = 60.0
 
 
 @dataclass
@@ -62,6 +65,7 @@ class ProviderRegistry:
         self._lmstudio: LMStudioProvider | None = None
         self._ollama: OllamaProvider | None = None
         self._catalog_cache: LMStudioCatalog | None = None
+        self._models_detailed_cache: dict[str, tuple[float, ModelsListResult]] = {}
 
     @classmethod
     def get(cls) -> "ProviderRegistry":
@@ -74,6 +78,14 @@ class ProviderRegistry:
         self._lmstudio = None
         self._ollama = None
         self._catalog_cache = None
+
+    def invalidate_models_detailed_cache(self) -> None:
+        self._models_detailed_cache.clear()
+
+    def _models_detailed_cache_key(self, provider: str) -> str:
+        if provider == "ollama":
+            return f"ollama:{self._config.get('ollama_base_url', '')}"
+        return f"lmstudio:{self._config.get('lmstudio_base_url', '')}"
 
     def active_provider(self) -> str:
         return "ollama" if self._config.get("ollama_enabled") else "lmstudio"
@@ -330,16 +342,27 @@ class ProviderRegistry:
             return None
         return fallback
 
-    def list_models_detailed_for_provider(self, provider: str) -> ModelsListResult:
+    def list_models_detailed_for_provider(self, provider: str, *, refresh: bool = False) -> ModelsListResult:
+        cache_key = self._models_detailed_cache_key(provider)
+        if not refresh:
+            cached = self._models_detailed_cache.get(cache_key)
+            if cached is not None:
+                age = time.monotonic() - cached[0]
+                if age < _MODELS_DETAILED_CACHE_TTL_SECONDS:
+                    return cached[1]
+
         saved = dict(self._config)
         temp = {**saved, "ollama_enabled": provider == "ollama"}
         self.reload(temp)
         try:
-            return self.list_models_detailed()
+            result = self.list_models_detailed(refresh=refresh)
         finally:
             self.reload(saved)
 
-    def list_models_detailed(self) -> ModelsListResult:
+        self._models_detailed_cache[cache_key] = (time.monotonic(), result)
+        return result
+
+    def list_models_detailed(self, *, refresh: bool = False) -> ModelsListResult:
         if self.fake_provider is not None:
             models = self.fake_provider.list_models()
             return ModelsListResult(
@@ -350,7 +373,7 @@ class ProviderRegistry:
             )
         if self._config.get("ollama_enabled"):
             return self._list_ollama_models_detailed()
-        catalog = self.get_lmstudio_catalog(refresh=True)
+        catalog = self.get_lmstudio_catalog(refresh=refresh)
         if catalog is None:
             models = self.list_models()
             return ModelsListResult(
@@ -474,7 +497,7 @@ class ProviderRegistry:
         return None
 
     def _list_ollama_models_detailed(self) -> ModelsListResult:
-        models = self._ollama_provider().list_models()
+        models = self._ollama_provider().list_models_for_settings()
         configured = str(self._config.get("ollama_model", "")).strip()
         recommendations: dict[str, str] = {}
         if configured and configured in models:
