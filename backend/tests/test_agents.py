@@ -13,6 +13,8 @@ from app.agents import (
     TesterAgent,
     UIDesignerAgent,
 )
+from pydantic import ValidationError as PydanticValidationError
+
 from app.providers.fake import FakeProvider
 from app.schemas.agent_outputs import (
     ArchitectOutput,
@@ -89,6 +91,35 @@ def test_architect_agent(provider: FakeProvider):
     assert isinstance(result, ArchitectOutput)
     assert result.overview
     assert len(result.file_changes) >= 1
+
+
+def test_architect_rejects_empty_file_changes(provider: FakeProvider):
+    provider.set_response_for_keyword(
+        "architect",
+        {
+            "overview": "Design only",
+            "modules": ["core"],
+            "file_changes": [],
+            "dependencies": [],
+        },
+    )
+    with pytest.raises(PydanticValidationError):
+        ArchitectAgent(provider).design("Architect the change")
+
+
+def test_architect_strips_prose_dependencies():
+    output = ArchitectOutput(
+        overview="Extend web search",
+        modules=["services"],
+        file_changes=[
+            {"path": "backend/app/services/web_search_service.py", "action": "modify", "rationale": "providers"}
+        ],
+        dependencies=[
+            "web_search_service.py should support Google and DuckDuckGo",
+            "httpx",
+        ],
+    )
+    assert output.dependencies == ["httpx"]
 
 
 def test_ui_designer_runs_for_ui_wording(provider: FakeProvider):

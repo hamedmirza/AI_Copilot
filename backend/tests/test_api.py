@@ -139,6 +139,7 @@ def test_projects_endpoint_migrates_old_schema_db(tmp_path):
     try:
         run_columns = {row[1] for row in check.execute("PRAGMA table_info(runs)").fetchall()}
         task_columns = {row[1] for row in check.execute("PRAGMA table_info(tasks)").fetchall()}
+        project_columns = {row[1] for row in check.execute("PRAGMA table_info(projects)").fetchall()}
         tables = {row[0] for row in check.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     finally:
         check.close()
@@ -163,6 +164,7 @@ def test_projects_endpoint_migrates_old_schema_db(tmp_path):
         "allow_web_search",
     } <= run_columns
     assert {"task_kind", "allow_web_search"} <= task_columns
+    assert {"repo_mode", "stack_profile"} <= project_columns
     assert "global_skills" in tables
     assert "improvements" in tables
     assert "improvement_exposures" in tables
@@ -250,6 +252,31 @@ def test_task_creation_persists_web_search_flag(client, tmp_path):
     assert run.json()["allow_web_search"] is True
 
 
+def test_task_creation_infers_allow_web_search_from_description(client, tmp_path):
+    project_id = client.post(
+        "/api/projects",
+        json={
+            "name": "Web Search Infer Project",
+            "source_repo_spec": str(tmp_path),
+            "validation_profile": "python",
+        },
+        headers=HEADERS,
+    ).json()["id"]
+
+    created = client.post(
+        "/api/tasks",
+        json={
+            "project_id": project_id,
+            "description": "Extend backend/app/services/web_search_service.py with configurable providers",
+            "validation_profile": "python",
+        },
+        headers=HEADERS,
+    )
+    assert created.status_code == 200
+    assert created.json()["task"]["allow_web_search"] is True
+    assert created.json()["run"]["allow_web_search"] is True
+
+
 def test_build_context_base_includes_web_search_findings(client, tmp_path, monkeypatch):
     from app.db.models import RunModel, TaskModel
     from app.services.orchestration_service import OrchestrationService
@@ -303,6 +330,9 @@ def test_run_workspace_excludes_runtime_db_files(tmp_path):
     (source / "backend" / "app.db").write_text("live-db")
     (source / "backend" / "app.db-wal").write_text("live-wal")
     (source / "backend" / "app.db-shm").write_text("live-shm")
+    (source / "backend" / "test_app.db").write_text("pytest-db")
+    (source / "backend" / "test_app.db-wal").write_text("pytest-wal")
+    (source / "backend" / "test_app.db-shm").write_text("pytest-shm")
     (source / "frontend").mkdir()
     (source / "frontend" / "index.ts").write_text("export const ok = true;\n")
 
@@ -311,6 +341,9 @@ def test_run_workspace_excludes_runtime_db_files(tmp_path):
     assert not (workspace / "backend" / "app.db").exists()
     assert not (workspace / "backend" / "app.db-wal").exists()
     assert not (workspace / "backend" / "app.db-shm").exists()
+    assert not (workspace / "backend" / "test_app.db").exists()
+    assert not (workspace / "backend" / "test_app.db-wal").exists()
+    assert not (workspace / "backend" / "test_app.db-shm").exists()
     assert (workspace / "frontend" / "index.ts").exists()
 
 
@@ -432,6 +465,9 @@ def test_awaiting_approval_event_is_persisted(client, tmp_path):
     project_root = tmp_path / "awaiting_approval_project"
     project_root.mkdir()
     (project_root / "app.py").write_text("print('ready')\n")
+    (project_root / "pyproject.toml").write_text('[project]\nname="demo"\n', encoding="utf-8")
+    (project_root / "tests").mkdir()
+    (project_root / "AGENTS.md").write_text("# Demo\n", encoding="utf-8")
 
     db = SessionLocal()
     try:
@@ -460,12 +496,14 @@ def test_awaiting_approval_event_is_persisted(client, tmp_path):
         db.commit()
 
         service = OrchestrationService()
-        service._stage_planner = lambda db_arg, run_id, ctx: {"summary": "ok"}  # type: ignore[method-assign]
-        service._stage_architect = lambda db_arg, run_id, ctx: {"overview": "ok"}  # type: ignore[method-assign]
-        service._stage_ui = lambda db_arg, run_id, ctx: {"skipped": True}  # type: ignore[method-assign]
-        service._stage_coder = lambda db_arg, run_id, ctx, fs: {"summary": "ok"}  # type: ignore[method-assign]
+        service._stage_planner = lambda db_arg, run_id, ctx, fs: True  # type: ignore[method-assign]
+        service._stage_architect = lambda db_arg, run_id, ctx: True  # type: ignore[method-assign]
+        service._stage_ui = lambda db_arg, run_id, ctx: True  # type: ignore[method-assign]
+        service._stage_coder = lambda db_arg, run_id, ctx, fs: True  # type: ignore[method-assign]
         service._stage_reviewer_loop = lambda db_arg, run_id, ctx, fs, workspace, source: True  # type: ignore[method-assign]
         service._stage_tester = lambda db_arg, run_id, ctx, workspace: True  # type: ignore[method-assign]
+        service._stage_documentation = lambda db_arg, run_id, ctx, fs: True  # type: ignore[method-assign]
+        service._verify_dependencies = lambda db_arg, run_id, workspace, source: True  # type: ignore[method-assign]
         service._finalize_deployment_gates = lambda db_arg, run_id_arg, workspace_arg, source_arg: True  # type: ignore[method-assign]
 
         service._pipeline(db, run.id)
@@ -1231,6 +1269,8 @@ def test_tester_enforces_frontend_build_for_frontend_changes(client, tmp_path, m
     workspace.mkdir()
     (workspace / "frontend/src").mkdir(parents=True)
     (workspace / "frontend/src/App.tsx").write_text("export const App = () => null\n")
+    (workspace / "frontend/package.json").write_text('{"name":"frontend","scripts":{"build":"vite build"}}\n')
+    (workspace / "pyproject.toml").write_text('[project]\nname="demo"\n', encoding="utf-8")
 
     db = SessionLocal()
     try:
@@ -1614,12 +1654,19 @@ def test_running_run_resumes_from_current_stage(client, tmp_path):
 
         service = OrchestrationService()
         called: list[str] = []
-        service._stage_planner = lambda db_arg, run_id, ctx: called.append("planner") or {"summary": "ok"}  # type: ignore[method-assign]
-        service._stage_architect = lambda db_arg, run_id, ctx: called.append("architect") or {"overview": "ok"}  # type: ignore[method-assign]
-        service._stage_ui = lambda db_arg, run_id, ctx: called.append("ui_designer") or {"skipped": True}  # type: ignore[method-assign]
-        service._stage_coder = lambda db_arg, run_id, ctx, fs: called.append("coder") or {"summary": "ok"}  # type: ignore[method-assign]
+        service._stage_planner = lambda db_arg, run_id, ctx, fs: called.append("planner") or True  # type: ignore[method-assign]
+        service._stage_architect = lambda db_arg, run_id, ctx: called.append("architect") or True  # type: ignore[method-assign]
+        service._stage_ui = lambda db_arg, run_id, ctx: called.append("ui_designer") or True  # type: ignore[method-assign]
+        service._stage_coder = lambda db_arg, run_id, ctx, fs: called.append("coder") or True  # type: ignore[method-assign]
         service._stage_reviewer_loop = lambda db_arg, run_id, ctx, fs, workspace_arg, source_arg: called.append("reviewer") or True  # type: ignore[method-assign]
         service._stage_tester = lambda db_arg, run_id, ctx, workspace_arg: called.append("tester") or True  # type: ignore[method-assign]
+        service._stage_documentation = lambda db_arg, run_id, ctx, fs: True  # type: ignore[method-assign]
+        service._verify_dependencies = lambda db_arg, run_id, workspace_arg, source_arg: True  # type: ignore[method-assign]
+        service._prepare_recon = lambda *args, **kwargs: __import__(  # type: ignore[method-assign]
+            "app.services.reconnaissance_service", fromlist=["ReconSnapshot"]
+        ).ReconSnapshot(repo_mode="existing", stack_profile="python", payload={})
+        service._run_preflight = lambda *args, **kwargs: True  # type: ignore[method-assign]
+        service._capture_baseline = lambda *args, **kwargs: None  # type: ignore[method-assign]
 
         service._pipeline(db, run.id)
     finally:
@@ -1689,6 +1736,101 @@ def test_profile_commands_are_skipped_for_non_matching_changed_files(client):
     assert filtered == []
     kept = service._profile_commands_for_changed_files("python", commands, ["module.py"])
     assert kept == commands
+
+
+def test_stage_architect_retries_on_empty_file_changes(client, tmp_path):
+    import json as _json
+
+    from app.db.models import ArtifactModel, ProjectModel, RunEventModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.providers.fake import FakeProvider
+    from app.providers.registry import ProviderRegistry
+    from app.services.orchestration_service import OrchestrationService
+
+    workspace = tmp_path / "architect_retry"
+    workspace.mkdir()
+
+    registry = ProviderRegistry.get()
+    registry.fake_provider = FakeProvider(
+        invoke_sequence=[
+            _json.dumps(
+                {
+                    "overview": "Design only",
+                    "modules": ["core"],
+                    "file_changes": [],
+                    "dependencies": [],
+                }
+            ),
+            _json.dumps(
+                {
+                    "overview": "Architecture",
+                    "modules": ["core"],
+                    "file_changes": [
+                        {
+                            "path": ".ai-copilot/reports/analysis.md",
+                            "action": "create",
+                            "rationale": "Capture analysis findings",
+                        }
+                    ],
+                    "dependencies": [],
+                }
+            ),
+        ]
+    )
+    registry.reload({})
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="ArchitectRetry",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Analyze repository structure",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status="running",
+            workspace_path=str(workspace),
+            task_kind="analysis",
+        )
+        db.add(run)
+        db.commit()
+        run_id = run.id
+
+        service = OrchestrationService()
+        context = service._build_context_base(db, run, run, task.description)
+        stage_context = service._stage_context(db, run, "architect", context)
+        assert service._stage_architect(db, run_id, stage_context) is True
+
+        artifact = (
+            db.query(ArtifactModel)
+            .filter(ArtifactModel.run_id == run_id, ArtifactModel.artifact_type == "architect")
+            .one()
+        )
+        payload = _json.loads(artifact.content_json)
+        assert len(payload.get("file_changes") or []) == 1
+
+        reject_events = (
+            db.query(RunEventModel)
+            .filter(
+                RunEventModel.run_id == run_id,
+                RunEventModel.event_type == "architect_schema_rejected",
+            )
+            .all()
+        )
+        assert len(reject_events) == 1
+    finally:
+        db.close()
 
 
 def test_reviewer_missing_context_fails_fast(client, tmp_path):
@@ -2336,6 +2478,105 @@ def test_path_traversal(client, tmp_path):
     assert r.status_code == 400
 
 
+def test_project_delete_with_improvements(client, tmp_path):
+    from app.db.models import ImprovementModel, ProjectModel, RunModel, TaskModel
+    from app.db.session import SessionLocal
+    from app.services.learning_service import LearningService
+
+    workspace = tmp_path / "delete_with_improvements"
+    workspace.mkdir()
+
+    db = SessionLocal()
+    try:
+        project = ProjectModel(
+            name="DeleteWithImprovements",
+            source_repo_spec=str(workspace),
+            validation_profile="python",
+            protected_files_json="[]",
+        )
+        db.add(project)
+        db.flush()
+        task = TaskModel(
+            project_id=project.id,
+            description="Fix validation issue",
+            validation_profile="python",
+        )
+        db.add(task)
+        db.flush()
+        run = RunModel(
+            project_id=project.id,
+            task_id=task.id,
+            status="blocked",
+            current_stage="tester",
+            error_message="Validation failed",
+            workspace_path=str(workspace),
+        )
+        db.add(run)
+        db.commit()
+        LearningService(db).finalize_terminal_run(run.id)
+        project_id = project.id
+        assert (
+            db.query(ImprovementModel)
+            .filter(ImprovementModel.project_id == project_id)
+            .count()
+            >= 1
+        )
+    finally:
+        db.close()
+
+    response = client.delete(f"/api/projects/{project_id}", headers=HEADERS)
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+    db = SessionLocal()
+    try:
+        assert db.query(ProjectModel).filter(ProjectModel.id == project_id).first() is None
+        assert (
+            db.query(ImprovementModel)
+            .filter(ImprovementModel.project_id == project_id)
+            .count()
+            == 0
+        )
+    finally:
+        db.close()
+
+
+def test_create_project_triggers_setup_run(client, tmp_path, monkeypatch):
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        "app.services.setup_run_service.run_engine.enqueue",
+        lambda run_id: enqueued.append(run_id),
+    )
+    proj_dir = tmp_path / "setup_trigger_proj"
+    proj_dir.mkdir()
+    r = client.post(
+        "/api/projects",
+        json={
+            "name": "SetupTrigger",
+            "source_repo_spec": str(proj_dir),
+            "validation_profile": "python",
+        },
+        headers=HEADERS,
+    )
+    assert r.status_code == 200
+    project_id = r.json()["id"]
+    assert enqueued
+    db = SessionLocal()
+    try:
+        from app.db.models import RunModel, TaskModel
+
+        setup_run = (
+            db.query(RunModel)
+            .join(TaskModel, TaskModel.id == RunModel.task_id)
+            .filter(TaskModel.project_id == project_id, RunModel.task_kind == "setup")
+            .first()
+        )
+        assert setup_run is not None
+        assert setup_run.status in ("pending", "running")
+    finally:
+        db.close()
+
+
 def test_project_update(client, tmp_path):
     proj_dir = tmp_path / "update_proj"
     proj_dir.mkdir()
@@ -2540,14 +2781,18 @@ def test_retry_failed_run(client, tmp_path):
     from app.db.models import ProjectModel, RunModel, TaskModel
     from app.db.session import SessionLocal
 
-    workspace = tmp_path / "retry_failed"
+    source = tmp_path / "retry_failed_source"
+    source.mkdir()
+    (source / "main.py").write_text("print('source')\n", encoding="utf-8")
+    workspace = tmp_path / "retry_failed_workspace"
     workspace.mkdir()
+    (workspace / "stale.py").write_text("stale drift\n", encoding="utf-8")
 
     db = SessionLocal()
     try:
         project = ProjectModel(
             name="RetryFailed",
-            source_repo_spec=str(workspace),
+            source_repo_spec=str(source),
             validation_profile="python",
             protected_files_json="[]",
         )
@@ -2555,8 +2800,9 @@ def test_retry_failed_run(client, tmp_path):
         db.flush()
         task = TaskModel(
             project_id=project.id,
-            description="Fix the bug",
+            description="Extend backend/app/services/web_search_service.py. Update tests.",
             validation_profile="python",
+            task_kind="validation",
         )
         db.add(task)
         db.flush()
@@ -2566,6 +2812,7 @@ def test_retry_failed_run(client, tmp_path):
             status=RunStatus.FAILED.value,
             workspace_path=str(workspace),
             error_message="Provider timeout",
+            task_kind="validation",
         )
         db.add(run)
         db.commit()
@@ -2579,9 +2826,17 @@ def test_retry_failed_run(client, tmp_path):
     db = SessionLocal()
     try:
         run = db.get(RunModel, run_id)
+        task = db.get(TaskModel, run.task_id)
         assert run is not None
+        assert task is not None
         assert run.status in (RunStatus.PENDING.value, RunStatus.RUNNING.value)
         assert run.error_message is None
+        assert run.task_kind == "implementation"
+        assert task.task_kind == "implementation"
+        assert run.workspace_path != str(workspace)
+        assert Path(run.workspace_path).is_dir()
+        assert not (Path(run.workspace_path) / "stale.py").exists()
+        assert (Path(run.workspace_path) / "main.py").exists()
     finally:
         db.close()
 

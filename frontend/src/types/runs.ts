@@ -254,6 +254,8 @@ export interface RunEvent {
   severity?: string
   message?: string
   payload?: Record<string, unknown>
+  outcome_class?: string
+  why_blocked?: string
   created_at?: string
   run_id?: string
 }

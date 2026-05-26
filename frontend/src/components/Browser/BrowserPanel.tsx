@@ -31,7 +31,6 @@ import { showError, showSuccess } from '@/lib/toast'
 import { toChatSession } from '@/components/Chat/types'
 import { ElementSelectionBar } from './ElementSelectionBar'
 
-const BRIDGE_SCRIPT_PATH = '/copilot-picker-bridge.js'
 const BRIDGE_HANDSHAKE_MS = 2500
 
 function normalizeUrl(raw: string): string | null {
@@ -49,6 +48,16 @@ function normalizeUrl(raw: string): string | null {
 function isSameOriginUrl(url: string, parentOrigin: string): boolean {
   try {
     return new URL(url).origin === parentOrigin
+  } catch {
+    return false
+  }
+}
+
+/** Matches backend browser preview allowlist (localhost / 127.x / ::1). */
+function isLoopbackUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    return host === 'localhost' || host === '[::1]' || host.startsWith('127.')
   } catch {
     return false
   }
@@ -130,18 +139,18 @@ export function BrowserPanel() {
   }>>(new Map())
 
   const parentOrigin = typeof window !== 'undefined' ? window.location.origin : ''
-  const bridgeScriptUrl = `${parentOrigin}${BRIDGE_SCRIPT_PATH}`
+  const bridgeScriptUrl = `${parentOrigin}/copilot-picker-bridge.js`
   const isCrossOriginFrame = useMemo(
     () => Boolean(frameUrl && !isSameOriginUrl(frameUrl, parentOrigin)),
     [frameUrl, parentOrigin],
   )
   const previewSrc = useMemo(() => {
     if (!frameUrl) return ''
-    const shouldProxy = (browserPickerActive || browserAgentMode) && projectId && isCrossOriginFrame
+    const shouldProxy = Boolean(projectId && isLoopbackUrl(frameUrl))
     if (!shouldProxy) return frameUrl
     const params = new URLSearchParams({ url: frameUrl, project_id: projectId, token: getToken() })
     return `/api/browser/preview?${params.toString()}`
-  }, [browserAgentMode, browserPickerActive, frameUrl, isCrossOriginFrame, projectId])
+  }, [frameUrl, projectId])
 
   useEffect(() => {
     setInputUrl(storedUrl)
@@ -162,29 +171,9 @@ export function BrowserPanel() {
     }
   }, [previewSrc])
 
-  const injectBridgeSameOrigin = useCallback(() => {
-    const iframe = iframeRef.current
-    if (!iframe?.contentDocument) return false
-    try {
-      const frameOrigin = new URL(previewSrc, window.location.href).origin
-      if (frameOrigin !== parentOrigin) return false
-      const doc = iframe.contentDocument
-      if (doc.querySelector(`script[data-copilot-picker-bridge]`)) return true
-      const script = doc.createElement('script')
-      script.src = bridgeScriptUrl
-      script.defer = true
-      script.setAttribute('data-copilot-picker-bridge', '1')
-      doc.body?.appendChild(script)
-      return true
-    } catch {
-      return false
-    }
-  }, [bridgeScriptUrl, parentOrigin, previewSrc])
-
   const enablePickerInFrame = useCallback(() => {
-    injectBridgeSameOrigin()
     postToIframe(PICKER_MSG.ENABLE_PICKER, { parentOrigin })
-  }, [injectBridgeSameOrigin, postToIframe, parentOrigin])
+  }, [postToIframe, parentOrigin])
 
   const disablePickerInFrame = useCallback(() => {
     postToIframe(PICKER_MSG.DISABLE_PICKER)
@@ -207,14 +196,6 @@ export function BrowserPanel() {
     }, BRIDGE_HANDSHAKE_MS)
   }, [clearHandshakeTimer])
 
-  const detectProxiedPreviewFailure = useCallback(() => {
-    if (!previewSrc.includes('/api/browser/preview')) return false
-    const doc = iframeRef.current?.contentDocument
-    if (!doc) return false
-    const html = doc.documentElement?.innerHTML ?? ''
-    return !html.includes('__AI_COPILOT_PICKER_SOURCE_URL__')
-  }, [previewSrc])
-
   const onIframeLoad = useCallback(() => {
     setBrowserBridgeReady(false)
     if (frameUrl !== lastFrameUrlRef.current) {
@@ -225,14 +206,6 @@ export function BrowserPanel() {
       clearHandshakeTimer()
       setBridgeBanner('none')
       return
-    }
-    if (browserPickerActive && isCrossOriginFrame && detectProxiedPreviewFailure()) {
-      clearHandshakeTimer()
-      setBridgeBanner('server_down')
-      return
-    }
-    if (!isCrossOriginFrame) {
-      injectBridgeSameOrigin()
     }
     if (browserAgentMode) {
       window.setTimeout(() => {
@@ -247,10 +220,8 @@ export function BrowserPanel() {
     browserAgentMode,
     browserPickerActive,
     clearHandshakeTimer,
-    detectProxiedPreviewFailure,
     enablePickerInFrame,
     frameUrl,
-    injectBridgeSameOrigin,
     isCrossOriginFrame,
     setPageElementSelection,
     setBrowserBridgeReady,
@@ -266,7 +237,6 @@ export function BrowserPanel() {
       setBrowserPickerActive(false)
       disablePickerInFrame()
     }
-    injectBridgeSameOrigin()
     agentPendingRef.current.set(requestId, { resolve, reject: resolve })
     window.setTimeout(() => {
       postToIframe(AGENT_MSG.COMMAND, {
@@ -283,7 +253,6 @@ export function BrowserPanel() {
   }), [
     browserPickerActive,
     disablePickerInFrame,
-    injectBridgeSameOrigin,
     postToIframe,
     setBrowserPickerActive,
   ])
@@ -295,7 +264,8 @@ export function BrowserPanel() {
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
-      if (!isAllowedPickerOrigin(event.origin)) return
+      const fromPreviewFrame = event.source === iframeRef.current?.contentWindow
+      if (!fromPreviewFrame && !isAllowedPickerOrigin(event.origin)) return
       const data = event.data as PickerBridgeMessage | undefined
       if (!data?.type) return
 

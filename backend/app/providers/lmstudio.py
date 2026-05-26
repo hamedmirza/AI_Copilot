@@ -109,6 +109,88 @@ class LMStudioProvider(BaseProvider):
         if max_tokens is not None and max_tokens > 0:
             payload["max_tokens"] = int(max_tokens)
 
+    def _conversation_has_tool_history(self, messages: list[dict[str, Any]]) -> bool:
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "")
+            if role == "tool":
+                return True
+            if role == "assistant" and message.get("tool_calls"):
+                return True
+        return False
+
+    def _normalize_tool_call_entry(self, call: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(call, dict):
+            return None
+        if isinstance(call.get("function"), dict):
+            function = dict(call["function"])
+            args = function.get("arguments")
+            if isinstance(args, dict):
+                function["arguments"] = json.dumps(args)
+            elif args is None:
+                function["arguments"] = "{}"
+            else:
+                function["arguments"] = str(args)
+            return {
+                "id": str(call.get("id") or ""),
+                "type": str(call.get("type") or "function"),
+                "function": function,
+            }
+        name = str(call.get("name") or "")
+        if not name:
+            return None
+        args = call.get("arguments")
+        if isinstance(args, str):
+            args_str = args
+        elif isinstance(args, dict):
+            args_str = json.dumps(args)
+        else:
+            args_str = "{}"
+        return {
+            "id": str(call.get("id") or ""),
+            "type": "function",
+            "function": {"name": name, "arguments": args_str},
+        }
+
+    def _normalize_messages_for_lmstudio(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """LM Studio OpenAI-compatible API rejects role=tool in multi-turn history."""
+        normalized: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "user")
+            if role == "tool":
+                name = str(message.get("name") or "tool")
+                call_id = str(message.get("tool_call_id") or "")
+                content = str(message.get("content") or "")
+                header = f"[Tool result: {name}"
+                if call_id:
+                    header += f" ({call_id})"
+                header += "]\n"
+                normalized.append({"role": "user", "content": header + content})
+                continue
+            if role == "assistant" and isinstance(message.get("tool_calls"), list):
+                fixed_calls = [
+                    entry
+                    for entry in (
+                        self._normalize_tool_call_entry(call)
+                        for call in message.get("tool_calls") or []
+                    )
+                    if entry is not None
+                ]
+                if fixed_calls:
+                    normalized.append(
+                        {
+                            "role": "assistant",
+                            "content": str(message.get("content") or ""),
+                            "tool_calls": fixed_calls,
+                        }
+                    )
+                    continue
+            normalized.append(dict(message))
+        return normalized
+
     def invoke_chat(
         self,
         messages: list[dict[str, Any]],
@@ -119,10 +201,13 @@ class LMStudioProvider(BaseProvider):
         model = (self.model or "").strip()
         if not model:
             raise ProviderError("LM Studio model is not configured")
+        if tools and self._conversation_has_tool_history(messages):
+            logger.info("LM Studio tool follow-up: using JSON ReAct instead of native chat messages")
+            return super().invoke_chat(messages, tools=tools, stream=stream, max_tokens=max_tokens)
         url = f"{self.base_url}/chat/completions"
         payload: dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": self._normalize_messages_for_lmstudio(messages),
             "stream": False,
         }
         if tools:
@@ -174,10 +259,14 @@ class LMStudioProvider(BaseProvider):
         model = (self.model or "").strip()
         if not model:
             raise ProviderError("LM Studio model is not configured")
+        if tools and self._conversation_has_tool_history(messages):
+            logger.info("LM Studio streaming tool follow-up: using JSON ReAct")
+            yield from super().invoke_chat_stream(messages, tools=tools, max_tokens=max_tokens)
+            return
         url = f"{self.base_url}/chat/completions"
         payload: dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": self._normalize_messages_for_lmstudio(messages),
             "stream": True,
         }
         if tools:
@@ -526,10 +615,20 @@ class LMStudioProvider(BaseProvider):
         response = getattr(exc, "response", None)
         if response is None:
             return True
-        if response.status_code != 400:
+        if response.status_code not in {400, 422}:
             return False
         lowered = self._http_error_message(exc).lower()
         if not lowered:
             return False
-        hints = ("tool", "function", "tool_choice", "tool_calls", "messages[", "unsupported")
+        hints = (
+            "tool",
+            "function",
+            "tool_choice",
+            "tool_calls",
+            "messages[",
+            "invalid 'messages'",
+            'invalid "messages"',
+            "messages in payload",
+            "unsupported",
+        )
         return any(hint in lowered for hint in hints)

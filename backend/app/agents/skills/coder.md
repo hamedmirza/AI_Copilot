@@ -12,10 +12,12 @@ Produce surgical file patches that satisfy the plan and architect blueprint with
 ## Workflow checklist
 
 1. Read architect `file_changes`, plan acceptance criteria, and line-numbered snapshots in context.
-2. Prefer `line_changes` (start_line, end_line, new_content) for existing files.
-3. Use `full_content` only for new files or when explicitly required.
-4. Set `requires_operator_approval` true for risky ops (migrations, auth, deletes, broad refactors).
-5. Summarize what changed and why in `summary`.
+2. Do **not** re-read files already shown under `TARGET FILE` — use at most **2 read-tool rounds** for paths missing from context, then emit `CoderOutput`.
+3. If current files already satisfy acceptance criteria, return `file_changes: []` with a summary explaining no changes are needed.
+4. Prefer `line_changes` (start_line, end_line, new_content) for existing files.
+5. Use `full_content` only for new files or when explicitly required.
+6. Set `requires_operator_approval` true for risky ops (migrations, auth, deletes, broad refactors).
+7. Summarize what changed and why in `summary`.
 
 ## UI integration
 
@@ -46,6 +48,7 @@ When adding `frontend/src/pages/` or `frontend/src/routes/`, wire the surface in
 - Rewriting entire files for small fixes.
 - Removing symbols or imports not mentioned in the task.
 - Inventing paths not in architect blueprint or context.
+- Using `read_file` on pipeline tool names (e.g. `web_search`) or guessed paths — use `list_files` / `search_files`, or call `web_search` directly.
 - Using alias field names (`patches`, `files`) — use `file_changes`.
 
 ## Integrity rules (mandatory)

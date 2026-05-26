@@ -1,5 +1,7 @@
 from pydantic import BaseModel, Field, field_validator
 
+from app.services.dependency_verifier_service import looks_like_package_name
+
 
 class PlanStep(BaseModel):
     step_id: str = Field(min_length=1)
@@ -12,6 +14,9 @@ class PlannerOutput(BaseModel):
     summary: str = Field(min_length=1)
     steps: list[PlanStep] = Field(min_length=1)
     risks: list[str] = Field(default_factory=list)
+    clarification_needed: bool = False
+    clarification_question: str | None = None
+    change_request_slug: str | None = None
 
     @field_validator("steps")
     @classmethod
@@ -32,6 +37,15 @@ class ArchitectOutput(BaseModel):
     modules: list[str] = Field(min_length=1)
     file_changes: list[FileBlueprint] = Field(min_length=1)
     dependencies: list[str] = Field(default_factory=list)
+    clarification_needed: bool = False
+    clarification_question: str | None = None
+
+    @field_validator("dependencies", mode="before")
+    @classmethod
+    def package_names_only(cls, value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if looks_like_package_name(str(item))]
 
     @field_validator("file_changes")
     @classmethod
@@ -68,15 +82,8 @@ class FileChange(BaseModel):
 
 class CoderOutput(BaseModel):
     summary: str = Field(min_length=1)
-    file_changes: list[FileChange] = Field(min_length=1)
+    file_changes: list[FileChange] = Field(default_factory=list)
     requires_operator_approval: bool = False
-
-    @field_validator("file_changes")
-    @classmethod
-    def validate_changes(cls, v: list[FileChange]) -> list[FileChange]:
-        if not v:
-            raise ValueError("At least one file change is required")
-        return v
 
 
 class ReviewIssue(BaseModel):
@@ -149,3 +156,87 @@ class PlaybookSupervisorOutput(BaseModel):
     summary: str = Field(min_length=1)
     safety_concerns: list[str] = Field(default_factory=list)
     required_changes: list[str] = Field(default_factory=list)
+
+
+class EntitySpec(BaseModel):
+    name: str = Field(min_length=1)
+    fields: list[str] = Field(default_factory=list)
+    relationships: list[str] = Field(default_factory=list)
+
+
+class EndpointSpec(BaseModel):
+    path: str = Field(min_length=1)
+    method: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    auth_required: bool = False
+
+
+class StackSpec(BaseModel):
+    language: str = Field(min_length=1)
+    framework: str = Field(min_length=1)
+    database: str = ""
+    auth_method: str = ""
+    ui_framework: str = ""
+
+
+class AppDesignOutput(BaseModel):
+    app_summary: str = Field(min_length=1)
+    entities: list[EntitySpec] = Field(default_factory=list)
+    api_endpoints: list[EndpointSpec] = Field(default_factory=list)
+    stack: StackSpec
+    file_structure: list[str] = Field(min_length=1)
+    open_questions: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    clarification_needed: bool = False
+    question: str = ""
+
+
+class DocumentationOutput(BaseModel):
+    changelog_entry: str = Field(min_length=1)
+    readme_updated: bool = False
+    readme_changes: list[LineChange] = Field(default_factory=list)
+    change_request_resolution: str = Field(min_length=1)
+    architecture_delta: str = Field(min_length=1)
+
+
+class EntitySpec(BaseModel):
+    name: str = Field(min_length=1)
+    fields: list[str] = Field(default_factory=list)
+    relationships: list[str] = Field(default_factory=list)
+
+
+class EndpointSpec(BaseModel):
+    path: str = Field(min_length=1)
+    method: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    auth_required: bool = False
+
+
+class StackSpec(BaseModel):
+    language: str = Field(min_length=1)
+    framework: str = Field(min_length=1)
+    database: str = ""
+    auth_method: str = ""
+    ui_framework: str = ""
+
+
+class AppDesignOutput(BaseModel):
+    app_summary: str = Field(min_length=1)
+    entities: list[EntitySpec] = Field(default_factory=list)
+    api_endpoints: list[EndpointSpec] = Field(default_factory=list)
+    stack: StackSpec
+    file_structure: list[str] = Field(min_length=1)
+    open_questions: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    clarification_needed: bool = False
+    clarification_question: str | None = None
+
+
+class DocumentationOutput(BaseModel):
+    summary: str = Field(min_length=1)
+    changelog_entry: str = Field(min_length=1)
+    change_request_status: str = Field(min_length=1)
+    readme_updated: bool = False
+    architecture_notes: str = ""
+    clarification_needed: bool = False
+    clarification_question: str | None = None

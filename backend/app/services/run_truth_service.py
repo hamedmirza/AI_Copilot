@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import ArtifactModel, RunModel, TaskModel
 from app.services.project_service import ProjectService
-from app.services.workspace_changed_files import workspace_changed_files
+from app.services.deployment_gates import effective_changed_files
 
 
 _FRONTEND_EXTENSIONS = (".js", ".jsx", ".ts", ".tsx", ".css", ".scss", ".html")
@@ -101,25 +101,11 @@ def _string_list(value: object) -> list[str]:
     return [str(item).replace("\\", "/") for item in value if str(item).strip()]
 
 
-def _load_coder_paths(db: Session, run_id: str) -> list[str]:
-    artifact = _load_artifact(db, run_id, "coder") or {}
-    paths: list[str] = []
-    for change in artifact.get("file_changes") or []:
-        if not isinstance(change, dict):
-            continue
-        path = str(change.get("path") or change.get("file_path") or "").strip()
-        if path:
-            paths.append(path.replace("\\", "/"))
-    return paths
-
-
 def _load_changed_files(db: Session, run: RunModel) -> list[str]:
     project = ProjectService(db).get(run.project_id)
     source_root = Path(project.source_repo_spec)
     workspace = Path(run.workspace_path) if run.workspace_path else source_root
-    merged = set(workspace_changed_files(workspace, source_root))
-    merged.update(_load_coder_paths(db, run.id))
-    return sorted(merged)
+    return effective_changed_files(db, run.id, workspace, source_root)
 
 
 def _is_report_like(path: str) -> bool:

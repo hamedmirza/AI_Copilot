@@ -13,7 +13,7 @@ from app.agents.skill_loader import (
     load_role_skill,
     skill_key_from_prompt_filename,
 )
-from app.providers.base import BaseProvider
+from app.providers.base import BaseProvider, format_openai_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -128,10 +128,17 @@ class BaseAgent:
             f"{self._provider_output_rules()}\n"
             "You must satisfy the exact schema contract in the user message."
         )
+        schema_extra = ""
+        if schema.__name__ == "ArchitectOutput":
+            schema_extra = (
+                "\nArchitectOutput requirement: file_changes must contain at least one "
+                "object with path, action, and rationale (never an empty list).\n"
+            )
         user_with_schema = (
             f"{user_prompt}\n\n"
             "Return JSON matching this schema exactly:\n"
             f"{self._schema_instruction(schema)}"
+            f"{schema_extra}"
         )
         raw = self._run_with_optional_tools(system_with_rules, user_with_schema)
         text = (raw or "").strip()
@@ -162,10 +169,7 @@ class BaseAgent:
                     {
                         "role": "assistant",
                         "content": "",
-                        "tool_calls": [
-                            {"id": call.id, "name": call.name, "arguments": call.arguments}
-                            for call in result.tool_calls
-                        ],
+                        "tool_calls": format_openai_tool_calls(result.tool_calls),
                     }
                 )
                 for call in result.tool_calls:

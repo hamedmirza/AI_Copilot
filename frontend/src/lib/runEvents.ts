@@ -2,6 +2,12 @@ import type { RunEvent } from '@/types/runs'
 import { formatExitMessage } from '@/lib/exitCodeHelp'
 
 export function normalizeRunEvent(raw: Record<string, unknown>): RunEvent {
+  const payload =
+    raw.payload && typeof raw.payload === 'object' && !Array.isArray(raw.payload)
+      ? (raw.payload as Record<string, unknown>)
+      : undefined
+  const outcomeClass = raw.outcome_class ?? payload?.outcome_class
+  const whyBlocked = raw.why_blocked ?? payload?.why_blocked
   return {
     ...raw,
     id: raw.id !== undefined ? Number(raw.id) : undefined,
@@ -12,6 +18,9 @@ export function normalizeRunEvent(raw: Record<string, unknown>): RunEvent {
     message: raw.message ? String(raw.message) : '',
     run_id: raw.run_id ? String(raw.run_id) : undefined,
     created_at: raw.created_at ? String(raw.created_at) : undefined,
+    payload,
+    outcome_class: outcomeClass != null ? String(outcomeClass) : undefined,
+    why_blocked: whyBlocked != null ? String(whyBlocked) : undefined,
   }
 }
 
@@ -110,6 +119,9 @@ export function patchRunsFromEvent<T extends { id: string; status?: string; curr
 export function formatRunEventLine(event: RunEvent): string {
   const type = String(event.type || 'event')
   const message = String(event.message || '').trim()
+  if (event.why_blocked && (type === 'run_blocked' || event.outcome_class === 'blocked')) {
+    return formatExitMessage(String(event.why_blocked))
+  }
   if (message) return formatExitMessage(message)
   return type.replaceAll('_', ' ')
 }

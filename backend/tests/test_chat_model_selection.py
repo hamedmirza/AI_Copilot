@@ -26,6 +26,19 @@ def _create_project(client, tmp_path: Path, name: str) -> str:
     return response.json()["id"]
 
 
+@pytest.fixture(autouse=True)
+def _disable_lmstudio_catalog(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(ProviderRegistry, "get_lmstudio_catalog", lambda self: None)
+
+    def _identity_prepare(self, model, *args, **kwargs):
+        return model
+
+    monkeypatch.setattr(
+        "app.providers.lmstudio.LMStudioProvider.prepare_model",
+        _identity_prepare,
+    )
+
+
 def test_resolve_auto_chat_model_prefers_instruct_for_general(monkeypatch: pytest.MonkeyPatch):
     registry = ProviderRegistry()
     registry.reload(
@@ -93,6 +106,7 @@ def test_resolve_chat_provider_uses_auto_resolution_for_blank_and_auto(monkeypat
     registry = ProviderRegistry()
     registry.reload({"lmstudio_model": "fallback"})
     monkeypatch.setattr(registry, "resolve_auto_chat_model", lambda mode: f"auto::{mode}")
+    monkeypatch.setattr(registry, "list_models", lambda: ["manual-model", "fallback"])
 
     assert registry.resolve_chat_provider("general").model == "auto::general"
     assert registry.resolve_chat_provider("agent", "").model == "auto::agent"

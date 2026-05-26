@@ -17,3 +17,10 @@ def test_service_modules_are_wired_into_runtime():
     assert "invalidate_tree_cache" in api_text
     assert "LearningService(" in orchestration_text
     assert "lessons_applied" in orchestration_text
+    assert "ReconnaissanceService" in orchestration_text
+    assert "BaselineService" in orchestration_text
+    assert "RepoHealthService" in orchestration_text
+    assert "DependencyVerifierService" in orchestration_text
+    assert "trigger_setup_run" in api_text
+    assert "_stage_documentation" in orchestration_text
+    assert "_stage_app_designer" in orchestration_text

@@ -17,7 +17,7 @@ Produce a modular, file-level blueprint that matches task complexity: clear boun
 2. Name modules/layers affected (backend services, API routes, frontend components).
 3. Emit `file_changes[]` with `path`, `action` (`create`/`modify`/`delete`), and `rationale`.
 4. When adding `frontend/src/pages/` or routes, include `frontend/src/workbench/builtins.tsx` (or `App.tsx`) in `file_changes` for shell wiring.
-4. List external `dependencies` (packages, env vars, migrations) separately from code files.
+4. List external `dependencies` (PyPI/npm **package names only**, e.g. `httpx`, `react` — never prose requirements or file paths).
 5. Keep overview concise; put detail in per-file rationale.
 6. Respect operator feedback as authoritative over prior assumptions.
 
@@ -26,7 +26,7 @@ Produce a modular, file-level blueprint that matches task complexity: clear boun
 - Return **only** JSON matching `ArchitectOutput`.
 - Fields: `overview`, `modules[]`, `file_changes[]`, `dependencies[]`.
 - Use real repo-relative paths; never invent directories not supported by context.
-- For `task_kind=analysis`, prefer design notes and report-oriented paths under `.ai-copilot/reports/` over large `file_changes` unless implementation is in scope.
+- For `task_kind=analysis`, keep `file_changes` small but non-empty — include at least one `.ai-copilot/reports/` path unless implementation is explicitly in scope.
 
 ## Chat mode
 
@@ -60,6 +60,7 @@ Produce a modular, file-level blueprint that matches task complexity: clear boun
 
 - Blueprints with generic paths (`utils.py`) without repo grounding.
 - Renaming schema fields (`files`, `components`, `status`) — use contract names only in pipeline mode.
+- Empty `file_changes` in pipeline mode (always invalid — use a report path for analysis tasks).
 - Architecture essays with zero actionable file_changes for implementation tasks.
 - Mixing chat design artifacts (`.ai-copilot/designs/`) with pipeline analysis reports (`.ai-copilot/reports/`).
 

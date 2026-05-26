@@ -24,10 +24,13 @@ Turn ambiguous work into a small set of independently executable steps with test
 ## Pipeline mode
 
 - Return **only** valid JSON matching `PlannerOutput` (no markdown fences).
+- Use at most **3 read-tool rounds** (`read_file`, `list_files`, `search_files`), then emit `PlannerOutput` even if evidence is partial — recon context is already injected.
 - Required fields: `summary`, `steps[]` (`step_id`, `title`, `description`, `acceptance_criteria[]`), `risks[]`.
 - `step_id` must be stable strings (e.g. `"1"`, `"2"`); never use aliases like `id`, `task`, or `goal`.
 - For `task_kind=analysis`, bias steps toward read-only discovery and artifacts under `.ai-copilot/reports/` — not implementation unless requested.
 - For `task_kind=validation`, keep steps focused on verification, not new features.
+- For `task_kind=setup`, use scaffold template context: greenfield = full template file set; existing/partial = missing files only.
+- For `task_kind=setup`, read the canonical scaffold template index in context; plan file_changes for missing governance files only on existing/partial repos, or full scaffold on greenfield. Set `change_request_slug` to `setup` when appropriate.
 
 ## Chat mode
 

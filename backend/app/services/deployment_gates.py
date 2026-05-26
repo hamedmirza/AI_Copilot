@@ -2,36 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import ArtifactModel
-from app.services.workspace_changed_files import workspace_changed_files
-
-
-def _load_coder_paths(db: Session, run_id: str) -> list[str]:
-    row = (
-        db.query(ArtifactModel)
-        .filter(ArtifactModel.run_id == run_id, ArtifactModel.artifact_type == "coder")
-        .order_by(ArtifactModel.id.desc())
-        .first()
-    )
-    if not row:
-        return []
-    try:
-        coder = json.loads(row.content_json)
-    except json.JSONDecodeError:
-        return []
-    paths: list[str] = []
-    for change in coder.get("file_changes") or []:
-        if isinstance(change, dict):
-            path = str(change.get("path") or change.get("file_path") or "").strip()
-            if path:
-                paths.append(path.replace("\\", "/"))
-    return paths
+from app.services.run_outcome_service import run_changed_paths
 
 
 def effective_changed_files(
@@ -40,9 +16,7 @@ def effective_changed_files(
     workspace: Path,
     source_root: Path,
 ) -> list[str]:
-    merged = set(workspace_changed_files(workspace, source_root))
-    merged.update(_load_coder_paths(db, run_id))
-    return sorted(merged)
+    return run_changed_paths(db, run_id, workspace, source_root)
 
 
 def evaluate_deployment_readiness(

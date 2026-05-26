@@ -1,0 +1,6 @@
+# {{PROJECT_NAME}} — Cursor rules
+
+- Minimal scope: smallest correct diff
+- Match existing naming, imports, and file layout
+- Backend: Python 3.12+ with project venv for tests
+- Never commit `.env` or secrets

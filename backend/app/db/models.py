@@ -29,6 +29,8 @@ class ProjectModel(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     source_repo_spec: Mapped[str] = mapped_column(Text)
     validation_profile: Mapped[str] = mapped_column(String(64), default="python")
+    repo_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    stack_profile: Mapped[str | None] = mapped_column(String(64), nullable=True)
     protected_files_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -44,6 +46,9 @@ class ProjectModel(Base):
         back_populates="project", cascade="all, delete-orphan"
     )
     chat_sessions: Mapped[list["ChatSessionModel"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    improvements: Mapped[list["ImprovementModel"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
 
@@ -271,7 +276,7 @@ class ImprovementModel(Base):
         UtcDateTime(), default=utc_now, onupdate=utc_now
     )
 
-    project: Mapped[ProjectModel | None] = relationship()
+    project: Mapped[ProjectModel | None] = relationship(back_populates="improvements")
     exposures: Mapped[list["ImprovementExposureModel"]] = relationship(
         back_populates="improvement", cascade="all, delete-orphan"
     )

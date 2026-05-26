@@ -48,7 +48,7 @@ POST_DEPLOY_STAGE_ORDER = ("supervisor",)
 FULL_PIPELINE_STAGE_ORDER = PIPELINE_STAGE_ORDER + POST_DEPLOY_STAGE_ORDER
 
 _ANALYSIS_HINTS = ("review", "audit", "analyze", "analyse", "inspect", "assess", "trace", "surface", "map")
-_IMPLEMENTATION_HINTS = ("implement", "build", "fix", "change", "update", "create", "add", "replace", "refactor")
+_IMPLEMENTATION_HINTS = ("implement", "build", "fix", "change", "update", "create", "add", "replace", "refactor", "extend")
 _DEBUG_HINTS = ("debug", "diagnose", "investigate", "why", "failing", "fails", "broken")
 _VALIDATION_HINTS = ("validate", "verification", "verify", "test", "tests", "quality gate")
 _PLAYBOOK_HINTS = ("playbook", "runbook", "procedure", "operational")
@@ -81,21 +81,30 @@ class ImprovementMatch:
     exposure_kind: str
 
 
+def _task_kind_hint_matches(lower: str, hint: str) -> bool:
+    return re.search(rf"\b{re.escape(hint)}\b", lower) is not None
+
+
 def infer_task_kind(description: str) -> str:
     lower = (description or "").lower()
     scores = {
-        "analysis": sum(1 for hint in _ANALYSIS_HINTS if hint in lower),
-        "implementation": sum(1 for hint in _IMPLEMENTATION_HINTS if hint in lower),
-        "debug": sum(1 for hint in _DEBUG_HINTS if hint in lower),
-        "validation": sum(1 for hint in _VALIDATION_HINTS if hint in lower),
-        "playbook": sum(1 for hint in _PLAYBOOK_HINTS if hint in lower),
+        "analysis": sum(1 for hint in _ANALYSIS_HINTS if _task_kind_hint_matches(lower, hint)),
+        "implementation": sum(1 for hint in _IMPLEMENTATION_HINTS if _task_kind_hint_matches(lower, hint)),
+        "debug": sum(1 for hint in _DEBUG_HINTS if _task_kind_hint_matches(lower, hint)),
+        "validation": sum(1 for hint in _VALIDATION_HINTS if _task_kind_hint_matches(lower, hint)),
+        "playbook": sum(1 for hint in _PLAYBOOK_HINTS if _task_kind_hint_matches(lower, hint)),
     }
     best_kind = max(scores, key=lambda kind: scores[kind])
     best_score = scores[best_kind]
     if best_score <= 0:
         return "implementation"
     competing = [kind for kind, score in scores.items() if score == best_score]
-    return best_kind if len(competing) == 1 else "mixed"
+    if len(competing) == 1:
+        return best_kind
+    for preferred in ("implementation", "debug", "analysis", "validation", "playbook"):
+        if preferred in competing:
+            return preferred
+    return "mixed"
 
 
 def normalize_task_signature(description: str) -> str:

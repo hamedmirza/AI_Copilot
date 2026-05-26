@@ -104,12 +104,19 @@ def run_migrations() -> None:
     existing = set(inspector.get_table_names())
     from app.db import models  # noqa: F401
 
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=engine, checkfirst=True)
 
     # Example additive column migration
     if "projects" in existing and not _column_exists("projects", "protected_files_json"):
         with engine.begin() as conn:
             _safe_execute_ddl(conn, "ALTER TABLE projects ADD COLUMN protected_files_json TEXT DEFAULT '[]'")
+
+    if _table_exists("projects"):
+        with engine.begin() as conn:
+            if not _column_exists("projects", "repo_mode"):
+                _safe_execute_ddl(conn, "ALTER TABLE projects ADD COLUMN repo_mode VARCHAR(32)")
+            if not _column_exists("projects", "stack_profile"):
+                _safe_execute_ddl(conn, "ALTER TABLE projects ADD COLUMN stack_profile TEXT")
 
     if _table_exists("chat_sessions"):
         with engine.begin() as conn:
@@ -195,7 +202,9 @@ def run_migrations() -> None:
                 _safe_execute_ddl(conn, "ALTER TABLE runs ADD COLUMN clarification_context_json TEXT DEFAULT '{}'")
 
     if not _table_exists("run_thread_entries"):
-        Base.metadata.create_all(bind=engine, tables=[Base.metadata.tables["run_thread_entries"]])
+        Base.metadata.create_all(
+            bind=engine, tables=[Base.metadata.tables["run_thread_entries"]], checkfirst=True
+        )
 
     if _table_exists("tasks"):
         with engine.begin() as conn:

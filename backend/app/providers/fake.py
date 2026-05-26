@@ -13,12 +13,14 @@ class FakeProvider(BaseProvider):
         responses: dict[str, str] | None = None,
         default_response: str | None = None,
         model: str = "fake-model",
+        invoke_sequence: list[str] | None = None,
     ) -> None:
         self.responses = responses or {}
         self.default_response = default_response or "{}"
         self.model = model
         self.call_log: list[tuple[str, str]] = []
         self._review_attempt = 0
+        self._invoke_sequence = list(invoke_sequence or [])
 
     def set_response_for_keyword(self, keyword: str, payload: dict) -> None:
         self.responses[keyword.lower()] = json.dumps(payload)
@@ -119,6 +121,38 @@ class FakeProvider(BaseProvider):
                     "doc_updates": [],
                 }
             )
+        if schema_name == "AppDesignOutput":
+            return json.dumps(
+                {
+                    "app_summary": "Greenfield app design",
+                    "entities": [{"name": "Item", "fields": ["id", "title"], "relationships": []}],
+                    "api_endpoints": [
+                        {"path": "/items", "method": "GET", "description": "List items", "auth_required": False}
+                    ],
+                    "stack": {
+                        "language": "python",
+                        "framework": "fastapi",
+                        "database": "sqlite",
+                        "auth_method": "token",
+                        "ui_framework": "react",
+                    },
+                    "file_structure": ["backend/app/api/main.py", "frontend/src/App.tsx"],
+                    "open_questions": [],
+                    "assumptions": ["SQLite for persistence"],
+                    "clarification_needed": False,
+                    "question": "",
+                }
+            )
+        if schema_name == "DocumentationOutput":
+            return json.dumps(
+                {
+                    "changelog_entry": "Implemented task",
+                    "readme_updated": False,
+                    "readme_changes": [],
+                    "change_request_resolution": "STATUS: IMPLEMENTED",
+                    "architecture_delta": "Updated application behavior per task.",
+                }
+            )
         if schema_name == "PlaybookSupervisorOutput":
             return json.dumps(
                 {
@@ -128,10 +162,42 @@ class FakeProvider(BaseProvider):
                     "required_changes": [],
                 }
             )
+        if schema_name == "AppDesignOutput":
+            return json.dumps(
+                {
+                    "app_summary": "Greenfield application design",
+                    "entities": [{"name": "Item", "fields": ["id", "title"], "relationships": []}],
+                    "api_endpoints": [
+                        {"path": "/api/items", "method": "GET", "description": "List items", "auth_required": False}
+                    ],
+                    "stack": {
+                        "language": "python",
+                        "framework": "fastapi",
+                        "database": "sqlite",
+                        "auth_method": "token",
+                        "ui_framework": "react",
+                    },
+                    "file_structure": ["backend/app/api/main.py", "frontend/src/App.tsx"],
+                    "open_questions": [],
+                    "assumptions": ["SQLite for persistence"],
+                }
+            )
+        if schema_name == "DocumentationOutput":
+            return json.dumps(
+                {
+                    "summary": "Documentation updated",
+                    "changelog_entry": "Implemented task changes",
+                    "change_request_status": "implemented",
+                    "readme_updated": False,
+                    "architecture_notes": "Updated module map",
+                }
+            )
         return None
 
     def invoke_json(self, system_prompt: str, user_prompt: str) -> str:
         self.call_log.append((system_prompt, user_prompt))
+        if self._invoke_sequence:
+            return self._invoke_sequence.pop(0)
         lower = user_prompt.lower()
         for key, response in self.responses.items():
             if key in lower:

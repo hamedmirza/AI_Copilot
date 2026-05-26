@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8500
     log_level: str = "INFO"
+    web_search_providers: str = "duckduckgo,github,google,x"
+    web_search_timeout_seconds: float = 12.0
+    google_cse_api_key: str = ""
+    google_cse_cx: str = ""
+    github_token: str = ""
 
 
 @lru_cache

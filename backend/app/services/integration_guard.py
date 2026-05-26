@@ -228,6 +228,9 @@ def integration_guard_issues(
     changed_files: list[str] | None = None,
 ) -> list[dict]:
     """Return integration issues for pages/routes not wired into app entry surfaces."""
+    if changed_files is not None and not changed_files:
+        return []
+
     entry_text = _entry_surface_text(workspace)
     issues: list[dict] = []
 
@@ -244,7 +247,8 @@ def integration_guard_issues(
             )
 
     issues.extend(_orphan_routes_layer(workspace, entry_text, changed_files))
-    issues.extend(_center_workbench_mount_issues(workspace, entry_text))
+    if changed_files is None or any(p.replace("\\", "/").startswith("frontend/") for p in changed_files):
+        issues.extend(_center_workbench_mount_issues(workspace, entry_text))
 
     return issues
 

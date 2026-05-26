@@ -13,7 +13,7 @@ from app.services.contract_guard import contract_guard_issues
 from app.services.integration_guard import integration_guard_issues, integration_requires_visual_evidence
 from app.services.project_service import ProjectService
 from app.services.visual_evidence_service import load_visual_evidence, visual_evidence_passed
-from app.services.workspace_changed_files import workspace_changed_files
+from app.services.deployment_gates import effective_changed_files
 
 
 def _load_artifact(db: Session, run_id: str, artifact_type: str) -> dict | None:
@@ -78,7 +78,7 @@ def build_deployment_readiness(
     project = ProjectService(db).get(run.project_id)
     source = Path(project.source_repo_spec)
     workspace = Path(run.workspace_path) if run.workspace_path else source
-    changed = workspace_changed_files(workspace, source) if workspace.is_dir() else []
+    changed = effective_changed_files(db, run_id, workspace, source) if workspace.is_dir() else []
 
     integration_issues = integration_guard_issues(workspace, changed_files=changed)
     integration_critical = [i for i in integration_issues if i.get("severity") == "critical"]

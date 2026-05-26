@@ -46,12 +46,20 @@
   }
 
   function safeOrigin(value) {
-    if (!value) return null
+    if (!value || value === 'null') return null
     try {
       return new URL(value, window.location.href).origin
     } catch (_error) {
       return null
     }
+  }
+
+  function isTrustedParentMessage(event) {
+    if (!state.parentOrigin) return false
+    var eventOrigin = safeOrigin(event.origin)
+    if (eventOrigin === state.parentOrigin) return true
+    // Sandboxed preview (allow-scripts without allow-same-origin): parent uses postMessage('*').
+    return event.origin === 'null'
   }
 
   function trimText(value, limit) {
@@ -550,7 +558,7 @@
       return
     }
 
-    if (!state.parentOrigin || safeOrigin(event.origin) !== state.parentOrigin) {
+    if (!isTrustedParentMessage(event)) {
       return
     }
 

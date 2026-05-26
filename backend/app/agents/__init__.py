@@ -1,7 +1,9 @@
 from app.agents.base import BaseAgent
 from app.schemas.agent_outputs import (
+    AppDesignOutput,
     ArchitectOutput,
     CoderOutput,
+    DocumentationOutput,
     PlannerOutput,
     PlaybookSupervisorOutput,
     ReviewerOutput,
@@ -11,8 +13,19 @@ from app.schemas.agent_outputs import (
 )
 
 
+class AppDesignAgent(BaseAgent):
+    prompt_filename = "app_designer.md"
+    skill_filename = "app-designer"
+
+    def design_app(self, context: str) -> AppDesignOutput:
+        result = self.run(context, AppDesignOutput)
+        assert result is not None
+        return result
+
+
 class PlannerAgent(BaseAgent):
     prompt_filename = "planner.md"
+    max_tool_rounds = 12
 
     def plan(self, task_description: str) -> PlannerOutput:
         result = self.run(task_description, PlannerOutput)
@@ -41,6 +54,7 @@ class UIDesignerAgent(BaseAgent):
 
 class CoderAgent(BaseAgent):
     prompt_filename = "coder.md"
+    max_tool_rounds = 12
 
     def code(self, context: str) -> CoderOutput:
         result = self.run(context, CoderOutput)
@@ -71,6 +85,16 @@ class SupervisorAgent(BaseAgent):
 
     def attest(self, context: str) -> SupervisorOutput:
         result = self.run(context, SupervisorOutput)
+        assert result is not None
+        return result
+
+
+class DocumentationAgent(BaseAgent):
+    prompt_filename = "documentation.md"
+    skill_filename = "documentation"
+
+    def document(self, context: str) -> DocumentationOutput:
+        result = self.run(context, DocumentationOutput)
         assert result is not None
         return result
 

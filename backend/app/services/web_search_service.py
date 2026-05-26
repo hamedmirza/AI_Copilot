@@ -1,33 +1,29 @@
 from __future__ import annotations
 
-import html
-import re
-from dataclasses import dataclass
+import logging
 from typing import Final
-from urllib.parse import parse_qs, quote_plus, urlparse
 
 import httpx
 
-_DDG_SEARCH_URL: Final[str] = "https://html.duckduckgo.com/html/"
-_USER_AGENT: Final[str] = "AI-Copilot/0.1 (+https://localhost)"
-_MAX_SNIPPET_LENGTH: Final[int] = 280
-_ANCHOR_RE = re.compile(
-    r'<a[^>]*class="result__a"[^>]*href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
-    re.IGNORECASE | re.DOTALL,
+from app.core.settings import get_settings
+from app.services.web_search_providers import (
+    KNOWN_PROVIDERS,
+    WebSearchProvider,
+    WebSearchResult,
+    build_providers,
+    parse_provider_names,
 )
-_SNIPPET_RE = re.compile(
-    r'<a[^>]*class="result__snippet"[^>]*>(?P<snippet>.*?)</a>|'
-    r'<div[^>]*class="result__snippet"[^>]*>(?P<div_snippet>.*?)</div>',
-    re.IGNORECASE | re.DOTALL,
-)
-_TAG_RE = re.compile(r"<[^>]+>")
 
+logger = logging.getLogger(__name__)
 
-@dataclass
-class WebSearchResult:
-    title: str
-    url: str
-    snippet: str
+__all__ = [
+    "KNOWN_PROVIDERS",
+    "WebSearchError",
+    "WebSearchResult",
+    "WebSearchService",
+    "infer_allow_web_search",
+    "parse_provider_names",
+]
 
 
 class WebSearchError(RuntimeError):
@@ -35,22 +31,84 @@ class WebSearchError(RuntimeError):
 
 
 class WebSearchService:
-    def __init__(self, *, timeout_seconds: float = 12.0) -> None:
-        self.timeout_seconds = timeout_seconds
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+        providers: list[WebSearchProvider] | None = None,
+        provider_names: str | None = None,
+        client: httpx.Client | None = None,
+    ) -> None:
+        settings = get_settings()
+        self.timeout_seconds = float(timeout_seconds or settings.web_search_timeout_seconds)
+        self._client = client
+        self._owns_client = client is None
+        if providers is not None:
+            self._providers = providers
+        else:
+            names = parse_provider_names(provider_names or settings.web_search_providers)
+            self._providers = build_providers(
+                names,
+                google_api_key=settings.google_cse_api_key,
+                google_cse_id=settings.google_cse_cx,
+                github_token=settings.github_token,
+            )
+
+    def _get_client(self) -> httpx.Client:
+        if self._client is None:
+            self._client = httpx.Client(timeout=self.timeout_seconds)
+        return self._client
+
+    def close(self) -> None:
+        if self._owns_client and self._client is not None:
+            self._client.close()
+            self._client = None
+
+    def __enter__(self) -> "WebSearchService":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    @property
+    def provider_names(self) -> tuple[str, ...]:
+        return tuple(provider.name for provider in self._providers)
 
     def search(self, query: str, *, limit: int = 5) -> list[WebSearchResult]:
         normalized = " ".join(str(query or "").split())
         if not normalized:
             raise WebSearchError("Search query is required")
+        if not self._providers:
+            raise WebSearchError("No web search providers are configured")
 
-        response = httpx.get(
-            f"{_DDG_SEARCH_URL}?q={quote_plus(normalized)}",
-            headers={"User-Agent": _USER_AGENT},
-            timeout=self.timeout_seconds,
-            follow_redirects=True,
-        )
-        response.raise_for_status()
-        return self._parse_results(response.text, limit=max(1, min(limit, 8)))
+        cap = max(1, min(limit, 8))
+        per_provider = max(1, (cap + len(self._providers) - 1) // len(self._providers))
+        merged: list[WebSearchResult] = []
+        seen_urls: set[str] = set()
+        errors: list[str] = []
+        client = self._get_client()
+
+        for provider in self._providers:
+            try:
+                batch = provider.search(client, normalized, limit=per_provider)
+            except Exception as exc:
+                message = f"{provider.name}: {exc}"
+                errors.append(message)
+                logger.warning("Web search provider failed: %s", message)
+                continue
+            for item in batch:
+                if item.url in seen_urls:
+                    continue
+                seen_urls.add(item.url)
+                merged.append(item)
+                if len(merged) >= cap:
+                    break
+            if len(merged) >= cap:
+                break
+
+        if not merged and errors:
+            raise WebSearchError("; ".join(errors))
+        return merged[:cap]
 
     def build_context_block(self, query: str, *, limit: int = 5) -> str:
         results = self.search(query, limit=limit)
@@ -58,59 +116,47 @@ class WebSearchService:
             return "Web search was enabled, but no public web results were found."
         lines = [
             "Web search findings (public internet, verify before relying on unstable details):",
+            f"Providers: {', '.join(self.provider_names)}",
         ]
         for index, result in enumerate(results, start=1):
-            lines.append(f"{index}. {result.title}")
+            lines.append(f"{index}. [{result.provider}] {result.title}")
             lines.append(f"   URL: {result.url}")
             if result.snippet:
                 lines.append(f"   Note: {result.snippet}")
         return "\n".join(lines)
 
     def search_payload(self, query: str, *, limit: int = 5) -> dict[str, object]:
+        normalized = " ".join(str(query or "").split())
+        results = self.search(query, limit=limit)
         return {
-            "query": " ".join(str(query or "").split()),
+            "query": normalized,
+            "providers": list(self.provider_names),
             "results": [
-                {"title": item.title, "url": item.url, "snippet": item.snippet}
-                for item in self.search(query, limit=limit)
+                {
+                    "title": item.title,
+                    "url": item.url,
+                    "snippet": item.snippet,
+                    "provider": item.provider,
+                }
+                for item in results
             ],
         }
 
-    def _parse_results(self, content: str, limit: int) -> list[WebSearchResult]:
-        anchors = list(_ANCHOR_RE.finditer(content))
-        snippets = list(_SNIPPET_RE.finditer(content))
-        results: list[WebSearchResult] = []
-        for index, match in enumerate(anchors):
-            if len(results) >= limit:
-                break
-            title = self._clean_text(match.group("title"))
-            url = self._normalize_url(html.unescape(match.group("href")))
-            snippet_match = snippets[index] if index < len(snippets) else None
-            snippet_html = ""
-            if snippet_match:
-                snippet_html = snippet_match.group("snippet") or snippet_match.group("div_snippet") or ""
-            snippet = self._clean_text(snippet_html)
-            if not title or not url:
-                continue
-            results.append(
-                WebSearchResult(
-                    title=title,
-                    url=url,
-                    snippet=snippet[:_MAX_SNIPPET_LENGTH].rstrip(),
-                )
-            )
-        return results
 
-    def _clean_text(self, value: str) -> str:
-        normalized = _TAG_RE.sub(" ", value or "")
-        normalized = html.unescape(normalized)
-        return " ".join(normalized.split())
+_WEB_SEARCH_HINTS: Final[tuple[str, ...]] = (
+    "web search",
+    "web_search",
+    "search provider",
+    "search the web",
+    "duckduckgo",
+    "github.com",
+    "google.com",
+    "x.com",
+)
 
-    def _normalize_url(self, value: str) -> str:
-        parsed = urlparse(value)
-        query = parse_qs(parsed.query)
-        redirected = query.get("uddg")
-        if redirected and redirected[0]:
-            return html.unescape(redirected[0])
-        if value.startswith("//"):
-            return f"https:{value}"
-        return value
+
+def infer_allow_web_search(description: str, explicit: bool | None = None) -> bool:
+    if explicit is not None:
+        return bool(explicit)
+    lower = str(description or "").lower()
+    return any(marker in lower for marker in _WEB_SEARCH_HINTS)

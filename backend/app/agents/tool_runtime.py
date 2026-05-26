@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
+from app.core.exceptions import CommandRejectedError, NotFoundError, PathTraversalError
 from app.core.logging import read_log_lines
 from app.db.models import ProjectModel, RunModel
 from app.services.file_service import FileService
@@ -128,7 +129,11 @@ def _web_search(arguments: dict[str, Any], _context: PipelineToolExecutionContex
 PIPELINE_BASE_TOOLS: dict[str, PipelineToolSpec] = {
     "read_file": PipelineToolSpec(
         name="read_file",
-        description="Read a file from the run workspace.",
+        description=(
+            "Read an existing file from the run workspace by relative path. "
+            "Use list_files or search_files to discover paths first. "
+            "Tool names (e.g. web_search) are not files — call those tools directly."
+        ),
         parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
         handler=_read_file,
     ),
@@ -184,7 +189,11 @@ PIPELINE_BASE_TOOLS: dict[str, PipelineToolSpec] = {
 
 PIPELINE_WEB_SEARCH_TOOL = PipelineToolSpec(
     name="web_search",
-    description="Search the public web for current external information relevant to the task.",
+    description=(
+        "Search the public web for current external information. "
+        "Providers are configured in WEB_SEARCH_PROVIDERS (duckduckgo, github, google, x). "
+        "Invoke by tool name — not a workspace file."
+    ),
     parameters={
         "type": "object",
         "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
@@ -220,6 +229,10 @@ class PipelineToolRuntime:
             self.on_tool_event("start", {"tool": tool_name, "arguments": arguments})
         try:
             result = tool.handler(arguments, self.context)
+        except (NotFoundError, PathTraversalError, CommandRejectedError, ValueError) as exc:
+            if self.on_tool_event:
+                self.on_tool_event("error", {"tool": tool_name, "arguments": arguments, "error": str(exc)})
+            return json.dumps({"ok": False, "error": str(exc), "tool": tool_name})
         except Exception as exc:
             if self.on_tool_event:
                 self.on_tool_event("error", {"tool": tool_name, "arguments": arguments, "error": str(exc)})

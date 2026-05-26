@@ -256,6 +256,9 @@ def list_projects(db: Session = Depends(get_db)):
 def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
     svc = ProjectService(db)
     p = svc.create(data)
+    from app.services.setup_run_service import trigger_setup_run
+
+    trigger_setup_run(db, p.id)
     return _project_to_response(p, db)
 
 
@@ -409,16 +412,15 @@ def rename_file(project_id: str, path: str, body: dict, db: Session = Depends(ge
 
 @router.post("/tasks")
 def create_task(data: TaskCreate, db: Session = Depends(get_db)):
-    task, run = create_task_and_run(
-        db,
-        {
-            "project_id": data.project_id,
-            "description": data.description,
-            "validation_profile": data.validation_profile,
-            "use_scout": data.use_scout,
-            "allow_web_search": data.allow_web_search,
-        },
-    )
+    task_payload: dict[str, object] = {
+        "project_id": data.project_id,
+        "description": data.description,
+        "validation_profile": data.validation_profile,
+        "use_scout": data.use_scout,
+    }
+    if "allow_web_search" in data.model_fields_set:
+        task_payload["allow_web_search"] = data.allow_web_search
+    task, run = create_task_and_run(db, task_payload)
     chat_session_id = RunThreadService(db).ensure_session(run.id)
     db.refresh(run)
     return {
@@ -511,7 +513,9 @@ def run_events(run_id: str, db: Session = Depends(get_db)):
             "stage": e.stage,
             "severity": e.severity,
             "message": e.message,
-            "payload": json.loads(e.payload_json),
+            "payload": (payload := json.loads(e.payload_json)),
+            "outcome_class": payload.get("outcome_class"),
+            "why_blocked": payload.get("why_blocked"),
             "created_at": e.created_at.isoformat(),
         }
         for e in events
@@ -535,8 +539,8 @@ def clarify_run(run_id: str, body: ClarifyRequest, db: Session = Depends(get_db)
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
     if not run:
         raise HTTPException(404, "Run not found")
-    if run.status != "awaiting_clarification":
-        raise HTTPException(400, "Run is not awaiting clarification")
+    if run.status not in ("awaiting_clarification", "awaiting_design_review"):
+        raise HTTPException(400, "Run is not awaiting clarification or design review")
     question = run.clarification_question or "Clarification requested"
     clarification_context = dict(run.clarification_context or {})
     clarification_context["question"] = question
@@ -561,6 +565,11 @@ def clarify_run(run_id: str, body: ClarifyRequest, db: Session = Depends(get_db)
     target_stage = run.clarification_stage or run.current_stage or "planner"
     run.status = "running"
     run.current_stage = target_stage
+    if run.status == "awaiting_design_review":
+        history = list(clarification_context.get("design_review_history") or [])
+        history.append({"question": question, "answer": body.answer.strip()})
+        clarification_context["design_review_history"] = history
+        clarification_context["design_review_answered"] = True
     run.clarification_question = None
     run.clarification_stage = None
     db.commit()
@@ -721,9 +730,13 @@ def reject_run(run_id: str, body: RejectRequest, db: Session = Depends(get_db)):
 
 @router.post("/runs/{run_id}/retry")
 def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depends(get_db)):
+    from pathlib import Path
+
     from app.core.enums import RunStatus
-    from app.db.models import ArtifactModel, RunModel
+    from app.db.models import ArtifactModel, RunModel, TaskModel
+    from app.services.learning_service import infer_task_kind
     from app.services.orchestration_service import claim_run
+    from app.services.workspace_service import reset_run_workspace
 
     run = db.query(RunModel).filter(RunModel.id == run_id).first()
     if not run:
@@ -749,12 +762,27 @@ def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depen
     run.approval_reached = False
     run.promote_rolled_back = False
     run.approval_override = False
+    task = db.query(TaskModel).filter(TaskModel.id == run.task_id).first()
+    if task and task.description:
+        kind = infer_task_kind(task.description)
+        run.task_kind = kind
+        task.task_kind = kind
+    project = ProjectService(db).get(run.project_id)
+    if project and project.source_repo_spec:
+        workspace = reset_run_workspace(Path(project.source_repo_spec), run_id)
+        run.workspace_path = str(workspace)
+    prior_clarification = dict(run.clarification_context or {})
+    preserved = {
+        k: prior_clarification[k]
+        for k in ("resolved_gates", "design_review_history", "history")
+        if k in prior_clarification
+    }
     run.clarification_question = None
     run.clarification_stage = None
-    run.clarification_context_json = "{}"
+    run.clarification_context_json = json.dumps(preserved)
     from app.services.visual_evidence_service import clear_visual_evidence_artifacts
 
-    for artifact_type in ("test_plan", "visual_evidence", "pre_deploy_supervisor"):
+    for artifact_type in ("test_plan", "visual_evidence", "pre_deploy_supervisor", "recon"):
         db.query(ArtifactModel).filter(
             ArtifactModel.run_id == run_id,
             ArtifactModel.artifact_type == artifact_type,
@@ -773,8 +801,14 @@ def retry_run(run_id: str, body: RetryRequest | None = None, db: Session = Depen
         entry_type="run_retried",
         stage=run.current_stage,
         severity="info",
-        message="Pipeline retry started" + (f": {body.feedback.strip()}" if body and body.feedback else ""),
-        payload={"feedback": body.feedback.strip() if body and body.feedback else ""},
+        message="Pipeline retry started"
+        + (f": {body.feedback.strip()}" if body and body.feedback else "")
+        + ("; workspace reset from source" if project and project.source_repo_spec else ""),
+        payload={
+            "feedback": body.feedback.strip() if body and body.feedback else "",
+            "workspace_reset": bool(project and project.source_repo_spec),
+            "task_kind": run.task_kind,
+        },
     )
     persist_run_truth(db, run_id)
     if claim_run(db, run.id):

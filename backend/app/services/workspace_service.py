@@ -22,6 +22,9 @@ _SKIP_NAMES = frozenset({
     "app.db",
     "app.db-shm",
     "app.db-wal",
+    "test_app.db",
+    "test_app.db-shm",
+    "test_app.db-wal",
     "logs",
     "runtime",
 })

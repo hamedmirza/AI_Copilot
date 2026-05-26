@@ -16,6 +16,25 @@ class ChatToolCall:
     arguments: dict[str, Any] = field(default_factory=dict)
 
 
+def format_openai_tool_calls(tool_calls: list[ChatToolCall]) -> list[dict[str, Any]]:
+    """OpenAI chat completions expect type=function and arguments as a JSON string."""
+    formatted: list[dict[str, Any]] = []
+    for call in tool_calls:
+        args = call.arguments
+        if isinstance(args, str):
+            args_str = args
+        else:
+            args_str = json.dumps(args if isinstance(args, dict) else {})
+        formatted.append(
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {"name": call.name, "arguments": args_str},
+            }
+        )
+    return formatted
+
+
 @dataclass
 class ChatCompletionResult:
     content: str = ""
