@@ -30,6 +30,8 @@ class EventBus:
         queues = self._run_queues.get(run_id, [])
         if queue in queues:
             queues.remove(queue)
+        if not queues:
+            self._run_queues.pop(run_id, None)
 
     def subscribe_global(self) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue()
@@ -60,6 +62,8 @@ class EventBus:
         queues = self._chat_queues.get(session_id, [])
         if queue in queues:
             queues.remove(queue)
+        if not queues:
+            self._chat_queues.pop(session_id, None)
 
     def emit_chat(self, session_id: str, event: dict[str, Any]) -> None:
         loop = self._loop

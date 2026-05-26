@@ -43,6 +43,20 @@ export function stageStatusFromEvents(
   return 'pending'
 }
 
+export function applyRunEventToStatus(
+  setRunStatus: (status: string, stage?: string | null) => void,
+  ev: Record<string, unknown>,
+) {
+  const type = String(ev.type || '')
+  if (type === 'run_clarification_requested') setRunStatus('awaiting_clarification', String(ev.stage || ''))
+  else if (type === 'awaiting_approval') setRunStatus('awaiting_approval', String(ev.stage || ''))
+  else if (type === 'run_blocked') setRunStatus('blocked', String(ev.stage || ''))
+  else if (type === 'run_failed') setRunStatus('failed', String(ev.stage || ''))
+  else if (type === 'run_completed') setRunStatus('completed', String(ev.stage || ''))
+  else if (type === 'run_changes_requested') setRunStatus('changes_requested', String(ev.stage || ''))
+  else if (type.endsWith('_started')) setRunStatus('running', type.replace('_started', ''))
+}
+
 export function runStatusFromEvents(events: RunEvent[], fallback = 'pending'): string {
   if (events.length === 0) return fallback
   const types = new Set(events.map((e) => e.type))
@@ -94,18 +108,31 @@ const ACTIVITY_VISIBLE_TYPES = new Set([
   ...SIGNIFICANT_EVENT_TYPES,
 ])
 
-const ACTIVE_RUN_STATUSES = new Set([
+/** Run is still executing or waiting on user input — enable live UI timers. */
+const IN_PROGRESS_RUN_STATUSES = new Set([
   'pending',
   'running',
   'awaiting_clarification',
   'awaiting_approval',
   'awaiting_design_review',
-  'blocked',
-  'changes_requested',
 ])
 
+/** HTTP poll while status may still change (excludes terminal pipeline outcomes). */
+const POLLABLE_RUN_STATUSES = IN_PROGRESS_RUN_STATUSES
+
+export const MAX_RUN_EVENTS_PER_RUN = 500
+
 export function isActiveRunStatus(status: string): boolean {
-  return ACTIVE_RUN_STATUSES.has(status)
+  return IN_PROGRESS_RUN_STATUSES.has(status)
+}
+
+export function shouldPollRunStatus(status: string): boolean {
+  return POLLABLE_RUN_STATUSES.has(status)
+}
+
+export function trimRunEvents(events: RunEvent[]): RunEvent[] {
+  if (events.length <= MAX_RUN_EVENTS_PER_RUN) return events
+  return events.slice(-MAX_RUN_EVENTS_PER_RUN)
 }
 
 export function runEventDedupeKey(event: RunEvent): string {
@@ -134,7 +161,7 @@ export function appendRunEventDeduped(existing: RunEvent[], raw: Record<string, 
   const next = normalizeRunEvent(raw)
   const key = runEventDedupeKey(next)
   if (existing.some((e) => runEventDedupeKey(e) === key)) return existing
-  return [...existing, next]
+  return trimRunEvents([...existing, next])
 }
 
 export function isActivityVisibleRunEvent(event: RunEvent): boolean {

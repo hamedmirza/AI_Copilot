@@ -1,31 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '@/api/client'
-import { useWebSocket } from '@/hooks/useWebSocket'
+import { subscribeGlobalRunEvents } from '@/lib/globalRunEvents'
 import {
+  applyRunEventToStatus,
   isActiveRunStatus,
   latestActivityLineFromEvents,
   normalizeRunEvents,
   runStatusFromEvents,
+  shouldPollRunStatus,
 } from '@/lib/runEvents'
 import { parseApiDateTime } from '@/lib/datetime'
 import type { RunDetail, RunEvent } from '@/types/runs'
 import { useRunStore } from '@/store'
 
 const EMPTY_RUN_EVENTS: RunEvent[] = []
-
-function applyRunEventToStatus(
-  setRunStatus: (status: string, stage?: string | null) => void,
-  ev: Record<string, unknown>,
-) {
-  const type = String(ev.type || '')
-  if (type === 'run_clarification_requested') setRunStatus('awaiting_clarification', String(ev.stage || ''))
-  else if (type === 'awaiting_approval') setRunStatus('awaiting_approval', String(ev.stage || ''))
-  else if (type === 'run_blocked') setRunStatus('blocked', String(ev.stage || ''))
-  else if (type === 'run_failed') setRunStatus('failed', String(ev.stage || ''))
-  else if (type === 'run_completed') setRunStatus('completed', String(ev.stage || ''))
-  else if (type === 'run_changes_requested') setRunStatus('changes_requested', String(ev.stage || ''))
-  else if (type.endsWith('_started')) setRunStatus('running', type.replace('_started', ''))
-}
+const RUN_POLL_INTERVAL_MS = 2000
 
 export function useRunLive(runId: string | null, options?: { syncPanel?: boolean; enabled?: boolean }) {
   const enabled = options?.enabled !== false && Boolean(runId)
@@ -82,27 +71,25 @@ export function useRunLive(runId: string | null, options?: { syncPanel?: boolean
     }
   }, [runId, enabled, hydrate])
 
-  const onWsEvent = useCallback((data: unknown) => {
-    if (!runId) return
-    const ev = data as Record<string, unknown>
-    const eventRunId = String(ev.run_id || '')
-    if (eventRunId && eventRunId !== runId) return
-    appendRunEvent(runId, ev)
-    if (syncPanel) applyRunEventToStatus(setRunStatus, ev)
-    const type = String(ev.type || '')
-    if (type.includes('complete') || type === 'run_completed' || type === 'run_failed') {
-      void api.runs.get(runId).then((run) => {
-        setDetail(run as RunDetail)
-        if (syncPanel) {
-          const r = run as RunDetail
-          setRunStatus(r.status, r.current_stage || '')
-        }
-      }).catch(() => undefined)
-    }
-  }, [appendRunEvent, runId, setRunStatus, syncPanel])
-
-  useWebSocket(runId && enabled ? `/api/ws/runs/${runId}` : '', onWsEvent, Boolean(runId && enabled))
-  useWebSocket('/api/ws/events', onWsEvent, Boolean(runId && enabled))
+  useEffect(() => {
+    if (!runId || !enabled) return
+    return subscribeGlobalRunEvents((ev) => {
+      const eventRunId = String(ev.run_id || '')
+      if (eventRunId && eventRunId !== runId) return
+      appendRunEvent(runId, ev)
+      if (syncPanel) applyRunEventToStatus(setRunStatus, ev)
+      const type = String(ev.type || '')
+      if (type.includes('complete') || type === 'run_completed' || type === 'run_failed') {
+        void api.runs.get(runId).then((run) => {
+          setDetail(run as RunDetail)
+          if (syncPanel) {
+            const r = run as RunDetail
+            setRunStatus(r.status, r.current_stage || '')
+          }
+        }).catch(() => undefined)
+      }
+    })
+  }, [appendRunEvent, enabled, runId, setRunStatus, syncPanel])
 
   const status = detail?.status || runStatusFromEvents(events, 'pending')
   const currentStage = detail?.current_stage ?? (
@@ -110,7 +97,7 @@ export function useRunLive(runId: string | null, options?: { syncPanel?: boolean
   )
 
   useEffect(() => {
-    if (!runId || !enabled || !isActiveRunStatus(status)) return
+    if (!runId || !enabled || !shouldPollRunStatus(status)) return
     const poll = window.setInterval(() => {
       void api.runs.events(runId)
         .then((rows) => {
@@ -121,7 +108,7 @@ export function useRunLive(runId: string | null, options?: { syncPanel?: boolean
       void api.runs.get(runId)
         .then((run) => setDetail(run as RunDetail))
         .catch(() => undefined)
-    }, 2000)
+    }, RUN_POLL_INTERVAL_MS)
     return () => window.clearInterval(poll)
   }, [enabled, runId, setRunEvents, status])
 

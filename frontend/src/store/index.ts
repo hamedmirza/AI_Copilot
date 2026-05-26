@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { ModelsApiResponse } from '@/lib/lmstudioModels'
 import type { ModelsCacheEntry, ProviderKind } from '@/lib/providerModels'
-import { appendRunEventDeduped, dedupeRunEvents, normalizeRunEvent } from '@/lib/runEvents'
+import { appendRunEventDeduped, dedupeRunEvents, normalizeRunEvent, trimRunEvents } from '@/lib/runEvents'
 import type { RunEvent } from '@/types/runs'
 
 export type { RunEvent }
@@ -541,7 +541,7 @@ export const useRunStore = create<RunState>((set, get) => ({
   },
   setRunEvents: (runId, events) =>
     set((s) => {
-      const deduped = dedupeRunEvents(events)
+      const deduped = trimRunEvents(dedupeRunEvents(events))
       const patch: Partial<RunState> = {
         runEventsByRunId: { ...s.runEventsByRunId, [runId]: deduped },
       }
